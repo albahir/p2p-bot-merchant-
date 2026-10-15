@@ -29,6 +29,6 @@ class BCVService:
                         return float(price)
             logger.warning("No se pudo obtener tasa BCV de la API externa, usando valor de referencia.")
             return 36.5
-        except Exception as e:
+        except (httpx.RequestError, ValueError) as e:
             logger.error(f"Error consultando tasa BCV: {e}")
             return 36.5

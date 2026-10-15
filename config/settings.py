@@ -3,7 +3,7 @@ Aplica principios fail-closed: si variables críticas como MASTER_ENCRYPTION_KEY
 o SERVER_IP_WHITELIST no están presentes o son inválidas, la carga falla.
 """
 
-from typing import List
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -58,14 +58,14 @@ class Settings(BaseSettings):
         return cleaned
 
     @property
-    def ip_whitelist(self) -> List[str]:
+    def ip_whitelist(self) -> list[str]:
         return [ip.strip() for ip in self.SERVER_IP_WHITELIST.split(",") if ip.strip()]
 
     @property
-    def telegram_allowed_users(self) -> List[int]:
+    def telegram_allowed_users(self) -> list[int]:
         if not self.TELEGRAM_ALLOWED_USER_IDS:
             return []
-        users: List[int] = []
+        users: list[int] = []
         for uid in self.TELEGRAM_ALLOWED_USER_IDS.split(","):
             cleaned = uid.strip()
             if cleaned.isdigit():

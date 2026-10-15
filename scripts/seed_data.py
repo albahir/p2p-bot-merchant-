@@ -1,15 +1,17 @@
 """Script de generación de datos de prueba para desarrollo local.
 """
 
-import sys
 import logging
-from datetime import datetime, timezone
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Asegurar que la raíz del proyecto esté en sys.path para ejecuciones directas
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.data.database import SessionLocal
 from src.data.models import Order
@@ -34,7 +36,7 @@ def main():
                 fee_fiat=0.0,
                 fee_crypto=0.0,
                 order_status="COMPLETED",
-                created_at=datetime.now(timezone.utc)
+                created_at=datetime.now(UTC)
             ),
             Order(
                 order_number="ORDER_TEST_002",
@@ -48,13 +50,13 @@ def main():
                 fee_fiat=5.0,
                 fee_crypto=0.0,
                 order_status="COMPLETED",
-                created_at=datetime.now(timezone.utc)
+                created_at=datetime.now(UTC)
             )
         ]
         db.add_all(sample_orders)
         db.commit()
         logger.info(f"Insertadas {len(sample_orders)} órdenes de prueba con éxito.")
-    except Exception as e:
+    except SQLAlchemyError as e:
         logger.error(f"Error al sembrar datos: {e}")
         db.rollback()
     finally:

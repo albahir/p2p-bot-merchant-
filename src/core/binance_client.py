@@ -62,7 +62,7 @@ class BinanceP2PClient:
                     self.time_offset_ms = data.serverTime - local_now
                     logger.info(f"Sincronización horaria con Binance exitosa. Offset: {self.time_offset_ms}ms")
                     return self.time_offset_ms
-        except Exception as e:
+        except (httpx.RequestError, ValueError) as e:
             logger.warning(f"No se pudo consultar /api/v3/time ({e}). Usando hora local.")
         return 0
 

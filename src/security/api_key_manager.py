@@ -6,7 +6,9 @@ import binascii
 import logging
 import os
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.data.database import SessionLocal
 from src.data.repositories import SecurityRepository
@@ -31,7 +33,7 @@ class ApiKeyManager:
         if len(master_key) == 64:
             try:
                 self._key_bytes = binascii.unhexlify(master_key)
-            except Exception:
+            except (binascii.Error, TypeError):
                 self._key_bytes = master_key[:32].encode("utf-8")
         else:
             self._key_bytes = master_key[:32].encode("utf-8")
@@ -67,7 +69,7 @@ class ApiKeyManager:
                 ip_address=ip_address,
                 status="SUCCESS"
             )
-        except Exception as e:
+        except SQLAlchemyError as e:
             self.audit.log(
                 event_type="STORE_SECRET",
                 key_identifier=key_name,
@@ -110,7 +112,7 @@ class ApiKeyManager:
             return decrypted_bytes.decode("utf-8")
         except KeyError:
             raise
-        except Exception as e:
+        except (SQLAlchemyError, binascii.Error, InvalidTag) as e:
             self.audit.log(
                 event_type="READ_SECRET",
                 key_identifier=key_name,

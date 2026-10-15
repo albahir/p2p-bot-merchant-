@@ -10,7 +10,11 @@ import time
 
 import src.data.models  # noqa: F401
 from config.settings import Settings
-from src.core.binance_client import BinanceP2PClient
+from src.core.binance_client import (
+    BinanceAuthError,
+    BinanceP2PClient,
+    BinanceWeightExceededError,
+)
 from src.core.history_ingestor import HistoryIngestor
 from src.data.database import Base, SessionLocal, engine
 from src.integrations.telegram_notifier import TelegramNotifier
@@ -40,7 +44,7 @@ class P2PBotEngine:
         try:
             self.settings = Settings()
             logger.info("Configuración de entorno cargada correctamente.")
-        except Exception as e:
+        except (ValueError, RuntimeError) as e:
             logger.critical(f"FAIL-CLOSED: Error cargando configuración: {e}")
             sys.exit(1)
 
@@ -105,7 +109,7 @@ class P2PBotEngine:
                 ingestor = HistoryIngestor(self.client, SessionLocal)
                 count = ingestor.ingest_recent_orders(trade_type="BUY", days_back=1)
                 logger.info(f"Sincronización completada: {count} órdenes procesadas.")
-            except Exception as e:
+            except (RuntimeError, BinanceAuthError, BinanceWeightExceededError) as e:
                 logger.error(f"Error en ciclo de sincronización Binance: {e}")
                 self.notifier.send_alert(f"⚠️ Error en sincronización Binance: {e}")
         else:

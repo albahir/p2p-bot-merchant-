@@ -50,6 +50,8 @@
 5. **No-Retry ante Fallos de Autenticación**: Respuestas 401, 403, `-2014` y `-2015` detienen inmediatamente las peticiones para no saturar el WAF de Binance ni arriesgar baneo de IP (HTTP 418).
 6. **Simulación Realista de Arbitraje P2P**: El mock de Binance emula compras y ventas con spread comerciante (~2.5% a 3.0%), comisiones maker/taker y conversión oficial BCV. La ingesta es estrictamente idempotente.
 7. **Interactividad del Sandbox y Ordenación en UI**: La tabla de transacciones de la UI se ordena por `Order.id.desc()` para que los registros recién insertados aparezcan siempre en la primera fila. Se añadieron controles para generar ciclos comerciales en vivo (`➕ Simular Nuevo Ciclo`) y limpiar historial (`🗑️ Limpiar Historial de Prueba`).
+8. **Erradicación de Blind Exceptions (BLE001)**: Sustitución de cláusulas genéricas `except Exception` por excepciones acotadas de base de datos (`SQLAlchemyError`), red (`httpx.RequestError`), criptografía (`InvalidTag`, `UnsupportedAlgorithm`), y validación de tipos (`ValueError`, `TypeError`, `OSError`), garantizando observabilidad y pasando el linter estático de CI en verde.
+9. **Sincronización Total del Entorno Virtual (`.venv`)**: Se generó [`requirements.txt`](file:///c:/p2p-bot-merchant/requirements.txt) y se instalaron todas las dependencias en `.venv` junto al paquete local en modo editable (`pip install -e .`), garantizando resolución inmediata de rutas `src` y `config` en VS Code y PyCharm.
 
 ---
 

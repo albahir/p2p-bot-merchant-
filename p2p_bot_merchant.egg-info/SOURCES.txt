@@ -7,8 +7,12 @@ p2p_bot_merchant.egg-info/dependency_links.txt
 p2p_bot_merchant.egg-info/requires.txt
 p2p_bot_merchant.egg-info/top_level.txt
 src/__init__.py
+src/main.py
 src/core/__init__.py
 src/core/binance_client.py
+src/core/binance_mock.py
+src/core/binance_schemas.py
+src/core/concurrency.py
 src/core/history_ingestor.py
 src/data/__init__.py
 src/data/database.py
@@ -23,8 +27,12 @@ src/reporting/sheets_exporter.py
 src/reporting/tax_engine.py
 src/reporting/dashboard/app.py
 src/reporting/dashboard/components/__init__.py
+src/reporting/dashboard/components/control_actions.py
+src/reporting/dashboard/components/credential_manager.py
 src/reporting/dashboard/components/kpi_cards.py
+src/reporting/dashboard/components/test_runner_view.py
 src/security/__init__.py
 src/security/api_key_manager.py
 src/security/audit_logger.py
+src/security/key_validator.py
 src/security/permissions.py

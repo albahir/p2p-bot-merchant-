@@ -22,7 +22,7 @@ def render_credential_manager():
             audit_logger=audit,
             db_session_factory=SessionLocal
         )
-    except Exception as e:
+    except (ValueError, ImportError) as e:
         st.error(f"Error cargando gestor de claves: {e}")
         return
 

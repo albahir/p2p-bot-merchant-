@@ -1,5 +1,4 @@
 # Script de diagnóstico rápido para verificar conexión a Telegram
-import os
 import sys
 from pathlib import Path
 
@@ -7,8 +6,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import Settings
 import httpx
+
+from config.settings import Settings
+
 
 def test_telegram_connection():
     print("==> Verificando credenciales de Telegram desde config/.env...")
@@ -34,7 +35,7 @@ def test_telegram_connection():
         else:
             print(f"FAILED getMe: Código HTTP {res.status_code} -> {data.get('description')}")
             return
-    except Exception as e:
+    except (httpx.RequestError, ValueError) as e:
         print(f"FAILED conectando con Telegram API: {e}")
         return
 
@@ -63,7 +64,7 @@ def test_telegram_connection():
                 if attempt < 2:
                     import time
                     time.sleep(1)
-            except Exception as e:
+            except (httpx.RequestError, ValueError) as e:
                 print(f"FAILED enviando mensaje: {e}")
                 return
     print("FAILED: No se pudo completar el envío tras 3 intentos. Revisa tu conexión de red o DNS.")

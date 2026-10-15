@@ -1,9 +1,9 @@
 """Script interactivo de rotación de credenciales cifradas (AES-256-GCM).
 """
 
-import sys
 import getpass
 import logging
+import sys
 from pathlib import Path
 
 # Asegurar que la raíz del proyecto esté en sys.path para ejecuciones directas
@@ -34,7 +34,7 @@ def main():
 
         manager.store_secret(key_name, new_secret)
         logger.info(f"Clave '{key_name}' rotada y cifrada exitosamente con AES-256-GCM.")
-    except Exception as e:
+    except (ValueError, RuntimeError, OSError) as e:
         logger.error(f"Error rotando clave: {e}")
         sys.exit(1)
 

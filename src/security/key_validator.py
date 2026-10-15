@@ -2,6 +2,7 @@
 
 import logging
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -52,5 +53,5 @@ class KeyValidator:
             return cleaned
         except KeyValidationError:
             raise
-        except Exception as e:
+        except (ValueError, TypeError, UnsupportedAlgorithm) as e:
             raise KeyValidationError(f"Error procesando la clave privada PEM: Formato corrupto o contraseña requerida ({e})")

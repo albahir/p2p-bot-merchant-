@@ -89,7 +89,7 @@ class TelegramNotifier:
                 logger.error(f"TELEGRAM: {err_msg}")
                 self.last_error = err_msg
                 return False
-            except Exception as e:
+            except (httpx.RequestError, ValueError, TypeError) as e:
                 err_msg = str(e)
                 logger.error(f"TELEGRAM: Excepción inesperada: {err_msg}")
                 self.last_error = err_msg
