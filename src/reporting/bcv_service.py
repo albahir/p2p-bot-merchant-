@@ -1,7 +1,7 @@
 """Servicio de consulta y registro de la tasa de cambio oficial del BCV (Banco Central de Venezuela)."""
 
 import logging
-from typing import Optional
+
 import httpx
 
 logger = logging.getLogger("bcv_service")

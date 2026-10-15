@@ -3,7 +3,7 @@ Comportamiento Fail-closed: si la IP no coincide con la lista blanca, el sistema
 """
 
 import logging
-from typing import List
+
 from config.settings import Settings
 from src.security.audit_logger import AuditLogger
 
@@ -22,7 +22,7 @@ class StartupPermissionValidator:
         
         Fail-closed: si la IP no está autorizada, levanta PermissionError e impide el arranque.
         """
-        whitelist: List[str] = self.settings.ip_whitelist
+        whitelist: list[str] = self.settings.ip_whitelist
 
         # Si 0.0.0.0 está en whitelist, se permite en entorno dev
         if "0.0.0.0" in whitelist or current_ip in whitelist:

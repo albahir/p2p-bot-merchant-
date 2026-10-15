@@ -4,6 +4,13 @@
 import sys
 import getpass
 import logging
+from pathlib import Path
+
+# Asegurar que la raíz del proyecto esté en sys.path para ejecuciones directas
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from config.settings import Settings
 from src.security.api_key_manager import ApiKeyManager
 from src.security.audit_logger import AuditLogger

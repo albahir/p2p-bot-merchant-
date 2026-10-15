@@ -2,11 +2,12 @@
 Decodifica únicamente en memoria volátil. Nunca persiste secretos en texto plano.
 """
 
-import os
 import binascii
 import logging
-from typing import Optional
+import os
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from src.data.database import SessionLocal
 from src.data.repositories import SecurityRepository
 from src.security.audit_logger import AuditLogger
@@ -20,7 +21,7 @@ class ApiKeyManager:
     def __init__(
         self,
         master_key: str,
-        audit_logger: Optional[AuditLogger] = None,
+        audit_logger: AuditLogger | None = None,
         db_session_factory=SessionLocal
     ):
         if not master_key or len(master_key) < 32:

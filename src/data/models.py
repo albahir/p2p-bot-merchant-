@@ -2,8 +2,10 @@
 Incluye modelos para eventos de seguridad (auditoría append-only), secretos cifrados y órdenes de Binance.
 """
 
-from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text
+from datetime import UTC, datetime
+
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text
+
 from src.data.database import Base
 
 
@@ -12,7 +14,7 @@ class SecurityEvent(Base):
     __tablename__ = "security_events"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     event_type = Column(String(50), nullable=False)  # READ, WRITE, ROTATE, IP_CHECK, FAILED_ACCESS
     key_identifier = Column(String(100), nullable=False)
     ip_address = Column(String(45), nullable=False)
@@ -30,11 +32,11 @@ class EncryptedSecret(Base):
     nonce = Column(String(64), nullable=False)
     ciphertext = Column(Text, nullable=False)
     tag = Column(String(64), nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     updated_at = Column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
         nullable=False
     )
 

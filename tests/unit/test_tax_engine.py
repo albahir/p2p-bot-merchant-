@@ -1,17 +1,20 @@
 """Tests unitarios para el motor fiscal (FIFO vs Costo Promedio y generación de informe Excel)."""
 
 import os
+from datetime import UTC, datetime
+
 import openpyxl
-from datetime import datetime, timezone
+
 from src.data.models import Order
-from src.reporting.tax_engine import FIFOCostMethod, WeightedAverageCostMethod
 from src.reporting.excel_reporter import ExcelReporter
+from src.reporting.tax_engine import FIFOCostMethod, WeightedAverageCostMethod
+
 
 def test_fifo_vs_average_cost_calculations():
     orders = [
-        Order(order_number="BUY_1", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=3500.0, crypto_amount=100.0, unit_price=35.0, fee_fiat=10.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(timezone.utc)),
-        Order(order_number="BUY_2", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=4000.0, crypto_amount=100.0, unit_price=40.0, fee_fiat=10.0, bcv_rate=40.0, order_status="COMPLETED", created_at=datetime.now(timezone.utc)),
-        Order(order_number="SELL_1", trade_type="SELL", asset="USDT", fiat="VES", fiat_amount=6750.0, crypto_amount=150.0, unit_price=45.0, fee_fiat=15.0, bcv_rate=40.0, order_status="COMPLETED", created_at=datetime.now(timezone.utc)),
+        Order(order_number="BUY_1", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=3500.0, crypto_amount=100.0, unit_price=35.0, fee_fiat=10.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
+        Order(order_number="BUY_2", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=4000.0, crypto_amount=100.0, unit_price=40.0, fee_fiat=10.0, bcv_rate=40.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
+        Order(order_number="SELL_1", trade_type="SELL", asset="USDT", fiat="VES", fiat_amount=6750.0, crypto_amount=150.0, unit_price=45.0, fee_fiat=15.0, bcv_rate=40.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
     ]
 
     fifo = FIFOCostMethod()
@@ -30,8 +33,8 @@ def test_fifo_vs_average_cost_calculations():
 
 def test_excel_report_generation(tmp_path):
     orders = [
-        Order(order_number="BUY_1", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=3500.0, crypto_amount=100.0, unit_price=35.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(timezone.utc)),
-        Order(order_number="SELL_1", trade_type="SELL", asset="USDT", fiat="VES", fiat_amount=3700.0, crypto_amount=100.0, unit_price=37.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(timezone.utc)),
+        Order(order_number="BUY_1", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=3500.0, crypto_amount=100.0, unit_price=35.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
+        Order(order_number="SELL_1", trade_type="SELL", asset="USDT", fiat="VES", fiat_amount=3700.0, crypto_amount=100.0, unit_price=37.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
     ]
     fifo = FIFOCostMethod()
     results = fifo.process_orders(orders)

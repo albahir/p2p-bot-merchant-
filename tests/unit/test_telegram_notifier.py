@@ -2,6 +2,7 @@
 
 from src.integrations.telegram_notifier import TelegramNotifier, sanitize_message
 
+
 def test_sanitize_message_redacts_secrets():
     message_with_secrets = "Error de conexión: api_key='a1b2c3d4e5f6g7h8' y token: 1234567890abcdef"
     clean = sanitize_message(message_with_secrets)

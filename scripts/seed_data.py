@@ -1,8 +1,16 @@
 """Script de generación de datos de prueba para desarrollo local.
 """
 
+import sys
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Asegurar que la raíz del proyecto esté en sys.path para ejecuciones directas
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.data.database import SessionLocal
 from src.data.models import Order
 
@@ -24,6 +32,7 @@ def main():
                 unit_price=36.5,
                 bcv_rate=36.5,
                 fee_fiat=0.0,
+                fee_crypto=0.0,
                 order_status="COMPLETED",
                 created_at=datetime.now(timezone.utc)
             ),
@@ -37,6 +46,7 @@ def main():
                 unit_price=37.5,
                 bcv_rate=36.5,
                 fee_fiat=5.0,
+                fee_crypto=0.0,
                 order_status="COMPLETED",
                 created_at=datetime.now(timezone.utc)
             )

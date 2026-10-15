@@ -1,8 +1,18 @@
 """Conexión y sesión de base de datos SQLAlchemy."""
 
 import os
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).resolve().parent.parent.parent / "config" / ".env"
+    if env_file.exists():
+        load_dotenv(dotenv_path=env_file)
+except ImportError:
+    pass
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./p2p_bot.db")
 

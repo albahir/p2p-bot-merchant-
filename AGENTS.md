@@ -12,12 +12,23 @@ Sistema automatizado de comercio P2P en Binance con arquitectura Fail-closed, ge
   - `src/core/`: Cliente oficial Binance P2P, monitoreo de `x-mbx-used-weight` e ingesta histórica de órdenes.
   - `src/integrations/`: Notificador de Telegram con sanitización estricta anti-filtración de credenciales y despacho de comandos.
   - `src/reporting/`: Motor fiscal puro (FIFO y Costo Promedio), conversión BCV y exportación a Excel.
-  - `src/reporting/dashboard/`: Dashboard Streamlit para métricas operativas, fiscales y auditoría.
+  - `src/reporting/dashboard/`: Panel de Control y Dashboard Streamlit (Mission Control) para métricas operativas, fiscales, auditoría y control de tareas sin comandos de consola.
 
 > **Nota sobre paquetes 003 y 004**: Los módulos de pricing algorítmico (003) y pasarela bancaria/Open Banking (004) están actualmente pausados por especificación del usuario.
 
+## 👥 Agentes de IA en el Repositorio (`.github/agents/`)
+- `pm.md`: Product Manager y alineación con requisitos funcionales.
+- `architect.md`: Arquitecto de software y decisiones ADR.
+- `backend.md`: Desarrollador backend y servicios core (TDD).
+- `frontend.md`: Desarrollador Frontend & UI/UX (Streamlit, componentes reactivos, seguridad de UI).
+- `security.md`: Ingeniero de Ciberseguridad & Auditor Criptográfico (Hardening, validación de firmas, drift, rate limits).
+- `qa.md`: QA Tester y cobertura de pruebas.
+- `devops.md`: DevOps, Docker y pipelines de CI/CD.
+
 ## 📋 Comandos del Proyecto
 
+- **Iniciar Bot (Engine)**: `python -m src.main` o `make run`
+- **Iniciar Panel / Dashboard**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`
 - **Tests Automatizados**: `pytest` o `make test`
 - **Revisión de Estilo/Types**: `ruff check .` && `mypy src/` o `make lint` / `make typecheck`
 - **Entorno Local con Docker**: `docker compose -f docker/docker-compose.yml up -d` o `make dev`
@@ -28,7 +39,7 @@ Sistema automatizado de comercio P2P en Binance con arquitectura Fail-closed, ge
 2. **Comportamiento Fail-closed**: Ante cualquier timeout, error 5xx, IP no autorizada o ambigüedad, el bot SE DETIENE y alerta al humano.
 3. **Trazabilidad Total**: Cada acción se audita con timestamp, hash encadenado SHA-256 y resultado en `security_events`.
 4. **Límite de API Weight**: Monitorear el header `x-mbx-used-weight`. Si supera 5,000, pausar peticiones por 60 segundos.
-5. **Cero Secretos en Logs**: Prohibido registrar API Keys, tokens de Telegram o contraseñas en logs, excepciones o mensajes salientes.
+5. **Cero Secretos en Logs o UI**: Prohibido registrar API Keys, tokens de Telegram o contraseñas en logs, excepciones, mensajes salientes o mostrarlas en texto plano en la UI.
 6. **Sin RPA No Oficial**: Solo utilizar la API oficial de Binance.
 
 ## 🔄 Protocolo Obligatorio para Agentes (SDD & TDD)
@@ -45,9 +56,3 @@ Todo agente de IA que opere en este repositorio **DEBE** cumplir estrictamente e
    - Mantener el usuario siempre al tanto del avance exacto.
 5. **Jerarquía de Contratos**:
    `constitution.md` (principios raíz) → `spec.md` (requisitos) → `plan.md` (diseño) → `tasks.md` (pasos atómicos).
-
-## 🚨 Límites de Autoridad del Agente
-
-- ✅ **Permitido**: Crear y modificar código dentro de `src/` y `tests/` respetando los requisitos de la tarea activa en `tasks.md`.
-- ⚠️ **Requiere Confirmación Humana**: Modificar el esquema de la base de datos o alterar dependencias en `pyproject.toml`.
-- 🚫 **Estrictamente Prohibido**: Modificar la constitución (`constitution.md`) o eliminar tests existentes sin justificación.

@@ -3,8 +3,8 @@ Módulo puro sin dependencias del motor de trading de Binance.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
 from dataclasses import dataclass
+
 from src.data.models import Order
 
 
@@ -31,16 +31,16 @@ class TradeResult:
 
 class CostMethod(ABC):
     @abstractmethod
-    def process_orders(self, orders: List[Order]) -> List[TradeResult]:
+    def process_orders(self, orders: list[Order]) -> list[TradeResult]:
         pass
 
 
 class FIFOCostMethod(CostMethod):
     """Método FIFO (First-In, First-Out): Las compras más antiguas se liquidan primero."""
 
-    def process_orders(self, orders: List[Order]) -> List[TradeResult]:
-        inventory: List[TaxLot] = []
-        results: List[TradeResult] = []
+    def process_orders(self, orders: list[Order]) -> list[TradeResult]:
+        inventory: list[TaxLot] = []
+        results: list[TradeResult] = []
 
         for order in orders:
             if order.trade_type == "BUY":
@@ -95,10 +95,10 @@ class FIFOCostMethod(CostMethod):
 class WeightedAverageCostMethod(CostMethod):
     """Método de Costo Promedio Ponderado."""
 
-    def process_orders(self, orders: List[Order]) -> List[TradeResult]:
+    def process_orders(self, orders: list[Order]) -> list[TradeResult]:
         total_crypto = 0.0
         total_cost_fiat = 0.0
-        results: List[TradeResult] = []
+        results: list[TradeResult] = []
 
         for order in orders:
             if order.trade_type == "BUY":

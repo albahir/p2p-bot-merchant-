@@ -1,115 +1,163 @@
-"""Dashboard de monitoreo operativo, fiscal y de seguridad con Streamlit.
-Opera en modo solo lectura para garantizar que nunca bloquee el motor de trading.
+"""Dashboard y Panel de Control (Mission Control) para el Bot P2P Merchant.
+Opera en modo seguro, sin requerir comandos de terminal para tareas operativas comunes.
 """
 
-import os
-import streamlit as st
 import pandas as pd
-from datetime import datetime
+import streamlit as st
+
 from src.data.database import SessionLocal
 from src.data.models import Order, SecurityEvent
 from src.data.repositories import OrderRepository
-from src.reporting.tax_engine import FIFOCostMethod, WeightedAverageCostMethod
-from src.reporting.excel_reporter import ExcelReporter
+from src.reporting.dashboard.components.control_actions import render_control_actions
+from src.reporting.dashboard.components.credential_manager import render_credential_manager
 from src.reporting.dashboard.components.kpi_cards import render_kpis
+from src.reporting.dashboard.components.test_runner_view import render_test_runner
+from src.reporting.excel_reporter import ExcelReporter
+from src.reporting.tax_engine import FIFOCostMethod, WeightedAverageCostMethod
 
 st.set_page_config(
-    page_title="P2P Merchant Bot — Dashboard",
-    page_icon="🤖",
+    page_title="P2P Merchant Bot — Mission Control",
+    page_icon=":material/smart_toy:",
     layout="wide"
 )
 
-st.title("🤖 P2P Bot Merchant Binance — Panel de Control")
+st.title(":material/smart_toy: P2P Merchant Bot — Panel de Control")
 
-# Pestañas principales
-tab_overview, tab_tax, tab_security = st.tabs(["📊 Visión General", "📑 Motor Fiscal (ISLR)", "🛡️ Auditoría de Seguridad"])
+# Pestañas de navegación de la interfaz
+tab_control, tab_credentials, tab_overview, tab_tax, tab_tests, tab_security = st.tabs([
+    "🕹️ Panel de Tareas",
+    "🔑 Credenciales",
+    "📊 Visión General",
+    "📑 Motor Fiscal (ISLR)",
+    "🧪 Suite de Tests",
+    "🛡️ Auditoría"
+])
 
-db = SessionLocal()
+# 1. Panel de Tareas (Acciones directas sin consola)
+with tab_control:
+    render_control_actions()
 
+# 2. Gestor de Credenciales Cifradas
+with tab_credentials:
+    render_credential_manager()
+
+# 3. Visión General de Órdenes y KPIs
 with tab_overview:
-    st.subheader("Métricas Operativas")
-    repo = OrderRepository(db)
-    orders = repo.list_completed()
+    st.subheader(":material/monitoring: Métricas Operativas")
+    db = SessionLocal()
+    try:
+        repo = OrderRepository(db)
+        completed_orders = repo.list_completed()
+        all_orders = db.query(Order).order_by(Order.id.desc()).limit(100).all()
 
-    if not orders:
-        st.info("No hay órdenes completadas registradas en el sistema.")
-    else:
-        total_vol = sum(o.fiat_amount for o in orders)
-        fifo_engine = FIFOCostMethod()
-        results = fifo_engine.process_orders(orders)
-        profit_ves = sum(r.net_profit_fiat for r in results)
-        profit_usd = sum(r.net_profit_usd for r in results)
+        if not all_orders:
+            st.info("No hay órdenes registradas en el sistema. Ejecuta una sincronización o simulación desde el Panel de Tareas.")
+        else:
+            if completed_orders:
+                total_vol = sum(o.fiat_amount for o in completed_orders)
+                fifo_engine = FIFOCostMethod()
+                results = fifo_engine.process_orders(completed_orders)
+                profit_ves = sum(r.net_profit_fiat for r in results)
+                profit_usd = sum(r.net_profit_usd for r in results)
 
-        render_kpis(len(orders), total_vol, profit_ves, profit_usd)
+                render_kpis(len(completed_orders), total_vol, profit_ves, profit_usd)
+            else:
+                st.warning("Hay órdenes registradas pero ninguna en estado COMPLETED.")
 
-        st.divider()
-        st.write("### Historial de Transacciones Recientes")
-        data = [
-            {
-                "Orden": o.order_number,
-                "Tipo": o.trade_type,
-                "Activo": o.asset,
-                "Monto Fíat (VES)": o.fiat_amount,
-                "Monto Cripto": o.crypto_amount,
-                "Precio Unitario": o.unit_price,
-                "Fecha (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M")
-            }
-            for o in reversed(orders[-50:])
-        ]
-        st.dataframe(pd.DataFrame(data), use_container_width=True)
+            st.write("---")
+            st.markdown(f"#### Historial de Transacciones (Mostrando {len(all_orders)} más recientes)")
+            data = [
+                {
+                    "ID": o.id,
+                    "Orden": o.order_number,
+                    "Tipo": o.trade_type,
+                    "Estado": o.order_status,
+                    "Activo": o.asset,
+                    "Monto Fíat (VES)": f"{o.fiat_amount:,.2f}",
+                    "Monto Cripto": f"{o.crypto_amount:,.2f}",
+                    "Precio Unitario": f"{o.unit_price:,.4f}",
+                    "Comisión (VES)": f"{o.fee_fiat:,.2f}",
+                    "Tasa BCV": f"{o.bcv_rate:,.2f}",
+                    "Fecha (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M")
+                }
+                for o in all_orders
+            ]
+            st.dataframe(pd.DataFrame(data), width="stretch")
+    finally:
+        db.close()
 
+# 4. Motor Fiscal con Descarga Directa
 with tab_tax:
-    st.subheader("Cálculo y Declaración Fiscal")
-    method_choice = st.radio("Método Contable:", ["FIFO", "Costo Promedio Ponderado"], horizontal=True)
+    st.subheader(":material/calculate: Cálculo y Declaración Fiscal")
+    method_choice = st.segmented_control("Método Contable:", ["FIFO", "Costo Promedio Ponderado"], default="FIFO")
 
-    if orders:
-        engine = FIFOCostMethod() if method_choice == "FIFO" else WeightedAverageCostMethod()
-        tax_results = engine.process_orders(orders)
+    db = SessionLocal()
+    try:
+        repo = OrderRepository(db)
+        orders = repo.list_completed()
+        if not orders:
+            st.info("No hay órdenes completadas para calcular impuestos.")
+        else:
+            engine = FIFOCostMethod() if method_choice == "FIFO" else WeightedAverageCostMethod()
+            tax_results = engine.process_orders(orders)
 
-        tax_data = [
-            {
-                "Orden": r.order_number,
-                "Cripto": r.crypto_amount,
-                "Ingreso (VES)": r.total_revenue_fiat,
-                "Costo Adquisición (VES)": r.acquisition_cost_fiat,
-                "Comisión (VES)": r.fee_fiat,
-                "Ganancia Neta (VES)": r.net_profit_fiat,
-                "Tasa BCV": r.bcv_rate,
-                "Ganancia (USD)": r.net_profit_usd
-            }
-            for r in tax_results
-        ]
-        st.dataframe(pd.DataFrame(tax_data), use_container_width=True)
+            if not tax_results:
+                st.info("No se han registrado ventas (SELL) aún para liquidar inventario.")
+            else:
+                tax_data = [
+                    {
+                        "Orden Venta": r.order_number,
+                        "Cripto Vendida": f"{r.crypto_amount:,.2f} USDT",
+                        "Ingreso Bruto (VES)": f"{r.total_revenue_fiat:,.2f} Bs.",
+                        "Costo Adquisición (VES)": f"{r.acquisition_cost_fiat:,.2f} Bs.",
+                        "Comisión (VES)": f"{r.fee_fiat:,.2f} Bs.",
+                        "Ganancia Neta (VES)": f"{r.net_profit_fiat:,.2f} Bs.",
+                        "Tasa BCV Oficial": f"{r.bcv_rate:,.2f}",
+                        "Ganancia Neta (USD)": f"${r.net_profit_usd:,.2f}"
+                    }
+                    for r in tax_results
+                ]
+                st.dataframe(pd.DataFrame(tax_data), width="stretch")
 
-        if st.button("📥 Generar y Descargar Reporte Excel"):
-            report_file = "reporte_fiscal_p2p.xlsx"
-            ExcelReporter.generate_tax_report(tax_results, report_file)
-            with open(report_file, "rb") as f:
-                st.download_button(
-                    label="Haga clic aquí para descargar el archivo Excel",
-                    data=f.read(),
-                    file_name="reporte_fiscal_p2p.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                # Botón de Descarga Excel
+                report_file = "reporte_fiscal_p2p.xlsx"
+                ExcelReporter.generate_tax_report(tax_results, report_file)
+                with open(report_file, "rb") as f:
+                    st.download_button(
+                        label="📥 Descargar Reporte Fiscal en Excel (.xlsx)",
+                        data=f.read(),
+                        file_name="reporte_fiscal_p2p.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        width="stretch"
+                    )
+    finally:
+        db.close()
 
+# 5. Suite de Tests Automatizados
+with tab_tests:
+    render_test_runner()
+
+# 6. Auditoría de Seguridad (SHA-256)
 with tab_security:
-    st.subheader("Eventos de Auditoría (Append-Only SHA-256)")
-    events = db.query(SecurityEvent).order_by(SecurityEvent.id.desc()).limit(100).all()
-    if not events:
-        st.info("No se han registrado eventos de seguridad aún.")
-    else:
-        events_data = [
-            {
-                "ID": e.id,
-                "Timestamp (UTC)": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                "Tipo de Evento": e.event_type,
-                "Identificador": e.key_identifier,
-                "IP": e.ip_address,
-                "Estado": e.status,
-                "Hash Evento": e.event_hash[:16] + "..."
-            }
-            for e in events
-        ]
-        st.dataframe(pd.DataFrame(events_data), use_container_width=True)
-
-db.close()
+    st.subheader(":material/security: Eventos de Auditoría (Append-Only SHA-256)")
+    db = SessionLocal()
+    try:
+        events = db.query(SecurityEvent).order_by(SecurityEvent.id.desc()).limit(100).all()
+        if not events:
+            st.info("No se han registrado eventos de seguridad aún.")
+        else:
+            events_data = [
+                {
+                    "ID": e.id,
+                    "Timestamp (UTC)": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Tipo de Evento": e.event_type,
+                    "Identificador": e.key_identifier,
+                    "IP": e.ip_address,
+                    "Estado": e.status,
+                    "Hash Evento": e.event_hash[:16] + "..."
+                }
+                for e in events
+            ]
+            st.dataframe(pd.DataFrame(events_data), width="stretch")
+    finally:
+        db.close()

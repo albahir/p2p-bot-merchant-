@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+
 def render_kpis(total_orders: int, total_volume_ves: float, net_profit_ves: float, net_profit_usd: float):
     """Muestra tarjetas con las principales métricas operativas."""
     c1, c2, c3, c4 = st.columns(4)

@@ -1,15 +1,23 @@
-"""Cliente de conexión oficial a Binance P2P con firma Ed25519 y monitor de weight.
+"""Cliente de conexión oficial a Binance P2P con firma Ed25519, monitor de weight y sincronización de hora.
 Cumple con la Constitución:
-- Header x-mbx-used-weight vigilado proactivamente.
-- Fail-closed ante 429 y 5xx.
-- recvWindow configurado en 5000ms.
+- Header x-mbx-used-weight vigilado proactivamente (< 5,000).
+- Fail-closed ante 401, 403, 429 y 5xx.
+- recvWindow configurado en 5000ms con compensación de deriva horaria (Clock Drift).
+- Validación de respuestas con esquemas Pydantic tipados.
 """
 
-import time
 import logging
-from typing import Dict, Any, Optional
+import time
+from typing import Any
+
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from src.core.binance_schemas import (
+    BinanceOrderHistoryResponse,
+    BinanceSearchResponse,
+    BinanceServerTime,
+)
 
 logger = logging.getLogger("binance_client")
 
@@ -19,11 +27,14 @@ WEIGHT_COOLDOWN_SECONDS = 60
 
 class BinanceWeightExceededError(Exception):
     """Excepción lanzada cuando el peso consumido de la API supera el umbral seguro."""
-    pass
+
+
+class BinanceAuthError(Exception):
+    """Excepción crítica lanzada cuando la API Key o firma es rechazada (Fail-Closed)."""
 
 
 class BinanceP2PClient:
-    """Cliente para operaciones P2P en Binance con firma Ed25519."""
+    """Cliente oficial para operaciones P2P en Binance con firma Ed25519 y compensación de drift."""
 
     def __init__(
         self,
@@ -37,10 +48,31 @@ class BinanceP2PClient:
         self.base_url = base_url.rstrip("/")
         self.recv_window = recv_window
         self.last_used_weight = 0
+        self.time_offset_ms = 0  # serverTime - localTime
+
+    def sync_time(self) -> int:
+        """Sincroniza el reloj local con el servidor de Binance para evitar el error -1021."""
+        url = f"{self.base_url}/api/v3/time"
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                res = client.get(url)
+                if res.status_code == 200:
+                    data = BinanceServerTime.model_validate(res.json())
+                    local_now = int(time.time() * 1000)
+                    self.time_offset_ms = data.serverTime - local_now
+                    logger.info(f"Sincronización horaria con Binance exitosa. Offset: {self.time_offset_ms}ms")
+                    return self.time_offset_ms
+        except Exception as e:
+            logger.warning(f"No se pudo consultar /api/v3/time ({e}). Usando hora local.")
+        return 0
+
+    def get_synced_timestamp(self) -> int:
+        """Devuelve el timestamp en milisegundos compensado con la hora del servidor."""
+        return int(time.time() * 1000) + self.time_offset_ms
 
     def check_weight(self, headers: httpx.Headers) -> None:
         """Monitorea el header x-mbx-used-weight y aplica fail-closed preventivo si es necesario."""
-        weight_str = headers.get("x-mbx-used-weight")
+        weight_str = headers.get("x-mbx-used-weight-1m") or headers.get("x-mbx-used-weight")
         if weight_str and weight_str.isdigit():
             self.last_used_weight = int(weight_str)
             logger.debug(f"API Used Weight: {self.last_used_weight}")
@@ -53,6 +85,28 @@ class BinanceP2PClient:
                 raise BinanceWeightExceededError(
                     f"FAIL-CLOSED: Límite de peso alcanzado ({self.last_used_weight})."
                 )
+
+    def _handle_response_errors(self, response: httpx.Response) -> dict[str, Any]:
+        """Procesa y clasifica de forma segura los códigos de error de Binance."""
+        if response.status_code in (401, 403):
+            raise BinanceAuthError(
+                f"FAIL-CLOSED: Rechazo de autenticación Binance (HTTP {response.status_code}): {response.text}"
+            )
+        response.raise_for_status()
+
+        data = response.json()
+        code = str(data.get("code", "000000"))
+        if code not in ("000000", "0", "200"):
+            msg = data.get("message") or data.get("msg") or "Error desconocido de API Binance"
+            if code in ("-1003", "100001003"):
+                raise BinanceWeightExceededError(f"Rate limit de Binance alcanzado: {msg}")
+            if code in ("-2014", "-2015", "100001004", "100001005"):
+                raise BinanceAuthError(f"FAIL-CLOSED: Clave rechazada o IP no autorizada: {msg}")
+            if code in ("-1021", "100001006"):
+                # Intentar sincronizar hora ante error de timestamp
+                self.sync_time()
+            raise RuntimeError(f"Error Binance [{code}]: {msg}")
+        return data
 
     @retry(
         stop=stop_after_attempt(3),
@@ -67,8 +121,8 @@ class BinanceP2PClient:
         trade_type: str = "BUY",
         page: int = 1,
         rows: int = 10
-    ) -> Dict[str, Any]:
-        """Consulta el order book público de Binance P2P."""
+    ) -> BinanceSearchResponse:
+        """Consulta y valida el order book público de Binance P2P con esquemas tipados."""
         url = f"{self.base_url}/sapi/v1/c2c/orderMatch/search"
         payload = {
             "asset": asset,
@@ -80,8 +134,8 @@ class BinanceP2PClient:
         with httpx.Client(timeout=10.0) as client:
             response = client.post(url, json=payload)
             self.check_weight(response.headers)
-            response.raise_for_status()
-            return response.json()
+            raw_data = self._handle_response_errors(response)
+            return BinanceSearchResponse.model_validate(raw_data)
 
     def get_order_history(
         self,
@@ -90,8 +144,8 @@ class BinanceP2PClient:
         end_timestamp: int,
         page: int = 1,
         rows: int = 50
-    ) -> Dict[str, Any]:
-        """Consulta el histórico de órdenes completadas o en curso con paginación máxima de 30 días."""
+    ) -> BinanceOrderHistoryResponse:
+        """Consulta el histórico de órdenes con paginación de 30 días y validación de tipos."""
         thirty_days_ms = 30 * 24 * 60 * 60 * 1000
         if (end_timestamp - start_timestamp) > thirty_days_ms:
             raise ValueError("FAIL-CLOSED: La ventana de consulta histórica no puede superar los 30 días.")
@@ -104,27 +158,26 @@ class BinanceP2PClient:
             "page": page,
             "rows": rows,
             "recvWindow": self.recv_window,
-            "timestamp": int(time.time() * 1000)
+            "timestamp": self.get_synced_timestamp()
         }
         headers = {"X-MBX-APIKEY": self.api_key}
 
         with httpx.Client(timeout=10.0) as client:
             response = client.get(url, params=params, headers=headers)
             self.check_weight(response.headers)
-            response.raise_for_status()
-            return response.json()
+            raw_data = self._handle_response_errors(response)
+            return BinanceOrderHistoryResponse.model_validate(raw_data)
 
-    def create_ad(self, ad_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def create_ad(self, ad_payload: dict[str, Any]) -> dict[str, Any]:
         """Crea un anuncio en Binance P2P."""
         url = f"{self.base_url}/sapi/v1/c2c/ads/post"
         headers = {"X-MBX-APIKEY": self.api_key}
         with httpx.Client(timeout=10.0) as client:
             response = client.post(url, json=ad_payload, headers=headers)
             self.check_weight(response.headers)
-            response.raise_for_status()
-            return response.json()
+            return self._handle_response_errors(response)
 
-    def update_ad(self, ad_no: str, update_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def update_ad(self, ad_no: str, update_payload: dict[str, Any]) -> dict[str, Any]:
         """Actualiza el precio o inventario de un anuncio."""
         url = f"{self.base_url}/sapi/v1/c2c/ads/update"
         headers = {"X-MBX-APIKEY": self.api_key}
@@ -132,9 +185,8 @@ class BinanceP2PClient:
         with httpx.Client(timeout=10.0) as client:
             response = client.post(url, json=payload, headers=headers)
             self.check_weight(response.headers)
-            response.raise_for_status()
-            return response.json()
+            return self._handle_response_errors(response)
 
-    def pause_ad(self, ad_no: str) -> Dict[str, Any]:
+    def pause_ad(self, ad_no: str) -> dict[str, Any]:
         """Pausa un anuncio propio."""
         return self.update_ad(ad_no=ad_no, update_payload={"advStatus": "PAUSED"})

@@ -27,4 +27,4 @@ COPY . .
 
 USER appuser
 
-ENTRYPOINT ["python", "-m", "src.core.binance_client"]
+ENTRYPOINT ["python", "-m", "src.main"]

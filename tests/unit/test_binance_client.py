@@ -1,8 +1,10 @@
 """Tests unitarios para el cliente de Binance P2P."""
 
-import pytest
 import httpx
-from src.core.binance_client import BinanceP2PClient, BinanceWeightExceededError
+import pytest
+
+from src.core.binance_client import BinanceP2PClient
+
 
 def test_exceeding_30_day_window_raises_error():
     client = BinanceP2PClient(api_key="test", private_key_pem="test")

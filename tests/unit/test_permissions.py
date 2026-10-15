@@ -1,12 +1,13 @@
 """Tests unitarios para Permissions y Whitelist de IP (Fail-Closed)."""
 
 import pytest
-from config.settings import Settings
-from src.security.permissions import StartupPermissionValidator
-from src.security.audit_logger import AuditLogger
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+from config.settings import Settings
 from src.data.database import Base
+from src.security.audit_logger import AuditLogger
+from src.security.permissions import StartupPermissionValidator
 
 TEST_MASTER_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 

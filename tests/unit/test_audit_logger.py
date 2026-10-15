@@ -3,9 +3,10 @@
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
 from src.data.database import Base
 from src.security.audit_logger import AuditLogger
-from src.data.models import SecurityEvent
+
 
 @pytest.fixture
 def test_db_session():

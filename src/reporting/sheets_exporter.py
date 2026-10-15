@@ -1,7 +1,7 @@
 """Exportador de métricas y datos de órdenes hacia Google Sheets."""
 
 import logging
-from typing import List
+
 from src.reporting.tax_engine import TradeResult
 
 logger = logging.getLogger("sheets_exporter")
@@ -13,7 +13,7 @@ class SheetsExporter:
     def __init__(self, credentials_path: str = "config/google_credentials.json"):
         self.credentials_path = credentials_path
 
-    def export(self, sheet_id: str, results: List[TradeResult]) -> bool:
+    def export(self, sheet_id: str, results: list[TradeResult]) -> bool:
         """Exporta los resultados a una hoja remota de cálculo."""
         try:
             import gspread

@@ -1,13 +1,16 @@
 """Prueba de extremo a extremo (E2E) simulando ciclo de ingesta, cálculo fiscal y auditoría."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
 from src.data.database import Base
 from src.data.models import Order
 from src.data.repositories import OrderRepository
 from src.reporting.tax_engine import FIFOCostMethod
 from src.security.audit_logger import AuditLogger
+
 
 def test_full_p2p_tax_and_audit_cycle():
     test_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
@@ -32,7 +35,7 @@ def test_full_p2p_tax_and_audit_cycle():
         fee_fiat=0.0,
         bcv_rate=36.0,
         order_status="COMPLETED",
-        created_at=datetime.now(timezone.utc)
+        created_at=datetime.now(UTC)
     ))
     repo.create(Order(
         order_number="E2E_02",
@@ -45,7 +48,7 @@ def test_full_p2p_tax_and_audit_cycle():
         fee_fiat=0.0,
         bcv_rate=36.0,
         order_status="COMPLETED",
-        created_at=datetime.now(timezone.utc)
+        created_at=datetime.now(UTC)
     ))
 
     completed_orders = repo.list_completed()

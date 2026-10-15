@@ -5,9 +5,10 @@ Garantiza el principio constitucional de "Cero Secretos":
 - Implementa comandos /status, /pause, /resume y /report.
 """
 
-import re
 import logging
-from typing import Optional, List, Dict, Any
+import re
+import time
+
 import httpx
 
 logger = logging.getLogger("telegram_notifier")
@@ -33,16 +34,22 @@ class TelegramNotifier:
         self,
         bot_token: str,
         default_chat_id: str,
-        allowed_user_ids: Optional[List[int]] = None
+        allowed_user_ids: list[int] | None = None
     ):
         self.bot_token = bot_token
         self.default_chat_id = default_chat_id
         self.allowed_user_ids = allowed_user_ids or []
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         self.is_paused = False
+        self.last_error: str | None = None
+        # Cliente HTTP persistente para reutilizar el túnel TCP/TLS (Keep-Alive)
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=8.0),
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0)
+        )
 
-    def send_alert(self, text: str, chat_id: Optional[str] = None) -> bool:
-        """Envía una alerta con formato seguro."""
+    def send_alert(self, text: str, chat_id: str | None = None) -> bool:
+        """Envía una alerta con formato seguro, reutilizando conexiones y con reintentos."""
         if not self.bot_token:
             logger.warning("TELEGRAM: Bot token no configurado. Mensaje omitido.")
             return False
@@ -60,15 +67,34 @@ class TelegramNotifier:
             "parse_mode": "Markdown"
         }
 
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                res = client.post(f"{self.base_url}/sendMessage", json=payload)
-                res.raise_for_status()
-                logger.info("TELEGRAM: Notificación enviada con éxito.")
-                return True
-        except Exception as e:
-            logger.error(f"TELEGRAM: Error enviando mensaje: {e}")
-            return False
+        # Intentar hasta 3 veces con intervalos breves si hay problemas en la red
+        for attempt in range(3):
+            try:
+                res = self._client.post(f"{self.base_url}/sendMessage", json=payload)
+                if res.status_code == 200:
+                    logger.info("TELEGRAM: Notificación enviada con éxito.")
+                    self.last_error = None
+                    return True
+                else:
+                    err_msg = f"HTTP {res.status_code}: {res.text}"
+                    logger.error(f"TELEGRAM: {err_msg}")
+                    self.last_error = err_msg
+                    return False
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                logger.warning(f"TELEGRAM: Fallo de red temporal (intento {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    time.sleep(1.0)
+                    continue
+                err_msg = f"Error de conectividad con Telegram tras 3 intentos ({e})"
+                logger.error(f"TELEGRAM: {err_msg}")
+                self.last_error = err_msg
+                return False
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"TELEGRAM: Excepción inesperada: {err_msg}")
+                self.last_error = err_msg
+                return False
+        return False
 
     def is_user_authorized(self, user_id: int) -> bool:
         """Verifica si un remitente de comando está en la lista autorizada."""

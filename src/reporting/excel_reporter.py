@@ -4,8 +4,9 @@ Incluye dos hojas:
 2. 'Resumen': Totales consolidados en VES y USD para declaración de ISLR.
 """
 
-from typing import List
+
 import pandas as pd
+
 from src.reporting.tax_engine import TradeResult
 
 
@@ -13,7 +14,7 @@ class ExcelReporter:
     """Generador de hojas de cálculo de auditoría fiscal."""
 
     @staticmethod
-    def generate_tax_report(results: List[TradeResult], output_path: str) -> str:
+    def generate_tax_report(results: list[TradeResult], output_path: str) -> str:
         """Crea el archivo Excel con las dos pestañas especificadas en Spec 005."""
         if not results:
             detail_data = []

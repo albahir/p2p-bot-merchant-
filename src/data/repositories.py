@@ -1,9 +1,10 @@
 """Repositorios de datos siguiendo el patrón Repository para acceso seguro y desacoplado."""
 
-from typing import List, Optional
 from datetime import datetime
+
 from sqlalchemy.orm import Session
-from src.data.models import Order, SecurityEvent, EncryptedSecret
+
+from src.data.models import EncryptedSecret, Order, SecurityEvent
 
 
 class OrderRepository:
@@ -12,7 +13,7 @@ class OrderRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_by_order_number(self, order_number: str) -> Optional[Order]:
+    def get_by_order_number(self, order_number: str) -> Order | None:
         return self.db.query(Order).filter(Order.order_number == order_number).first()
 
     def create(self, order: Order) -> Order:
@@ -21,7 +22,7 @@ class OrderRepository:
         self.db.refresh(order)
         return order
 
-    def list_completed(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[Order]:
+    def list_completed(self, start_date: datetime | None = None, end_date: datetime | None = None) -> list[Order]:
         query = self.db.query(Order).filter(Order.order_status == "COMPLETED")
         if start_date:
             query = query.filter(Order.created_at >= start_date)
@@ -36,7 +37,7 @@ class SecurityRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_last_event(self) -> Optional[SecurityEvent]:
+    def get_last_event(self) -> SecurityEvent | None:
         return self.db.query(SecurityEvent).order_by(SecurityEvent.id.desc()).first()
 
     def log_event(self, event: SecurityEvent) -> SecurityEvent:
@@ -45,7 +46,7 @@ class SecurityRepository:
         self.db.refresh(event)
         return event
 
-    def get_secret(self, key_name: str) -> Optional[EncryptedSecret]:
+    def get_secret(self, key_name: str) -> EncryptedSecret | None:
         return self.db.query(EncryptedSecret).filter(EncryptedSecret.key_name == key_name).first()
 
     def upsert_secret(self, key_name: str, nonce: str, ciphertext: str, tag: str) -> EncryptedSecret:

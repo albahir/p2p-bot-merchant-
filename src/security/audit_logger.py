@@ -4,8 +4,8 @@ Cumple con la Constitución: no registra secretos, garantiza trazabilidad total.
 
 import hashlib
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
+
 from src.data.database import SessionLocal
 from src.data.models import SecurityEvent
 from src.data.repositories import SecurityRepository
@@ -25,10 +25,10 @@ class AuditLogger:
         key_identifier: str,
         ip_address: str,
         status: str,
-        details: Optional[str] = None
+        details: str | None = None
     ) -> SecurityEvent:
         """Registra un evento de seguridad calculando el hash encadenado SHA-256."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db = self.session_factory()
         try:
             repo = SecurityRepository(db)

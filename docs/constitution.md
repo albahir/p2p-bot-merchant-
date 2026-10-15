@@ -1,6 +1,6 @@
 # Constitución del Proyecto P2P Bot (Copia de Referencia)
 
-> Documento canónico: [`.specify/memory/constitution.md`](file:///c:/p2p-bot-merchant/.specify/memory/constitution.md)
+> Documento canónico: [`.specify/memory/constitution.md`](../.specify/memory/constitution.md)
 
 ## Principios No Negociables
 
