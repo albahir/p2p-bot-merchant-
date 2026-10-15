@@ -1,6 +1,7 @@
 """Repositorios de datos siguiendo el patrón Repository para acceso seguro y desacoplado."""
 
 from datetime import datetime
+from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
@@ -25,9 +26,9 @@ class OrderRepository:
     def list_completed(self, start_date: datetime | None = None, end_date: datetime | None = None) -> list[Order]:
         query = self.db.query(Order).filter(Order.order_status == "COMPLETED")
         if start_date:
-            query = query.filter(Order.created_at >= start_date)
+            query = query.filter(cast(Any, Order.created_at >= start_date))
         if end_date:
-            query = query.filter(Order.created_at <= end_date)
+            query = query.filter(cast(Any, Order.created_at <= end_date))
         return query.order_by(Order.created_at.asc()).all()
 
 
@@ -56,13 +57,13 @@ class SecurityRepository:
                 key_name=key_name,
                 nonce=nonce,
                 ciphertext=ciphertext,
-                tag=tag
+                tag=tag,
             )
             self.db.add(secret)
         else:
-            secret.nonce = nonce
-            secret.ciphertext = ciphertext
-            secret.tag = tag
+            secret.nonce = nonce  # type: ignore[assignment]
+            secret.ciphertext = ciphertext  # type: ignore[assignment]
+            secret.tag = tag  # type: ignore[assignment]
         self.db.commit()
         self.db.refresh(secret)
         return secret

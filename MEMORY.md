@@ -52,6 +52,14 @@
 7. **Interactividad del Sandbox y Ordenación en UI**: La tabla de transacciones de la UI se ordena por `Order.id.desc()` para que los registros recién insertados aparezcan siempre en la primera fila. Se añadieron controles para generar ciclos comerciales en vivo (`➕ Simular Nuevo Ciclo`) y limpiar historial (`🗑️ Limpiar Historial de Prueba`).
 8. **Erradicación de Blind Exceptions (BLE001)**: Sustitución de cláusulas genéricas `except Exception` por excepciones acotadas de base de datos (`SQLAlchemyError`), red (`httpx.RequestError`), criptografía (`InvalidTag`, `UnsupportedAlgorithm`), y validación de tipos (`ValueError`, `TypeError`, `OSError`), garantizando observabilidad y pasando el linter estático de CI en verde.
 9. **Sincronización Total del Entorno Virtual (`.venv`)**: Se generó [`requirements.txt`](file:///c:/p2p-bot-merchant/requirements.txt) y se instalaron todas las dependencias en `.venv` junto al paquete local en modo editable (`pip install -e .`), garantizando resolución inmediata de rutas `src` y `config` en VS Code y PyCharm.
+10. **Tipado Estático Riguroso (Mypy 0 Errores en CI)**: Corrección integral de los 52 errores de tipado reportados por `mypy src/` en 8 módulos:
+    - [`src/reporting/tax_engine.py`](file:///c:/p2p-bot-merchant/src/reporting/tax_engine.py): Conversiones explícitas `float()` y `str()` de campos de columnas ORM SQLAlchemy hacia dataclasses (`TaxLot`, `TradeResult`), eliminando incompatibilidades `Column[Any]` vs primitivos.
+    - [`src/core/concurrency.py`](file:///c:/p2p-bot-merchant/src/core/concurrency.py): Anotaciones explícitas de clase para `_is_locked`, `_lock_timestamp` y `_current_task` en el singleton `SyncLockManager`.
+    - [`src/core/binance_client.py`](file:///c:/p2p-bot-merchant/src/core/binance_client.py): Casteo tipado `cast(dict[str, Any], response.json())` y anotación estricta de parámetros en `get_order_history`.
+    - [`src/core/history_ingestor.py`](file:///c:/p2p-bot-merchant/src/core/history_ingestor.py): Bifurcación tipada (`isinstance(item, dict)` vs modelo `BinanceOrderMatchItem`) para evitar llamadas `get()` sobre esquemas Pydantic.
+    - [`src/reporting/sheets_exporter.py`](file:///c:/p2p-bot-merchant/src/reporting/sheets_exporter.py): Construcción tipada de matrices `data_to_write: list[list[Any]]` para `worksheet.append_rows()`.
+    - [`src/data/repositories.py`](file:///c:/p2p-bot-merchant/src/data/repositories.py): Filtros y asignaciones tipadas de modelos SQLAlchemy compatibles con Ruff (`B010`) y Mypy.
+    - [`pyproject.toml`](file:///c:/p2p-bot-merchant/pyproject.toml): Activación de `ignore_missing_imports = true` para dependencias de terceros sin stubs empaquetados.
 
 ---
 
@@ -59,4 +67,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/`.
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (23/23 tests pasando).
+4. **Comprobación de Calidad de Código**:
+   - `mypy src/` (0 errores en 30 archivos fuente).
+   - `ruff check .` (0 errores de linting).

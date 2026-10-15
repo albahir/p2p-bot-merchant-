@@ -8,7 +8,7 @@ Cumple con la Constitución:
 
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -94,7 +94,7 @@ class BinanceP2PClient:
             )
         response.raise_for_status()
 
-        data = response.json()
+        data = cast(dict[str, Any], response.json())
         code = str(data.get("code", "000000"))
         if code not in ("000000", "0", "200"):
             msg = data.get("message") or data.get("msg") or "Error desconocido de API Binance"
@@ -151,7 +151,7 @@ class BinanceP2PClient:
             raise ValueError("FAIL-CLOSED: La ventana de consulta histórica no puede superar los 30 días.")
 
         url = f"{self.base_url}/sapi/v1/c2c/orderMatch/listUserOrderHistory"
-        params = {
+        params: dict[str, str | int] = {
             "tradeType": trade_type,
             "startTimestamp": start_timestamp,
             "endTimestamp": end_timestamp,

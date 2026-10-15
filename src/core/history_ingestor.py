@@ -58,48 +58,74 @@ class HistoryIngestor:
         try:
             repo = OrderRepository(db)
             for item in order_items:
-                # Extraer propiedades si es objeto Pydantic o dict
-                is_obj = hasattr(item, "orderNumber")
-                order_num = str(item.orderNumber if is_obj else item.get("orderNumber"))
-                existing = repo.get_by_order_number(order_num)
-                if not existing:
-                    c_time_ms = item.createTime if is_obj else item.get("createTime", now_ms)
-                    created_dt = datetime.fromtimestamp(c_time_ms / 1000, tz=UTC)
-
-                    raw_type = item.tradeType if is_obj else item.get("tradeType", trade_type)
-                    t_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
-
-                    asset_str = str(item.asset if is_obj else item.get("asset", "USDT"))
-                    fiat_str = str(item.fiat if is_obj else item.get("fiat", "VES"))
-                    fiat_amt = float(item.totalPrice if is_obj else item.get("totalPrice", 0.0))
-                    crypto_amt = float(item.amount if is_obj else item.get("amount", 0.0))
-                    u_price = float(item.unitPrice if is_obj else item.get("unitPrice", 0.0))
-
-                    raw_status = item.orderStatus if is_obj else item.get("orderStatus", "COMPLETED")
-                    status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
-
-                    # Comisiones
-                    fee_val = float(item.fee_decimal if is_obj and hasattr(item, "fee_decimal") else (item.get("commission") or item.get("takerCommission") or 0.0))
-
-                    from src.reporting.bcv_service import BCVService
-                    bcv_val = BCVService().fetch_current_rate()
-
-                    order = Order(
-                        order_number=order_num,
-                        trade_type=t_type,
-                        asset=asset_str,
-                        fiat=fiat_str,
-                        fiat_amount=fiat_amt,
-                        crypto_amount=crypto_amt,
-                        unit_price=u_price,
-                        fee_fiat=fee_val,
-                        fee_crypto=0.0,
-                        bcv_rate=bcv_val,
-                        order_status=status_str,
-                        created_at=created_dt
-                    )
-                    repo.create(order)
-                    inserted_count += 1
+                if isinstance(item, dict):
+                    order_num = str(item.get("orderNumber"))
+                    existing = repo.get_by_order_number(order_num)
+                    if not existing:
+                        c_time_ms = item.get("createTime", now_ms)
+                        created_dt = datetime.fromtimestamp(c_time_ms / 1000, tz=UTC)
+                        raw_type = item.get("tradeType", trade_type)
+                        t_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
+                        asset_str = str(item.get("asset", "USDT"))
+                        fiat_str = str(item.get("fiat", "VES"))
+                        fiat_amt = float(item.get("totalPrice", 0.0))
+                        crypto_amt = float(item.get("amount", 0.0))
+                        u_price = float(item.get("unitPrice", 0.0))
+                        raw_status = item.get("orderStatus", "COMPLETED")
+                        status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+                        fee_val = float(item.get("commission") or item.get("takerCommission") or 0.0)
+                        from src.reporting.bcv_service import BCVService
+                        bcv_val = BCVService().fetch_current_rate()
+                        order = Order(
+                            order_number=order_num,
+                            trade_type=t_type,
+                            asset=asset_str,
+                            fiat=fiat_str,
+                            fiat_amount=fiat_amt,
+                            crypto_amount=crypto_amt,
+                            unit_price=u_price,
+                            fee_fiat=fee_val,
+                            fee_crypto=0.0,
+                            bcv_rate=bcv_val,
+                            order_status=status_str,
+                            created_at=created_dt,
+                        )
+                        repo.create(order)
+                        inserted_count += 1
+                else:
+                    order_num = str(item.orderNumber)
+                    existing = repo.get_by_order_number(order_num)
+                    if not existing:
+                        c_time_ms = item.createTime
+                        created_dt = datetime.fromtimestamp(c_time_ms / 1000, tz=UTC)
+                        raw_type = item.tradeType
+                        t_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
+                        asset_str = str(item.asset)
+                        fiat_str = str(item.fiat)
+                        fiat_amt = float(item.totalPrice)
+                        crypto_amt = float(item.amount)
+                        u_price = float(item.unitPrice)
+                        raw_status = item.orderStatus
+                        status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+                        fee_val = float(item.fee_decimal if hasattr(item, "fee_decimal") else 0.0)
+                        from src.reporting.bcv_service import BCVService
+                        bcv_val = BCVService().fetch_current_rate()
+                        order = Order(
+                            order_number=order_num,
+                            trade_type=t_type,
+                            asset=asset_str,
+                            fiat=fiat_str,
+                            fiat_amount=fiat_amt,
+                            crypto_amount=crypto_amt,
+                            unit_price=u_price,
+                            fee_fiat=fee_val,
+                            fee_crypto=0.0,
+                            bcv_rate=bcv_val,
+                            order_status=status_str,
+                            created_at=created_dt,
+                        )
+                        repo.create(order)
+                        inserted_count += 1
             logger.info(f"Ingesta {trade_type} completada: {inserted_count} órdenes nuevas registradas.")
             return inserted_count
         finally:

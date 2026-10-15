@@ -16,6 +16,9 @@ class SyncLockManager:
     """Gestor singleton de exclusión mutua para peticiones de red hacia Binance."""
     _instance: Optional["SyncLockManager"] = None
     _lock = threading.Lock()
+    _is_locked: bool = False
+    _lock_timestamp: float = 0.0
+    _current_task: str = ""
 
     def __new__(cls):
         with cls._lock:
