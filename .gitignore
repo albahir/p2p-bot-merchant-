@@ -1,0 +1,35 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+
+# Python cache y compilados
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Archivos de entorno y secretos
+.env
+config/.env
+*.pem
+*.key
+
+# Bases de datos locales
+*.db
+*.sqlite3
+
+# Reportes y temporales
+reporte_fiscal_*.xlsx
+*.log
+
+# Testing y cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDEs
+.vscode/
+.idea/
