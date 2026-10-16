@@ -104,6 +104,10 @@
     - Detección automática de errores HTTP 429/403: la clave saturada entra en cooldown (60s) y el sistema rota de inmediato y silenciosamente a la siguiente clave de respaldo disponible.
     - Reintento transparente sin fricción para el usuario en Telegram, garantizando alta disponibilidad continua incluso bajo uso intensivo.
     - Enmascaramiento estricto (`AIzaSy...7GBE`) en logs para cumplir la Constitución de Cero Secretos.
+17. **Telemetría en Tiempo Real de Claves de IA y Automatización Render (ADR 017)**:
+    - Exposición de telemetría viva de cada slot de clave API mediante comando `/keys`, `/claves`, `/ai_status` y Function Calling (`consultar_estado_claves_ia`).
+    - Métricas en tiempo real: clave activa, peticiones atendidas por clave, contador de saturación, estado de enfriamiento con segundos exactos para restablecimiento y timestamp de última reactivación.
+    - Integración con Deploy Hooks de Render para automatización de despliegues post-commit.
 
 ---
 
@@ -111,7 +115,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (33/33 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (34/34 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).

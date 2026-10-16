@@ -187,10 +187,13 @@ class TelegramNotifier:
             return "▶️ Operaciones del bot reanudadas."
         elif cmd == "/report":
             return "📊 Para generar el reporte detallado, ingrese al Dashboard Streamlit o ejecute el exportador fiscal."
+        elif cmd in ("/keys", "/claves", "/ai_status"):
+            return "🔑 Usa `/keys` o pregúntale al bot '¿cuál es el estado de las claves?' para ver la telemetría en vivo."
         elif cmd in ("/help", "/ayuda", "/start"):
             return (
                 "🤖 *Comandos Disponibles*:\n"
                 "- `/status`: Ver estado y modo operativo del bot\n"
+                "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
                 "- `/pause`: Pausar operaciones comerciales\n"
                 "- `/resume`: Reanudar operaciones comerciales\n"
                 "- `/report`: Enlace a reportes fiscales\n"
@@ -335,6 +338,21 @@ class TelegramCommandPoller:
                 text = str(msg.get("text", "")).strip()
 
                 if text.startswith("/"):
+                    cmd = text.strip().lower()
+                    if cmd in ("/keys", "/claves", "/ai_status") and self.ai_agent and hasattr(self.ai_agent, "key_pool"):
+                        if not self.notifier.is_user_authorized(user_id):
+                            self.notifier.send_alert(
+                                f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
+                                f"Tu ID de Telegram es: `{user_id}`.\n"
+                                f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`.",
+                                chat_id=chat_id
+                            )
+                        else:
+                            summary = self.ai_agent.key_pool.format_status_summary()
+                            self.notifier.send_alert(summary, chat_id=chat_id)
+                        processed += 1
+                        continue
+
                     response = self.notifier.handle_command(user_id=user_id, command=text)
                     self.notifier.send_alert(response, chat_id=chat_id)
                     processed += 1

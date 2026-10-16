@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -23,8 +23,15 @@ logger = logging.getLogger("ai_assistant")
 class AIAssistantTools:
     """Catálogo de herramientas locales de solo lectura expuestas al modelo de lenguaje."""
 
-    def __init__(self, db_session_factory=SessionLocal):
+    def __init__(self, db_session_factory=SessionLocal, key_pool: Any = None):
         self.session_factory = db_session_factory
+        self.key_pool = key_pool
+
+    def consultar_estado_claves_ia(self) -> dict[str, Any]:
+        """Consulta el estado del pool de claves API de Gemini, claves activas y cooldowns."""
+        if self.key_pool and hasattr(self.key_pool, "get_pool_status"):
+            return cast(dict[str, Any], self.key_pool.get_pool_status())
+        return {"info": "Información de pool de claves no disponible"}
 
     def obtener_metricas_fiscales(self, dias_atras: int = 7, metodo: str = "FIFO") -> dict[str, Any]:
         """Calcula el rendimiento y las ganancias netas consolidadas en base a las órdenes completadas."""
@@ -151,6 +158,14 @@ GEMINI_TOOL_DECLARATIONS = [
             "type": "OBJECT",
             "properties": {}
         }
+    },
+    {
+        "name": "consultar_estado_claves_ia",
+        "description": "Consulta la telemetría en vivo del pool de claves de IA (Gemini): cuál está activa, peticiones atendidas, cuáles están en enfriamiento y tiempo restante para restablecerse.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {}
+        }
     }
 ]
 
@@ -171,6 +186,9 @@ class AIKeyPool:
         self._current_index = 0
         self._lock = threading.Lock()
         self._cooldowns: dict[str, float] = {}
+        self._call_counts: dict[str, int] = {k: 0 for k in self.keys}
+        self._rate_limit_counts: dict[str, int] = {k: 0 for k in self.keys}
+        self._restored_times: dict[str, float] = {}
 
     @property
     def has_keys(self) -> bool:
@@ -179,6 +197,11 @@ class AIKeyPool:
     @property
     def total_keys(self) -> int:
         return len(self.keys)
+
+    def record_success(self, key: str) -> None:
+        """Registra una llamada exitosa para una clave."""
+        with self._lock:
+            self._call_counts[key] = self._call_counts.get(key, 0) + 1
 
     def get_active_key(self) -> str | None:
         """Devuelve la clave actualmente activa o la primera disponible fuera de cooldown."""
@@ -189,7 +212,10 @@ class AIKeyPool:
             for i in range(len(self.keys)):
                 idx = (self._current_index + i) % len(self.keys)
                 k = self.keys[idx]
-                if self._cooldowns.get(k, 0) <= now:
+                cd_until = self._cooldowns.get(k, 0)
+                if cd_until <= now:
+                    if cd_until > 0 and self._restored_times.get(k, 0) < cd_until:
+                        self._restored_times[k] = now
                     self._current_index = idx
                     return k
             return self.keys[self._current_index]
@@ -201,6 +227,7 @@ class AIKeyPool:
                 return None
             now = time.time()
             self._cooldowns[exhausted_key] = now + cooldown_seconds
+            self._rate_limit_counts[exhausted_key] = self._rate_limit_counts.get(exhausted_key, 0) + 1
             self._current_index = (self._current_index + 1) % len(self.keys)
             next_key = self.keys[self._current_index]
             masked_key = f"{exhausted_key[:6]}...{exhausted_key[-4:]}" if len(exhausted_key) > 10 else "[CLAVE]"
@@ -209,6 +236,66 @@ class AIKeyPool:
                 f"Rotando silenciosamente al slot [{self._current_index + 1}/{len(self.keys)}]."
             )
             return next_key
+
+    def get_pool_status(self) -> dict[str, Any]:
+        """Devuelve telemetría completa de cada clave del pool en tiempo real."""
+        with self._lock:
+            now = time.time()
+            active_key = self.keys[self._current_index] if self.keys else None
+            keys_info: list[dict[str, Any]] = []
+
+            for i, k in enumerate(self.keys):
+                masked = f"{k[:6]}...{k[-4:]}" if len(k) > 10 else f"Clave #{i+1}"
+                cd_until = self._cooldowns.get(k, 0)
+                is_in_cooldown = cd_until > now
+                remaining_cd = round(cd_until - now, 1) if is_in_cooldown else 0.0
+
+                if k == active_key and not is_in_cooldown:
+                    estado = "🟢 ACTIVA"
+                elif is_in_cooldown:
+                    estado = f"⏳ ENFRIAMIENTO (restan {int(remaining_cd)}s)"
+                else:
+                    estado = "⚪ DISPONIBLE (En espera)"
+
+                restored_str = ""
+                if self._restored_times.get(k):
+                    dt = datetime.fromtimestamp(self._restored_times[k], UTC)
+                    restored_str = dt.strftime("%H:%M:%S UTC")
+
+                keys_info.append({
+                    "slot": i + 1,
+                    "clave": masked,
+                    "estado": estado,
+                    "peticiones_completadas": self._call_counts.get(k, 0),
+                    "veces_saturada": self._rate_limit_counts.get(k, 0),
+                    "segundos_restantes_cooldown": int(remaining_cd),
+                    "ultima_reactivacion": restored_str
+                })
+
+            return {
+                "total_claves": len(self.keys),
+                "indice_activo": self._current_index + 1,
+                "claves": keys_info
+            }
+
+    def format_status_summary(self) -> str:
+        """Genera un reporte en texto/Markdown apto para Telegram."""
+        data = self.get_pool_status()
+        if not data["claves"]:
+            return "⚠️ No hay claves API configuradas en el pool."
+
+        lines = ["🔑 *Telemetría del Pool de Claves de IA (Gemini)*:\n"]
+        for c in data["claves"]:
+            lines.append(
+                f"• *Clave #{c['slot']}* (`{c['clave']}`): {c['estado']}\n"
+                f"   - Peticiones atendidas: *{c['peticiones_completadas']}*\n"
+                f"   - Veces saturada: *{c['veces_saturada']}*"
+            )
+            if c["segundos_restantes_cooldown"] > 0:
+                lines.append(f"   - Restablece en: *{c['segundos_restantes_cooldown']}s*")
+            if c["ultima_reactivacion"]:
+                lines.append(f"   - Última reactivación: `{c['ultima_reactivacion']}`")
+        return "\n".join(lines)
 
 
 class TelegramAIAgent:
@@ -224,7 +311,7 @@ class TelegramAIAgent:
         self.key_pool = AIKeyPool(api_key)
         self.provider = provider
         self.model_name = model_name
-        self.tools = AIAssistantTools(db_session_factory=db_session_factory)
+        self.tools = AIAssistantTools(db_session_factory=db_session_factory, key_pool=self.key_pool)
         self._client = httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0))
 
     def _call_gemini_with_failover(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any] | None, str | None]:
@@ -244,6 +331,7 @@ class TelegramAIAgent:
                 try:
                     res = self._client.post(url, json=payload)
                     if res.status_code == 200:
+                        self.key_pool.record_success(key)
                         return 200, res.json(), None
                     if res.status_code in (429, 403):
                         logger.warning(f"Error de cuota Gemini (HTTP {res.status_code}). Intentando clave de respaldo...")
@@ -340,6 +428,8 @@ class TelegramAIAgent:
                 tool_result = self.tools.consultar_tasa_bcv()
             elif tool_name == "consultar_estado_sistema":
                 tool_result = self.tools.consultar_estado_sistema()
+            elif tool_name == "consultar_estado_claves_ia":
+                tool_result = self.tools.consultar_estado_claves_ia()
             else:
                 tool_result = {"error": f"Herramienta desconocida: {tool_name}"}
 

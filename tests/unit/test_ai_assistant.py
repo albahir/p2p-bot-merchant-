@@ -212,3 +212,24 @@ def test_ai_agent_all_keys_exhausted_graceful_message():
     with patch.object(agent._client, "post", return_value=mock_resp_429):
         response = agent.ask("¿Cuál es el volumen?")
         assert "límite" in response.lower() or "cuota" in response.lower() or "espera" in response.lower()
+
+
+def test_ai_key_pool_telemetry_and_status_summary():
+    """El pool debe reportar telemetría precisa de qué clave está activa, cuántas peticiones lleva y cooldown."""
+    agent = TelegramAIAgent(
+        api_key="key_alpha_12345, key_beta_67890",
+        provider="gemini",
+        db_session_factory=SessionLocal
+    )
+    status = agent.key_pool.get_pool_status()
+    assert status["total_claves"] == 2
+    assert "ACTIVA" in status["claves"][0]["estado"]
+    assert "DISPONIBLE" in status["claves"][1]["estado"]
+
+    # Simular saturación de la clave 1
+    agent.key_pool.mark_rate_limited("key_alpha_12345", cooldown_seconds=45.0)
+    summary = agent.key_pool.format_status_summary()
+    assert "Telemetría del Pool de Claves" in summary
+    assert "ENFRIAMIENTO" in summary
+    assert "Clave #2" in summary
+
