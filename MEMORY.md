@@ -108,6 +108,25 @@
     - Exposición de telemetría viva de cada slot de clave API mediante comando `/keys`, `/claves`, `/ai_status` y Function Calling (`consultar_estado_claves_ia`).
     - Métricas en tiempo real: clave activa, peticiones atendidas por clave, contador de saturación, estado de enfriamiento con segundos exactos para restablecimiento y timestamp de última reactivación.
     - Integración con Deploy Hooks de Render para automatización de despliegues post-commit.
+18. **Balanceo Proactivo Round-Robin y Failover Resiliente ante 503/500/Red en AIKeyPool (ADR 018)**:
+    - Diagnóstico de Causa Raíz: La Clave #1 atendía el 100% de las peticiones mientras las demás permanecían inactivas porque el selector operaba en modo activo-pasivo. Ante un pico de carga de Google (HTTP 503), un `break` prematuro interrumpía el ciclo de intentos sin marcar la clave en cooldown ni probar las claves de respaldo #2 y #3.
+    - Balanceo Proactivo Round-Robin: Cada llamada al modelo (incluyendo el envío del prompt y la resolución de Function Calling) avanza el puntero de forma equitativa entre todas las claves activas (1 -> 2 -> 3 -> 1), multiplicando por 3 la capacidad de cuota (45 RPM) y evitando el sobrecalentamiento de una sola clave.
+    - Failover Resiliente en Vuelo: Ante cualquier respuesta 503 (servidor saturado), 500/502/504, 429/403 o timeout de red, la clave se pone en enfriamiento y el bot rota inmediatamente a la siguiente clave disponible para responder al usuario sin devolver mensajes de error.
+    - Suite de pruebas expandida: 37/37 tests pasando al 100%.
+19. **Integridad Criptográfica de Firmas Binance (Ed25519, RSA, HMAC-SHA256) y Preparación para Claves Reales (ADR 019)**:
+    - Diagnóstico de Auditoría: Se detectó que `BinanceP2PClient` no calculaba ni anexaba el parámetro obligatorio `signature` en las peticiones autenticadas (`get_order_history`, `create_ad`, `update_ad`), lo que provocaría el rechazo inmediato `-1102` por parte de Binance. Además, el validador restringía las entradas exclusivamente a formato PEM, bloqueando las API Secret Keys HMAC estándar generadas por la interfaz de Binance.
+    - Motor Universal de Firma (`sign_params`): Implementado cálculo criptográfico estricto sobre query strings urlencoded con soporte automático para:
+      - Claves asimétricas Ed25519 (formato PEM PKCS8, firma Base64).
+      - Claves asimétricas RSA (formato PEM PKCS8/PKCS1, padding PKCS1v15 + SHA256, firma Base64).
+      - Claves simétricas HMAC-SHA256 (64 caracteres hex, firma Hex).
+    - Flexibilización Segura del Gestor de Credenciales: `KeyValidator.validate_secret_key()` y la UI del Dashboard aceptan tanto bloques PEM como API Secrets HMAC sin degradar la regla de Fail-closed.
+    - Orquestación Inteligente en `src/main.py`: Si existen credenciales reales en la base de datos cifrada y `USE_SANDBOX` no está forzado a True, el motor arranca directamente en Modo Producción con el cliente oficial de Binance P2P.
+    - Suite de pruebas expandida: **41/41 tests pasando al 100%**.
+20. **Mecanismo Anti-Suspensión KeepAlivePinger en Nube Gratuita y Evaluación de Servidores MCP (ADR 020)**:
+    - Diagnóstico de Infraestructura: Render suspende los contenedores Web gratuitos tras 15 minutos sin tráfico HTTP entrante, lo que congelaba el bot y detenía la escucha de comandos de Telegram.
+    - KeepAlivePinger Autónomo: Se implementó un hilo daemon que detecta la variable inyectada por Render (`RENDER_EXTERNAL_URL` o `KEEP_ALIVE_URL`) y realiza una solicitud HTTP GET ligera cada 10 minutos (600s), manteniendo despierto el servicio 24/7 sin exceder las 750 horas gratuitas mensuales.
+    - Ecosistema MCP (Model Context Protocol): Evaluación y catalogación de servidores MCP útiles para el proyecto (`@modelcontextprotocol/server-sqlite` para auditoría directa de BD, `github-mcp` para CI/CD, `fetch/puppeteer-mcp` para scraping BCV y `binance-mcp` para market data).
+    - Suite de pruebas expandida: **43/43 tests pasando al 100%**.
 
 ---
 
@@ -115,7 +134,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (34/34 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (43/43 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).
