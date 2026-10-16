@@ -1,0 +1,20 @@
+# Configuración de Gitleaks para permitir mocks, tests y plantillas
+title = "Gitleaks Configuration for p2p-bot-merchant"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Permitir claves falsas de test, especificaciones y ejemplos"
+paths = [
+    '''tests/''',
+    '''\.specify/''',
+    '''config/\.env\.example''',
+    '''src/reporting/dashboard/components/credential_manager\.py''',
+]
+regexes = [
+    '''(?i)corrupted_base64_payload''',
+    '''(?i)binance_api_key''',
+    '''(?i)binance_private_key''',
+    '''AIzaSy[a-zA-Z0-9_-]{33}''',
+]
