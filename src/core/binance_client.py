@@ -6,11 +6,20 @@ Cumple con la Constitución:
 - Validación de respuestas con esquemas Pydantic tipados.
 """
 
+import base64
+import hashlib
+import hmac
 import logging
 import time
+import urllib.parse
 from typing import Any, cast
 
 import httpx
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.core.binance_schemas import (
@@ -69,6 +78,40 @@ class BinanceP2PClient:
     def get_synced_timestamp(self) -> int:
         """Devuelve el timestamp en milisegundos compensado con la hora del servidor."""
         return int(time.time() * 1000) + self.time_offset_ms
+
+    def sign_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Calcula y agrega el parámetro 'signature' obligatorio utilizando la clave privada (Ed25519/RSA) o secret (HMAC)."""
+        query_string = urllib.parse.urlencode(params)
+        signature = self._generate_signature(query_string)
+        signed = dict(params)
+        signed["signature"] = signature
+        return signed
+
+    def _generate_signature(self, data: str) -> str:
+        """Genera la firma criptográfica exigida por Binance sobre la cadena de parámetros urlencoded."""
+        cleaned_key = self.private_key_pem.strip()
+        data_bytes = data.encode("utf-8")
+
+        # 1. Si es formato PEM (Ed25519 o RSA)
+        if "-----BEGIN" in cleaned_key:
+            try:
+                priv_key = load_pem_private_key(cleaned_key.encode("utf-8"), password=None)
+                if isinstance(priv_key, Ed25519PrivateKey):
+                    raw_sig = priv_key.sign(data_bytes)
+                    return base64.b64encode(raw_sig).decode("utf-8")
+                elif isinstance(priv_key, RSAPrivateKey):
+                    raw_sig = priv_key.sign(
+                        data_bytes,
+                        padding.PKCS1v15(),
+                        hashes.SHA256()
+                    )
+                    return base64.b64encode(raw_sig).decode("utf-8")
+                raise BinanceAuthError("Tipo de clave PEM no admitido: se requiere Ed25519 o RSA.")
+            except Exception as e:
+                raise BinanceAuthError(f"FAIL-CLOSED: Error al firmar petición con clave PEM: {e}") from e
+
+        # 2. Si es clave secreta simétrica HMAC-SHA256 estándar de Binance
+        return hmac.new(cleaned_key.encode("utf-8"), data_bytes, hashlib.sha256).hexdigest()
 
     def check_weight(self, headers: httpx.Headers) -> None:
         """Monitorea el header x-mbx-used-weight y aplica fail-closed preventivo si es necesario."""
@@ -151,7 +194,7 @@ class BinanceP2PClient:
             raise ValueError("FAIL-CLOSED: La ventana de consulta histórica no puede superar los 30 días.")
 
         url = f"{self.base_url}/sapi/v1/c2c/orderMatch/listUserOrderHistory"
-        params: dict[str, str | int] = {
+        params: dict[str, Any] = {
             "tradeType": trade_type,
             "startTimestamp": start_timestamp,
             "endTimestamp": end_timestamp,
@@ -160,10 +203,11 @@ class BinanceP2PClient:
             "recvWindow": self.recv_window,
             "timestamp": self.get_synced_timestamp()
         }
+        signed_params = self.sign_params(params)
         headers = {"X-MBX-APIKEY": self.api_key}
 
         with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, params=params, headers=headers)
+            response = client.get(url, params=signed_params, headers=headers)
             self.check_weight(response.headers)
             raw_data = self._handle_response_errors(response)
             return BinanceOrderHistoryResponse.model_validate(raw_data)
@@ -172,8 +216,14 @@ class BinanceP2PClient:
         """Crea un anuncio en Binance P2P."""
         url = f"{self.base_url}/sapi/v1/c2c/ads/post"
         headers = {"X-MBX-APIKEY": self.api_key}
+        payload: dict[str, Any] = {
+            "recvWindow": self.recv_window,
+            "timestamp": self.get_synced_timestamp(),
+            **ad_payload
+        }
+        signed_payload = self.sign_params(payload)
         with httpx.Client(timeout=10.0) as client:
-            response = client.post(url, json=ad_payload, headers=headers)
+            response = client.post(url, json=signed_payload, headers=headers)
             self.check_weight(response.headers)
             return self._handle_response_errors(response)
 
@@ -181,9 +231,15 @@ class BinanceP2PClient:
         """Actualiza el precio o inventario de un anuncio."""
         url = f"{self.base_url}/sapi/v1/c2c/ads/update"
         headers = {"X-MBX-APIKEY": self.api_key}
-        payload = {"advNo": ad_no, **update_payload}
+        payload: dict[str, Any] = {
+            "advNo": ad_no,
+            "recvWindow": self.recv_window,
+            "timestamp": self.get_synced_timestamp(),
+            **update_payload
+        }
+        signed_payload = self.sign_params(payload)
         with httpx.Client(timeout=10.0) as client:
-            response = client.post(url, json=payload, headers=headers)
+            response = client.post(url, json=signed_payload, headers=headers)
             self.check_weight(response.headers)
             return self._handle_response_errors(response)
 

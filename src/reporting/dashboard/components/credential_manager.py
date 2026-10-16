@@ -95,11 +95,11 @@ def render_credential_manager():
 
             if new_private_key.strip():
                 try:
-                    valid_pem = KeyValidator.validate_private_key_pem(new_private_key)
-                    manager.store_secret("binance_private_key", valid_pem)
+                    valid_key = KeyValidator.validate_secret_key(new_private_key)
+                    manager.store_secret("binance_private_key", valid_key)
                     saved_any = True
                 except KeyValidationError as e:
-                    st.error(f"Error en Clave Privada PEM: {e}")
+                    st.error(f"Error en Clave Privada / Secret: {e}")
                     return
 
             if new_tg_token.strip():

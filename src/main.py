@@ -168,21 +168,34 @@ class P2PBotEngine:
 
     def _setup_binance_client(self):
         """Inicializa el cliente real de Binance o el simulador Sandbox."""
-        if self.use_sandbox:
-            self.client = MockBinanceP2PClient(enable_default_orders=True)
-            logger.info("🧪 Modo Sandbox activo: Usando MockBinanceP2PClient.")
-            return
-
+        has_real_keys = False
+        api_key = ""
+        private_key = ""
         try:
             api_key = self.key_manager.get_secret("binance_api_key")
             private_key = self.key_manager.get_secret("binance_private_key")
-            self.client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
-            logger.info("Cliente de Binance P2P inicializado con credenciales cifradas.")
+            if api_key and private_key:
+                has_real_keys = True
         except (KeyError, ValueError):
-            logger.warning(
-                "⚠️ No se encontraron credenciales de Binance en la DB. "
-                "Activando automáticamente Modo Sandbox para pruebas operativas continuas."
-            )
+            has_real_keys = False
+
+        if not has_real_keys or self.use_sandbox:
+            self.client = MockBinanceP2PClient(enable_default_orders=True)
+            if not has_real_keys:
+                self.use_sandbox = True
+                self.notifier.use_sandbox = True
+                logger.info("🧪 Modo Sandbox activo: No se encontraron credenciales reales de Binance en la DB.")
+            else:
+                logger.info("🧪 Modo Sandbox forzado por configuración (USE_SANDBOX=True).")
+            return
+
+        try:
+            self.client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
+            self.use_sandbox = False
+            self.notifier.use_sandbox = False
+            logger.info("🟢 Cliente oficial de Binance P2P inicializado con credenciales cifradas (MODO PRODUCCIÓN).")
+        except (ValueError, KeyError, RuntimeError, BinanceAuthError) as e:
+            logger.error(f"Error inicializando cliente real de Binance: {e}. Activando Sandbox de respaldo.")
             self.use_sandbox = True
             self.notifier.use_sandbox = True
             self.client = MockBinanceP2PClient(enable_default_orders=True)

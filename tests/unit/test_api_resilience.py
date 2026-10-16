@@ -84,3 +84,12 @@ def test_key_validator_accepts_valid_ed25519_pem():
 
     validated = KeyValidator.validate_private_key_pem(pem_str)
     assert validated == pem_str.strip()
+
+
+def test_key_validator_accepts_hmac_secret():
+    secret_hex = "f" * 64
+    validated = KeyValidator.validate_secret_key(secret_hex)
+    assert validated == secret_hex
+
+    with pytest.raises(KeyValidationError, match="demasiado corta"):
+        KeyValidator.validate_secret_key("short")

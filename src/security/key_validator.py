@@ -55,3 +55,19 @@ class KeyValidator:
             raise
         except (ValueError, TypeError, UnsupportedAlgorithm) as e:
             raise KeyValidationError(f"Error procesando la clave privada PEM: Formato corrupto o contraseña requerida ({e})")
+
+    @staticmethod
+    def validate_secret_key(secret_str: str) -> str:
+        """Valida tanto claves privadas PEM (Ed25519/RSA) como claves secretas HMAC-SHA256 de Binance."""
+        cleaned = secret_str.strip()
+        if not cleaned:
+            raise KeyValidationError("La clave privada o secret no puede estar vacía.")
+
+        if "-----BEGIN" in cleaned:
+            return KeyValidator.validate_private_key_pem(cleaned)
+
+        # Clave secreta simétrica HMAC de Binance (generalmente 64 caracteres)
+        if len(cleaned) < 16:
+            raise KeyValidationError("La clave secreta HMAC es demasiado corta (mínimo 16 caracteres esperados).")
+        logger.info("Clave secreta HMAC validada sintácticamente con éxito.")
+        return cleaned
