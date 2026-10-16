@@ -12,6 +12,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import httpx
+
 import src.data.models  # noqa: F401
 from config.settings import Settings
 from src.core.binance_client import (
@@ -57,6 +59,44 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         # Suprimir logs continuos de sondeos de salud
         pass
+
+
+class KeepAlivePinger:
+    """Hilo ligero que envía periódicamente un ping HTTP a la URL pública del servicio
+    (Render / Koyeb) para evitar que la plataforma conmute a suspensión por inactividad.
+    """
+
+    def __init__(self, target_url: str | None = None, interval_seconds: int = 600):
+        # Render expone automáticamente RENDER_EXTERNAL_URL en el contenedor
+        self.target_url = target_url or os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
+        self.interval = interval_seconds
+        self.is_running = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not self.target_url:
+            logger.info("KeepAlivePinger inactivo: No se configuró URL pública (RENDER_EXTERNAL_URL).")
+            return
+        self.is_running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="keep_alive_pinger")
+        self._thread.start()
+        logger.info(f"KeepAlivePinger activo: Auto-ping cada {self.interval}s a {self.target_url}")
+
+    def _run(self) -> None:
+        # Esperar 60 segundos tras arranque inicial
+        time.sleep(60)
+        while self.is_running:
+            try:
+                if self.target_url:
+                    with httpx.Client(timeout=10.0) as client:
+                        res = client.get(self.target_url)
+                        logger.info(f"KeepAlive ping enviado a {self.target_url} -> HTTP {res.status_code}")
+            except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
+                logger.debug(f"KeepAlive ping fallo temporal (no crítico): {e}")
+            time.sleep(self.interval)
+
+    def stop(self) -> None:
+        self.is_running = False
 
 
 class P2PBotEngine:
@@ -147,6 +187,10 @@ class P2PBotEngine:
         self.httpd_servers: list[HTTPServer] = []
         self._start_healthcheck_server()
 
+        # 9. Iniciar KeepAlivePinger anti-suspensión en Nube (Render / Koyeb)
+        self.pinger = KeepAlivePinger(target_url=self.settings.KEEP_ALIVE_URL)
+        self.pinger.start()
+
     def _start_healthcheck_server(self) -> None:
         """Inicia listeners HTTP en los puertos comunes de Cloud (PORT, 8000, 10000)."""
         ports_to_try: list[int] = []
@@ -236,6 +280,7 @@ class P2PBotEngine:
         """Cierre limpio y auditado (fail-closed)."""
         logger.info(f"==> Señal de terminación recibida ({signum}). Cerrando bot...")
         self.is_running = False
+        self.pinger.stop()
         self.poller.stop()
         self.dispatcher.queue_alert(f"🔴 *Bot P2P Merchant detenido limpiamente* {self.instance_tag}.")
         self.dispatcher.wait_until_empty(timeout=2.0)

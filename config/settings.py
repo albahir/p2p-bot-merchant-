@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     )
     AI_MODEL_NAME: str = Field(default="gemini-flash-lite-latest", description="Modelo LLM a utilizar")
 
+    # Anti-suspensión en Nube (Keep-Alive)
+    KEEP_ALIVE_URL: str | None = Field(
+        default=None,
+        description="URL pública para auto-ping keep-alive anti-suspensión (ej. https://p2p-bot-merchant.onrender.com)"
+    )
+
     # Entorno y Operaciones
     ENVIRONMENT: str = Field(default="development")
     USE_SANDBOX: bool = Field(default=True, description="Activa el simulador P2P si no hay claves reales")
