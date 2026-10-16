@@ -4,7 +4,7 @@ o SERVER_IP_WHITELIST no están presentes o son inválidas, la carga falla.
 """
 
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     TELEGRAM_ALERT_CHAT_ID: str = Field(default="", description="Chat ID para alertas")
     TELEGRAM_ALLOWED_USER_IDS: str = Field(
         default="",
+        validation_alias=AliasChoices("TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_USERS"),
         description="IDs de Telegram autorizados para comandos, separados por coma"
     )
     TELEGRAM_PROXY_URL: str | None = Field(
@@ -77,11 +78,15 @@ class Settings(BaseSettings):
 
     @property
     def telegram_allowed_users(self) -> list[int]:
-        if not self.TELEGRAM_ALLOWED_USER_IDS:
-            return []
         users: list[int] = []
-        for uid in self.TELEGRAM_ALLOWED_USER_IDS.split(","):
-            cleaned = uid.strip()
-            if cleaned.isdigit():
-                users.append(int(cleaned))
+        if self.TELEGRAM_ALLOWED_USER_IDS:
+            for uid in self.TELEGRAM_ALLOWED_USER_IDS.split(","):
+                cleaned = uid.strip()
+                if cleaned.isdigit():
+                    users.append(int(cleaned))
+        # Si no se configuró allowed_users pero hay un alert chat ID numérico (chat privado con el bot), autorizarlo
+        if not users and self.TELEGRAM_ALERT_CHAT_ID:
+            clean_chat = self.TELEGRAM_ALERT_CHAT_ID.strip()
+            if clean_chat.isdigit() and not clean_chat.startswith("-"):
+                users.append(int(clean_chat))
         return users

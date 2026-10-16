@@ -148,15 +148,29 @@ class TelegramNotifier:
                 return False
         return False
 
-    def is_user_authorized(self, user_id: int) -> bool:
-        """Verifica si un remitente de comando está en la lista autorizada."""
-        return user_id in self.allowed_user_ids
+    def is_user_authorized(self, user_id: int | str | None) -> bool:
+        """Verifica si un remitente de comando está en la lista autorizada o es el dueño del chat."""
+        if user_id is None:
+            return False
+        user_str = str(user_id).strip()
+        # 1. Si coincide con el chat_id predeterminado (en chats privados 1-a-1, user_id == chat_id)
+        if self.default_chat_id and user_str == str(self.default_chat_id).strip():
+            return True
+        # 2. Si está en la lista explícita de allowed_user_ids
+        for allowed in self.allowed_user_ids:
+            if str(allowed).strip() == user_str:
+                return True
+        return False
 
-    def handle_command(self, user_id: int, command: str) -> str:
+    def handle_command(self, user_id: int | str | None, command: str) -> str:
         """Procesa comandos /status, /pause, /resume, /report y /ayuda respetando permisos."""
         if not self.is_user_authorized(user_id):
             logger.warning(f"Intento de comando no autorizado por user_id={user_id}")
-            return "⛔ Acceso denegado. Usuario no autorizado."
+            return (
+                f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
+                f"Tu ID de Telegram es: `{user_id}`.\n"
+                f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`."
+            )
 
         cmd = command.strip().lower()
         if cmd == "/status":
@@ -328,7 +342,12 @@ class TelegramCommandPoller:
                     # Consulta en lenguaje natural
                     if not self.notifier.is_user_authorized(user_id):
                         logger.warning(f"Consulta no autorizada de user_id={user_id}")
-                        self.notifier.send_alert("⛔ Acceso denegado. Usuario no autorizado.", chat_id=chat_id)
+                        self.notifier.send_alert(
+                            f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
+                            f"Tu ID de Telegram es: `{user_id}`.\n"
+                            f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`.",
+                            chat_id=chat_id
+                        )
                     else:
                         if self.ai_agent:
                             ai_response = self.ai_agent.ask(text)
