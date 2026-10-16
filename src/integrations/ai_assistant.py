@@ -218,7 +218,7 @@ class TelegramAIAgent:
         self,
         api_key: str | list[str] = "",
         provider: str = "gemini",
-        model_name: str = "gemini-1.5-flash",
+        model_name: str = "gemini-flash-lite-latest",
         db_session_factory=SessionLocal
     ):
         self.key_pool = AIKeyPool(api_key)
@@ -228,30 +228,43 @@ class TelegramAIAgent:
         self._client = httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0))
 
     def _call_gemini_with_failover(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any] | None, str | None]:
-        """Envía una petición a Gemini rotando silenciosamente entre las claves del pool ante error 429/403."""
+        """Envía una petición a Gemini rotando silenciosamente entre las claves del pool y modelos de respaldo."""
+        models_to_try = [self.model_name]
+        for fallback in ("gemini-flash-lite-latest", "gemini-3.5-flash-lite"):
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
         attempts = max(self.key_pool.total_keys, 1)
-        for _ in range(attempts):
-            key = self.key_pool.get_active_key()
-            if not key:
-                break
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={key}"
-            try:
-                res = self._client.post(url, json=payload)
-                if res.status_code == 200:
-                    return 200, res.json(), None
-                if res.status_code in (429, 403):
-                    logger.warning(f"Error de cuota Gemini (HTTP {res.status_code}). Intentando clave de respaldo...")
-                    self.key_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+        for model in models_to_try:
+            for _ in range(attempts):
+                key = self.key_pool.get_active_key()
+                if not key:
+                    break
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+                try:
+                    res = self._client.post(url, json=payload)
+                    if res.status_code == 200:
+                        return 200, res.json(), None
+                    if res.status_code in (429, 403):
+                        logger.warning(f"Error de cuota Gemini (HTTP {res.status_code}). Intentando clave de respaldo...")
+                        self.key_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                        continue
+                    if res.status_code == 400:
+                        logger.warning(f"Error 400 en clave Gemini ({res.text[:100]}). Intentando clave de respaldo...")
+                        self.key_pool.mark_rate_limited(key, cooldown_seconds=300.0)
+                        continue
+                    if res.status_code in (404, 503):
+                        logger.warning(f"Modelo {model} retornó HTTP {res.status_code}. Probando modelo de respaldo...")
+                        break
+
+                    logger.error(f"Error de API Gemini: HTTP {res.status_code} - {res.text}")
+                    return res.status_code, None, f"⚠️ Error del servicio de IA (HTTP {res.status_code}). Intenta de nuevo en unos instantes."
+                except (httpx.TimeoutException, httpx.NetworkError) as e:
+                    logger.warning(f"Error de red temporal al conectar con Gemini: {e}")
+                    self.key_pool.mark_rate_limited(key, cooldown_seconds=30.0)
                     continue
 
-                logger.error(f"Error de API Gemini: HTTP {res.status_code} - {res.text}")
-                return res.status_code, None, "⚠️ No pude conectar con el servicio de IA en este momento. Intenta de nuevo en unos instantes."
-            except (httpx.TimeoutException, httpx.NetworkError) as e:
-                logger.warning(f"Error de red temporal al conectar con Gemini: {e}")
-                self.key_pool.mark_rate_limited(key, cooldown_seconds=30.0)
-                continue
-
-        return 429, None, "⏳ *Límite de cuota alcanzado*. Todas las claves API están en uso o espera. Por favor intenta en un minuto."
+        return 429, None, "⏳ *Límite de cuota alcanzado o servicio temporalmente saturado*. Por favor intenta en un minuto."
 
     def ask(self, prompt: str) -> str:
         """Procesa una consulta en lenguaje natural utilizando Function Calling y devuelve la respuesta."""

@@ -59,7 +59,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AI_API_KEY", "AI_API_KEYS"),
         description="API Key(s) para el asistente de IA, separadas por coma para rotación automática"
     )
-    AI_MODEL_NAME: str = Field(default="gemini-1.5-flash", description="Modelo LLM a utilizar")
+    AI_MODEL_NAME: str = Field(default="gemini-flash-lite-latest", description="Modelo LLM a utilizar")
 
     # Entorno y Operaciones
     ENVIRONMENT: str = Field(default="development")

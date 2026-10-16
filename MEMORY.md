@@ -96,8 +96,9 @@
     - Soporte dual de variables de entorno mediante `AliasChoices("TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_USERS")`.
     - Reconocimiento automático del dueño: si la lista explícita está vacía, se autoriza por defecto al remitente cuyo `user_id` coincide con `TELEGRAM_ALERT_CHAT_ID` en chats privados.
     - Mensajes diagnósticos con el ID exacto del remitente para facilitar la configuración sin depender de bots externos.
-15. **Estandarización de Modelo Gemini de Alto Rendimiento (ADR 015)**:
-    - Configuración por defecto de `gemini-1.5-flash` en sustitución de nombres erróneos, maximizando la cuota gratuita (15 RPM, 1.500 RPD y 1.000.000 TPM) y evitando bloqueos por saturación o errores HTTP 404.
+15. **Estandarización de Modelo Gemini de Alto Rendimiento y Fallback Automático (ADR 015)**:
+    - Verificación directa contra la API de Google en vivo: la serie `gemini-1.5` fue retirada por Google devolviendo HTTP 404 en favor de `gemini-flash-lite-latest` y `gemini-3.5-flash-lite`, los cuales responden con HTTP 200 OK y ejecutan Function Calling en menos de 1 segundo.
+    - Implementación de cascada de modelos de respaldo ante errores HTTP 404/503 y rotación de claves ante errores 400/403/429.
 16. **Pool Dinámico de Claves API y Rotación Silenciosa ante Límites de Tasa (ADR 016)**:
     - Implementación de `AIKeyPool` en `src/integrations/ai_assistant.py`: soporte multi-clave mediante `AI_API_KEY` o `AI_API_KEYS` con separación por coma o punto y coma.
     - Detección automática de errores HTTP 429/403: la clave saturada entra en cooldown (60s) y el sistema rota de inmediato y silenciosamente a la siguiente clave de respaldo disponible.
