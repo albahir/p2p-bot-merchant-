@@ -4,6 +4,8 @@ garantizando la regla constitucional de 'Cero Secretos' y respuestas libres de a
 """
 
 import logging
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -153,25 +155,107 @@ GEMINI_TOOL_DECLARATIONS = [
 ]
 
 
+class AIKeyPool:
+    """Pool y rotador dinámico de API Keys con cooldown silencioso ante límites de tasa (429/403)."""
+
+    def __init__(self, raw_keys: str | list[str]):
+        if isinstance(raw_keys, str):
+            self.keys: list[str] = [
+                k.strip()
+                for k in raw_keys.replace(";", ",").split(",")
+                if k.strip()
+            ]
+        else:
+            self.keys = [k.strip() for k in raw_keys if k and k.strip()]
+
+        self._current_index = 0
+        self._lock = threading.Lock()
+        self._cooldowns: dict[str, float] = {}
+
+    @property
+    def has_keys(self) -> bool:
+        return len(self.keys) > 0
+
+    @property
+    def total_keys(self) -> int:
+        return len(self.keys)
+
+    def get_active_key(self) -> str | None:
+        """Devuelve la clave actualmente activa o la primera disponible fuera de cooldown."""
+        with self._lock:
+            if not self.keys:
+                return None
+            now = time.time()
+            for i in range(len(self.keys)):
+                idx = (self._current_index + i) % len(self.keys)
+                k = self.keys[idx]
+                if self._cooldowns.get(k, 0) <= now:
+                    self._current_index = idx
+                    return k
+            return self.keys[self._current_index]
+
+    def mark_rate_limited(self, exhausted_key: str, cooldown_seconds: float = 60.0) -> str | None:
+        """Pone la clave agotada en cooldown y rota silenciosamente a la siguiente disponible."""
+        with self._lock:
+            if not self.keys:
+                return None
+            now = time.time()
+            self._cooldowns[exhausted_key] = now + cooldown_seconds
+            self._current_index = (self._current_index + 1) % len(self.keys)
+            next_key = self.keys[self._current_index]
+            masked_key = f"{exhausted_key[:6]}...{exhausted_key[-4:]}" if len(exhausted_key) > 10 else "[CLAVE]"
+            logger.warning(
+                f"GEMINI: Clave {masked_key} en cooldown ({cooldown_seconds}s). "
+                f"Rotando silenciosamente al slot [{self._current_index + 1}/{len(self.keys)}]."
+            )
+            return next_key
+
+
 class TelegramAIAgent:
     """Agente conversacional de IA con Function Calling para responder consultas en Telegram."""
 
     def __init__(
         self,
-        api_key: str = "",
+        api_key: str | list[str] = "",
         provider: str = "gemini",
         model_name: str = "gemini-1.5-flash",
         db_session_factory=SessionLocal
     ):
-        self.api_key = api_key.strip()
+        self.key_pool = AIKeyPool(api_key)
         self.provider = provider
         self.model_name = model_name
         self.tools = AIAssistantTools(db_session_factory=db_session_factory)
         self._client = httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0))
 
+    def _call_gemini_with_failover(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any] | None, str | None]:
+        """Envía una petición a Gemini rotando silenciosamente entre las claves del pool ante error 429/403."""
+        attempts = max(self.key_pool.total_keys, 1)
+        for _ in range(attempts):
+            key = self.key_pool.get_active_key()
+            if not key:
+                break
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={key}"
+            try:
+                res = self._client.post(url, json=payload)
+                if res.status_code == 200:
+                    return 200, res.json(), None
+                if res.status_code in (429, 403):
+                    logger.warning(f"Error de cuota Gemini (HTTP {res.status_code}). Intentando clave de respaldo...")
+                    self.key_pool.mark_rate_limited(key, cooldown_seconds=60.0)
+                    continue
+
+                logger.error(f"Error de API Gemini: HTTP {res.status_code} - {res.text}")
+                return res.status_code, None, "⚠️ No pude conectar con el servicio de IA en este momento. Intenta de nuevo en unos instantes."
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                logger.warning(f"Error de red temporal al conectar con Gemini: {e}")
+                self.key_pool.mark_rate_limited(key, cooldown_seconds=30.0)
+                continue
+
+        return 429, None, "⏳ *Límite de cuota alcanzado*. Todas las claves API están en uso o espera. Por favor intenta en un minuto."
+
     def ask(self, prompt: str) -> str:
         """Procesa una consulta en lenguaje natural utilizando Function Calling y devuelve la respuesta."""
-        if not self.api_key:
+        if not self.key_pool.has_keys:
             return (
                 "ℹ️ *Asistente de IA no configurado*\n\n"
                 "Para hablar conmigo en lenguaje natural y consultar ganancias o métricas, "
@@ -189,8 +273,6 @@ class TelegramAIAgent:
             "4. Responde siempre en español."
         )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
-
         messages: list[dict[str, Any]] = [
             {"role": "user", "parts": [{"text": prompt}]}
         ]
@@ -202,13 +284,11 @@ class TelegramAIAgent:
         }
 
         try:
-            # 1. Primera llamada al modelo
-            res = self._client.post(url, json=payload)
-            if res.status_code != 200:
-                logger.error(f"Error de API Gemini: HTTP {res.status_code} - {res.text}")
-                return "⚠️ No pude conectar con el servicio de IA en este momento. Intenta de nuevo en unos instantes."
+            # 1. Primera llamada al modelo con failover automático
+            status_code, data, err_msg = self._call_gemini_with_failover(payload)
+            if status_code != 200 or not data:
+                return err_msg or "⚠️ No pude conectar con el servicio de IA en este momento."
 
-            data = res.json()
             candidates = data.get("candidates", [])
             if not candidates:
                 return "No obtuve respuesta del asistente de IA."
@@ -265,12 +345,10 @@ class TelegramAIAgent:
             })
 
             payload["contents"] = messages
-            res_final = self._client.post(url, json=payload)
-            if res_final.status_code != 200:
-                logger.error(f"Error Gemini en paso 2: {res_final.text}")
-                return "⚠️ Ocurrió un error al formatear la respuesta con los datos obtenidos."
+            status_code_2, data_final, err_msg_2 = self._call_gemini_with_failover(payload)
+            if status_code_2 != 200 or not data_final:
+                return err_msg_2 or "⚠️ Ocurrió un error al formatear la respuesta con los datos obtenidos."
 
-            data_final = res_final.json()
             final_parts = data_final.get("candidates", [{}])[0].get("content", {}).get("parts", [])
             final_text = "".join(p.get("text", "") for p in final_parts)
 

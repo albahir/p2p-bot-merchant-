@@ -7,3 +7,6 @@
 - [x] T-012.5 Escribir tests unitarios con mocks para el flujo conversacional y llamadas a herramientas (`tests/unit/test_ai_assistant.py`).
 - [x] T-012.6 Verificar tipado estático (`mypy`), reglas de linter (`ruff`) y certificar suite completa de pruebas.
 - [x] T-012.7 Actualizar `memory.md` con el estado de la especificación 012.
+- [x] T-012.8 Implementar pool dinámico de claves API (`AIKeyPool`) con rotación silenciosa y cooldown ante errores HTTP 429/403 en `src/integrations/ai_assistant.py`.
+- [x] T-012.9 Añadir soporte en `config/settings.py` para múltiples claves separadas por coma (`AI_API_KEYS`).
+- [x] T-012.10 Escribir pruebas unitarias de failover y rotación transparente de claves en `tests/unit/test_ai_assistant.py`.

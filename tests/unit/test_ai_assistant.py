@@ -159,3 +159,56 @@ def test_ai_agent_sanitizes_potential_secrets_in_llm_output():
         response = agent.ask("Prueba de seguridad")
         assert "1234567890abcdef" not in response
         assert "[REDACTED]" in response
+
+
+def test_ai_agent_silently_rotates_on_rate_limit_429():
+    """Si una clave alcanza el límite 429, debe rotar silenciosamente a la siguiente y responder con éxito."""
+    agent = TelegramAIAgent(
+        api_key="key_exhausted, key_active_backup",
+        provider="gemini",
+        db_session_factory=SessionLocal
+    )
+
+    # La 1ra clave devuelve HTTP 429 (Rate Limit / Quota Exceeded)
+    mock_resp_429 = MagicMock(status_code=429)
+    mock_resp_429.text = '{"error": {"code": 429, "message": "Resource has been exhausted"}}'
+    mock_resp_429.json.return_value = {"error": {"code": 429}}
+
+    # La 2da clave devuelve HTTP 200 con éxito
+    mock_resp_200 = MagicMock(status_code=200)
+    mock_resp_200.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "Respuesta generada con éxito desde clave de respaldo."}]
+                }
+            }
+        ]
+    }
+
+    with patch.object(agent._client, "post", side_effect=[mock_resp_429, mock_resp_200]) as mock_post:
+        response = agent.ask("¿Cuál es el saldo?")
+        assert "Respuesta generada con éxito" in response
+        assert mock_post.call_count == 2
+        # Verificar que la segunda llamada utilizó la clave de respaldo
+        first_url = mock_post.call_args_list[0][0][0]
+        second_url = mock_post.call_args_list[1][0][0]
+        assert "key=key_exhausted" in first_url
+        assert "key=key_active_backup" in second_url
+
+
+def test_ai_agent_all_keys_exhausted_graceful_message():
+    """Si todas las claves configuradas devuelven 429, debe retornar mensaje amigable sin caerse."""
+    agent = TelegramAIAgent(
+        api_key="key_1, key_2",
+        provider="gemini",
+        db_session_factory=SessionLocal
+    )
+
+    mock_resp_429 = MagicMock(status_code=429)
+    mock_resp_429.text = '{"error": {"code": 429, "message": "Resource has been exhausted"}}'
+    mock_resp_429.json.return_value = {"error": {"code": 429}}
+
+    with patch.object(agent._client, "post", return_value=mock_resp_429):
+        response = agent.ask("¿Cuál es el volumen?")
+        assert "límite" in response.lower() or "cuota" in response.lower() or "espera" in response.lower()

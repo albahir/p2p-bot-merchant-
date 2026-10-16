@@ -98,6 +98,11 @@
     - Mensajes diagnósticos con el ID exacto del remitente para facilitar la configuración sin depender de bots externos.
 15. **Estandarización de Modelo Gemini de Alto Rendimiento (ADR 015)**:
     - Configuración por defecto de `gemini-1.5-flash` en sustitución de nombres erróneos, maximizando la cuota gratuita (15 RPM, 1.500 RPD y 1.000.000 TPM) y evitando bloqueos por saturación o errores HTTP 404.
+16. **Pool Dinámico de Claves API y Rotación Silenciosa ante Límites de Tasa (ADR 016)**:
+    - Implementación de `AIKeyPool` en `src/integrations/ai_assistant.py`: soporte multi-clave mediante `AI_API_KEY` o `AI_API_KEYS` con separación por coma o punto y coma.
+    - Detección automática de errores HTTP 429/403: la clave saturada entra en cooldown (60s) y el sistema rota de inmediato y silenciosamente a la siguiente clave de respaldo disponible.
+    - Reintento transparente sin fricción para el usuario en Telegram, garantizando alta disponibilidad continua incluso bajo uso intensivo.
+    - Enmascaramiento estricto (`AIzaSy...7GBE`) en logs para cumplir la Constitución de Cero Secretos.
 
 ---
 
@@ -105,7 +110,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (31/31 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (33/33 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).

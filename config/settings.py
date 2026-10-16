@@ -54,7 +54,11 @@ class Settings(BaseSettings):
 
     # Asistente de IA (LLM) para consultas en lenguaje natural
     AI_PROVIDER: str = Field(default="gemini", description="Proveedor de IA: gemini o openai")
-    AI_API_KEY: str = Field(default="", description="API Key para el asistente de IA conversacional")
+    AI_API_KEY: str = Field(
+        default="",
+        validation_alias=AliasChoices("AI_API_KEY", "AI_API_KEYS"),
+        description="API Key(s) para el asistente de IA, separadas por coma para rotación automática"
+    )
     AI_MODEL_NAME: str = Field(default="gemini-1.5-flash", description="Modelo LLM a utilizar")
 
     # Entorno y Operaciones
