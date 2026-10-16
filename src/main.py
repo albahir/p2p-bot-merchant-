@@ -6,6 +6,7 @@ simulación Sandbox y notificaciones resilientes por Telegram.
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -41,6 +42,11 @@ logger = logging.getLogger("p2p_engine")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Manejador HTTP simple para probes de salud (Koyeb, Render, Docker)."""
+
+    def do_HEAD(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
 
     def do_GET(self) -> None:
         self.send_response(200)
@@ -130,27 +136,35 @@ class P2PBotEngine:
             status="SUCCESS"
         )
         mode_label = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN"
+        self.instance_tag = f"[`{socket.gethostname()[:8]}` | pid:{os.getpid()}]"
         self.dispatcher.queue_alert(
-            f"🟢 *Bot P2P Merchant iniciado exitosamente*\n"
+            f"🟢 *Bot P2P Merchant iniciado exitosamente* {self.instance_tag}\n"
             f"Modo: {mode_label}\n"
             f"Monitoreo y escucha de comandos activos."
         )
 
-        # 8. Iniciar servidor HTTP ligero para probes de salud (Koyeb, Render, Docker)
-        self.httpd: HTTPServer | None = None
+        # 8. Iniciar servidores HTTP ligeros para probes de salud (Koyeb, Render, Docker)
+        self.httpd_servers: list[HTTPServer] = []
         self._start_healthcheck_server()
 
     def _start_healthcheck_server(self) -> None:
-        """Inicia un listener HTTP en el puerto indicado por PORT (default 8000)."""
-        port_str = os.getenv("PORT", "8000")
-        try:
-            port = int(port_str)
-            self.httpd = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-            http_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-            http_thread.start()
-            logger.info(f"Servidor de Healthcheck activo en http://0.0.0.0:{port}")
-        except (ValueError, OSError) as e:
-            logger.warning(f"No se pudo iniciar el servidor de healthcheck en puerto {port_str}: {e}")
+        """Inicia listeners HTTP en los puertos comunes de Cloud (PORT, 8000, 10000)."""
+        ports_to_try: list[int] = []
+        env_port = os.getenv("PORT")
+        if env_port and env_port.strip().isdigit():
+            ports_to_try.append(int(env_port.strip()))
+        for default_port in (8000, 10000):
+            if default_port not in ports_to_try:
+                ports_to_try.append(default_port)
+
+        for port in ports_to_try:
+            try:
+                httpd = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+                self.httpd_servers.append(httpd)
+                threading.Thread(target=httpd.serve_forever, daemon=True).start()
+                logger.info(f"Servidor de Healthcheck activo en http://0.0.0.0:{port}")
+            except OSError as e:
+                logger.debug(f"Puerto {port} no disponible o ya enlazado: {e}")
 
     def _setup_binance_client(self):
         """Inicializa el cliente real de Binance o el simulador Sandbox."""
@@ -199,19 +213,22 @@ class P2PBotEngine:
         signal.signal(signal.SIGTERM, self.handle_exit)
 
         while self.is_running:
-            self.run_cycle()
+            try:
+                self.run_cycle()
+            except (RuntimeError, ValueError, KeyError, OSError):
+                logger.exception("Error imprevisto en ciclo de ejecución")
             time.sleep(poll_interval_seconds)
 
     def handle_exit(self, signum, frame):
         """Cierre limpio y auditado (fail-closed)."""
-        logger.info("==> Señal de terminación recibida. Cerrando bot...")
+        logger.info(f"==> Señal de terminación recibida ({signum}). Cerrando bot...")
         self.is_running = False
         self.poller.stop()
-        self.dispatcher.queue_alert("🔴 *Bot P2P Merchant detenido limpiamente*.")
+        self.dispatcher.queue_alert(f"🔴 *Bot P2P Merchant detenido limpiamente* {self.instance_tag}.")
         self.dispatcher.wait_until_empty(timeout=2.0)
         self.dispatcher.stop()
-        if self.httpd:
-            self.httpd.shutdown()
+        for server in self.httpd_servers:
+            server.shutdown()
         self.audit.log(
             event_type="ENGINE_STOP",
             key_identifier="SYSTEM",

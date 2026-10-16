@@ -87,6 +87,17 @@
     - Desacoplamiento entre comandos rápidos deterministas (`/status`, etc.) y consultas analíticas en lenguaje natural.
     - Implementación de Function Calling (Tools) exclusivo de solo lectura (`AIAssistantTools`) que consulta datos reales de SQLite y del motor fiscal sin riesgo de alucinaciones.
     - Guardrail estricto de seguridad: el LLM nunca recibe claves privadas ni API keys, y sus respuestas se filtran obligatoriamente con `sanitize_message()`.
+13. **Despliegue Cloud Continuo 24/7 y Health Checks Multi-Puerto (ADR 013)**:
+    - `Dockerfile` multi-stage para despliegues ligeros con usuario no root (`appuser`) y permisos de escritura sobre `/app/p2p_bot.db`.
+    - Servidor HTTP ligero integrado en `src/main.py` respondiendo tanto a métodos `HEAD` como `GET` (HTTP 200 OK) para superar los scanners de salud de Render, Koyeb y Docker.
+    - Enlace a puertos dinámicos (`PORT`, `8000`, `10000`) para garantizar compatibilidad con cualquier enrutador de nube sin requerir configuración manual.
+    - Etiquetado de instancia `[hostname | pid]` en las alertas de inicio y cierre de Telegram para distinguir el cese de contenedores antiguos durante rolling updates de caídas efectivas.
+14. **Auto-Autorización y Resiliencia de Permisos en Telegram (ADR 014)**:
+    - Soporte dual de variables de entorno mediante `AliasChoices("TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_USERS")`.
+    - Reconocimiento automático del dueño: si la lista explícita está vacía, se autoriza por defecto al remitente cuyo `user_id` coincide con `TELEGRAM_ALERT_CHAT_ID` en chats privados.
+    - Mensajes diagnósticos con el ID exacto del remitente para facilitar la configuración sin depender de bots externos.
+15. **Estandarización de Modelo Gemini de Alto Rendimiento (ADR 015)**:
+    - Configuración por defecto de `gemini-1.5-flash` en sustitución de nombres erróneos, maximizando la cuota gratuita (15 RPM, 1.500 RPD y 1.000.000 TPM) y evitando bloqueos por saturación o errores HTTP 404.
 
 ---
 
