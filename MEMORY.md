@@ -127,6 +127,12 @@
     - KeepAlivePinger Autónomo: Se implementó un hilo daemon que detecta la variable inyectada por Render (`RENDER_EXTERNAL_URL` o `KEEP_ALIVE_URL`) y realiza una solicitud HTTP GET ligera cada 10 minutos (600s), manteniendo despierto el servicio 24/7 sin exceder las 750 horas gratuitas mensuales.
     - Ecosistema MCP (Model Context Protocol): Evaluación y catalogación de servidores MCP útiles para el proyecto (`@modelcontextprotocol/server-sqlite` para auditoría directa de BD, `github-mcp` para CI/CD, `fetch/puppeteer-mcp` para scraping BCV y `binance-mcp` para market data).
     - Suite de pruebas expandida: **43/43 tests pasando al 100%**.
+21. **Scraping Directo del Portal Oficial BCV y Servidores MCP (ADR 021)**:
+    - Diagnóstico de Fuente de Tasas: La API de terceros previa (`pydolarvenezuela-api.vercel.app`) quedó inoperativa devolviendo HTTP 404 permanente, bloqueando la conversión fiscal fidedigna.
+    - Extracción HTML Oficial BCV: Se implementó `_scrape_bcv_official()` y `_parse_bcv_html()` en `BCVService` apuntando directamente a `https://www.bcv.org.ve`. Extrae la tasa del dólar oficial (`<div id="dolar">...<strong class="strong-tb">880,11590000</strong>`), euro, yuan, rublo, lira y fecha valor oficial.
+    - Resiliencia SSL Gubernamental: Manejo seguro de certificados locales del BCV (`verify=False` en HTTPX con User-Agent estándar de navegador), fallback en cascada a endpoints secundarios y memoria caché local en caso de caídas del portal.
+    - Servidores MCP Configurados: Configuración global en `~/.gemini/config/mcp_config.json` para Puppeteer, Filesystem y GitHub MCP via Stdio `npx`.
+    - Suite de pruebas expandida: **46/46 tests pasando al 100%**.
 
 ---
 
@@ -134,7 +140,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (43/43 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (46/46 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).
