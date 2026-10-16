@@ -24,6 +24,7 @@ Sistema automatizado de comercio P2P en Binance con arquitectura Fail-closed, ge
 - `security.md`: Ingeniero de Ciberseguridad & Auditor Criptográfico (Hardening, validación de firmas, drift, rate limits).
 - `qa.md`: QA Tester y cobertura de pruebas.
 - `devops.md`: DevOps, Docker y pipelines de CI/CD.
+- `researcher.md`: Investigador Técnico & Especialista en Documentación (APIs, benchmarking de librerías, cloud 24/7).
 
 ## 📋 Comandos del Proyecto
 

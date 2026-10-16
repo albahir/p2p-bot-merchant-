@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Seguridad y Cifrado
     MASTER_ENCRYPTION_KEY: str = Field(
-        ...,
+        default="",
         description="Clave maestra de 32 bytes (64 caracteres hex) para AES-256-GCM"
     )
     SERVER_IP_WHITELIST: str = Field(
@@ -42,9 +42,23 @@ class Settings(BaseSettings):
         default="",
         description="IDs de Telegram autorizados para comandos, separados por coma"
     )
+    TELEGRAM_PROXY_URL: str | None = Field(
+        default=None,
+        description="URL de proxy opcional para Telegram (ej. socks5://127.0.0.1:1080 o http://127.0.0.1:8080)"
+    )
+    TELEGRAM_API_BASE_URL: str = Field(
+        default="https://api.telegram.org",
+        description="URL base de la API de Telegram o reverse proxy"
+    )
 
-    # Entorno
+    # Asistente de IA (LLM) para consultas en lenguaje natural
+    AI_PROVIDER: str = Field(default="gemini", description="Proveedor de IA: gemini o openai")
+    AI_API_KEY: str = Field(default="", description="API Key para el asistente de IA conversacional")
+    AI_MODEL_NAME: str = Field(default="gemini-3.5-flash-lite", description="Modelo LLM a utilizar")
+
+    # Entorno y Operaciones
     ENVIRONMENT: str = Field(default="development")
+    USE_SANDBOX: bool = Field(default=True, description="Activa el simulador P2P si no hay claves reales")
     LOG_LEVEL: str = Field(default="INFO")
 
     @field_validator("MASTER_ENCRYPTION_KEY")

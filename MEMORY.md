@@ -15,6 +15,7 @@
   - `security.md`: Ingeniero de Ciberseguridad y Auditor Criptográfico.
   - `qa.md`: QA Tester.
   - `devops.md`: DevOps y Pipelines CI/CD.
+  - `researcher.md`: Investigador Técnico & Especialista en Documentación (APIs, benchmarking y cloud).
 
 ### ✅ Paquetes Completados
 - [x] **Paquete 001 (Fundación de Seguridad)**: Cifrado AES-256-GCM, auditoría append-only SHA-256, permisos de IP y tests completos (9/9).
@@ -33,7 +34,23 @@
   - Simulador de Sandbox realista (`src/core/binance_mock.py`) con libros de órdenes activos en VES/USDT, anunciantes venezolanos, spreads comerciales reales y discriminación de órdenes COMPLETED vs CANCELLED.
   - Ingesta bidireccional (`trade_type="ALL"`) en `HistoryIngestor` para registrar simultáneamente compras y ventas.
   - Prueba de integración y E2E completa (`tests/e2e/test_sandbox_metrics.py`) verificando realismo, idempotencia, población de tasas BCV, cálculo fiscal FIFO / Promedio Ponderado y actualización dinámica de métricas ante nuevos trades.
-  - Suite completa de 23 tests automatizados pasando al 100%.
+- [x] **Paquete 011 (Resiliencia de Telegram y Operación Continua con Sandbox)**:
+  - Diagnóstico de red profundo: identificación de filtrado TCP puerto 443 por parte de operadoras/ISP hacia `api.telegram.org` (ping responde 151 ms pero TCP SYN es descartado).
+  - Soporte de configuración de red resiliente: parámetros `TELEGRAM_PROXY_URL` (SOCKS5/HTTP) y `TELEGRAM_API_BASE_URL` (reverse proxies / Cloudflare Workers).
+  - Fallback automático a texto plano (`parse_mode=None`) ante respuestas HTTP 400 por sintaxis Markdown.
+  - Manejo estricto de Rate Limiting HTTP 429 con lectura de `retry_after` y backoff exponencial.
+  - Cola de despacho en segundo plano (`TelegramQueueDispatcher`) con hilo daemon para envíos no bloqueantes.
+  - Escucha de comandos en tiempo real vía long-polling (`TelegramCommandPoller`) respondiendo `/status`, `/pause`, `/resume`, `/report`, `/ayuda`.
+  - Operación continua de `P2PBotEngine` en modo Sandbox activo cuando no hay claves reales configuradas.
+  - Notificaciones automáticas a Telegram en sincronización de órdenes y simulación de ciclos en el Dashboard.
+  - Suite completa de 27 tests pasando al 100%.
+
+- [x] **Paquete 012 (Asistente de IA para Consultas Naturales en Telegram)**:
+  - Implementado `src/integrations/ai_assistant.py` (`TelegramAIAgent` y `AIAssistantTools`) con Function Calling (Tools) de solo lectura conectado a `OrderRepository`, `TaxEngine` y `BCVService`.
+  - Enrutamiento híbrido en `TelegramCommandPoller`: Comandos deterministas (`/status`, etc.) + lenguaje natural libre vía Google Gemini API.
+  - Catálogo de herramientas seguras: `obtener_metricas_fiscales`, `consultar_ordenes_recientes`, `consultar_tasa_bcv`, `consultar_estado_sistema`.
+  - Sanitización estricta anti-filtración de secretos en todas las salidas del modelo.
+  - Suite completa de 31 tests pasando al 100%.
 
 ### ⏸️ Paquetes Pausados
 - ⏸️ **Paquete 003 (Motor de Estrategias)**: Pausado temporalmente por el usuario.
@@ -60,14 +77,24 @@
     - [`src/reporting/sheets_exporter.py`](file:///c:/p2p-bot-merchant/src/reporting/sheets_exporter.py): Construcción tipada de matrices `data_to_write: list[list[Any]]` para `worksheet.append_rows()`.
     - [`src/data/repositories.py`](file:///c:/p2p-bot-merchant/src/data/repositories.py): Filtros y asignaciones tipadas de modelos SQLAlchemy compatibles con Ruff (`B010`) y Mypy.
     - [`pyproject.toml`](file:///c:/p2p-bot-merchant/pyproject.toml): Activación de `ignore_missing_imports = true` para dependencias de terceros sin stubs empaquetados.
+11. **Resiliencia Multicapa en Mensajería Telegram y Desacoplamiento Asíncrono (Spec 011)**:
+    - Arquitectura asíncrona de envío (`TelegramQueueDispatcher`) para evitar bloqueos del hilo principal o de la interfaz Streamlit ante latencias de red.
+    - Fallback de degradación suave: ante error HTTP 400 (entidades Markdown corruptas o no escapadas), reintento transparente en texto plano para asegurar entrega del 100% de los mensajes.
+    - Cumplimiento de límites de velocidad (HTTP 429) respetando parámetros de `retry_after`.
+    - Soporte nativo para proxies (SOCKS5/HTTP) y endpoints alternativos (`TELEGRAM_PROXY_URL`, `TELEGRAM_API_BASE_URL`) para sortear el bloqueo de puertos TCP 443 ejercido por operadoras locales.
+    - Polling continuo (`TelegramCommandPoller`) para interacción bidireccional desde la app móvil.
+12. **Asistente Conversacional Híbrido con Function Calling Seguro (Spec 012)**:
+    - Desacoplamiento entre comandos rápidos deterministas (`/status`, etc.) y consultas analíticas en lenguaje natural.
+    - Implementación de Function Calling (Tools) exclusivo de solo lectura (`AIAssistantTools`) que consulta datos reales de SQLite y del motor fiscal sin riesgo de alucinaciones.
+    - Guardrail estricto de seguridad: el LLM nunca recibe claves privadas ni API keys, y sus respuestas se filtran obligatoriamente con `sanitize_message()`.
 
 ---
 
 ## 🎯 Guía Operativa Actual
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
-2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (23/23 tests pasando).
+2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (31/31 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
-   - `mypy src/` (0 errores en 30 archivos fuente).
+   - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).

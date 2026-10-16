@@ -58,6 +58,20 @@ def render_control_actions():
                         count = ingestor.ingest_recent_orders(trade_type="ALL", days_back=7)
                     if count > 0:
                         st.success(f"✅ Sincronización completa: {count} órdenes procesadas. Reflejadas en 'Visión General'.")
+                        if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_ALERT_CHAT_ID:
+                            notifier = TelegramNotifier(
+                                bot_token=settings.TELEGRAM_BOT_TOKEN,
+                                default_chat_id=settings.TELEGRAM_ALERT_CHAT_ID,
+                                allowed_user_ids=settings.telegram_allowed_users,
+                                proxy_url=settings.TELEGRAM_PROXY_URL,
+                                api_base_url=settings.TELEGRAM_API_BASE_URL,
+                                use_sandbox=use_sandbox
+                            )
+                            mode_lbl = "[SANDBOX]" if use_sandbox else "[PROD]"
+                            notifier.send_alert(
+                                f"📦 *{mode_lbl} Sincronización P2P Exitosa*\n"
+                                f"Se han registrado e ingestadas *{count}* órdenes recientes."
+                            )
                     else:
                         st.info("ℹ️ Todas las órdenes del Sandbox ya estaban en la base de datos (Idempotencia). Usa 'Simular Nuevo Ciclo' para agregar más.")
                     st.rerun()
@@ -95,6 +109,22 @@ def render_control_actions():
                 with st.spinner("Registrando nuevo ciclo en Sandbox..."):
                     c = ingestor.ingest_recent_orders(trade_type="ALL", days_back=7)
                 st.success(f"¡Ciclo comercial simulado! {c} órdenes creadas y listas en la tabla.")
+                if c > 0 and settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_ALERT_CHAT_ID:
+                    notifier = TelegramNotifier(
+                        bot_token=settings.TELEGRAM_BOT_TOKEN,
+                        default_chat_id=settings.TELEGRAM_ALERT_CHAT_ID,
+                        allowed_user_ids=settings.telegram_allowed_users,
+                        proxy_url=settings.TELEGRAM_PROXY_URL,
+                        api_base_url=settings.TELEGRAM_API_BASE_URL,
+                        use_sandbox=True
+                    )
+                    notifier.send_alert(
+                        "⚡ *[SANDBOX] Nuevo Ciclo Comercial Simulado*\n"
+                        "• Compra: 100 USDT @ 36.50 VES\n"
+                        "• Venta: 100 USDT @ 37.90 VES\n"
+                        "• Spread Bruto: +3.83%\n"
+                        f"• Órdenes sincronizadas en DB: *{c}*"
+                    )
                 st.rerun()
 
             if st.button("🗑️ Limpiar Historial de Prueba", width="stretch"):
@@ -103,6 +133,16 @@ def render_control_actions():
                     deleted = db_clean.query(Order).delete()
                     db_clean.commit()
                     st.success(f"Se eliminaron {deleted} órdenes de prueba.")
+                    if deleted > 0 and settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_ALERT_CHAT_ID:
+                        notifier = TelegramNotifier(
+                            bot_token=settings.TELEGRAM_BOT_TOKEN,
+                            default_chat_id=settings.TELEGRAM_ALERT_CHAT_ID,
+                            allowed_user_ids=settings.telegram_allowed_users,
+                            proxy_url=settings.TELEGRAM_PROXY_URL,
+                            api_base_url=settings.TELEGRAM_API_BASE_URL,
+                            use_sandbox=True
+                        )
+                        notifier.send_alert(f"🗑️ *[SANDBOX]* Historial de prueba purgado ({deleted} órdenes eliminadas).")
                     st.rerun()
                 finally:
                     db_clean.close()
@@ -139,7 +179,10 @@ def render_control_actions():
                 notifier = TelegramNotifier(
                     bot_token=settings.TELEGRAM_BOT_TOKEN,
                     default_chat_id=settings.TELEGRAM_ALERT_CHAT_ID,
-                    allowed_user_ids=settings.telegram_allowed_users
+                    allowed_user_ids=settings.telegram_allowed_users,
+                    proxy_url=settings.TELEGRAM_PROXY_URL,
+                    api_base_url=settings.TELEGRAM_API_BASE_URL,
+                    use_sandbox=use_sandbox
                 )
                 with st.spinner("Enviando mensaje a Telegram..."):
                     ok = notifier.send_alert("🔔 *Prueba de Alerta*: Conexión exitosa desde el Panel de Control P2P.")
@@ -147,3 +190,7 @@ def render_control_actions():
                     st.success(f"Alerta enviada con éxito al Chat ID: {settings.TELEGRAM_ALERT_CHAT_ID}")
                 else:
                     st.error(f"Error de Telegram: {notifier.last_error or 'No se pudo conectar con los servidores de Telegram'}")
+                    st.info(
+                        "💡 **Nota sobre conexión**: Si el error es de Timeout/Red, es debido al filtrado del puerto 443 por parte de tu proveedor de internet (ISP). "
+                        "Puedes activar una VPN (ej. Cloudflare WARP 1.1.1.1) o configurar `TELEGRAM_PROXY_URL` en `config/.env`."
+                    )

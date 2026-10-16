@@ -1,13 +1,20 @@
-"""Servicio de alertas y comandos vía Telegram Bot.
+"""Servicio de alertas, cola asíncrona y comandos vía Telegram Bot.
 Garantiza el principio constitucional de "Cero Secretos":
 - Sanitiza el texto de cualquier mensaje saliente.
 - Permite control fail-closed validando remitentes autorizados.
-- Implementa comandos /status, /pause, /resume y /report.
+- Implementa comandos /status, /pause, /resume, /report y /ayuda.
+- Resiliencia ante fallos: fallback automático a texto plano ante HTTP 400 y reintentos ante 429.
+- Soporte para proxy HTTP/SOCKS5 y URL base personalizada para eludir bloqueos de ISP.
+- Cola de despacho en segundo plano para envíos no bloqueantes.
+- Poller de comandos en tiempo real con getUpdates.
 """
 
 import logging
+import queue
 import re
+import threading
 import time
+from typing import Any
 
 import httpx
 
@@ -28,28 +35,44 @@ def sanitize_message(text: str) -> str:
 
 
 class TelegramNotifier:
-    """Notificador de Telegram con envío seguro y sanitización previa."""
+    """Notificador de Telegram con envío seguro, sanitización previa y fallback resiliente."""
 
     def __init__(
         self,
         bot_token: str,
         default_chat_id: str,
-        allowed_user_ids: list[int] | None = None
+        allowed_user_ids: list[int] | None = None,
+        proxy_url: str | None = None,
+        api_base_url: str = "https://api.telegram.org",
+        use_sandbox: bool = True
     ):
         self.bot_token = bot_token
         self.default_chat_id = default_chat_id
         self.allowed_user_ids = allowed_user_ids or []
-        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+        self.proxy_url = proxy_url
+        self.api_base_url = api_base_url.rstrip("/")
+        self.base_url = f"{self.api_base_url}/bot{bot_token}"
         self.is_paused = False
+        self.use_sandbox = use_sandbox
         self.last_error: str | None = None
-        # Cliente HTTP persistente para reutilizar el túnel TCP/TLS (Keep-Alive)
-        self._client = httpx.Client(
-            timeout=httpx.Timeout(15.0, connect=8.0),
-            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0)
-        )
 
-    def send_alert(self, text: str, chat_id: str | None = None) -> bool:
-        """Envía una alerta con formato seguro, reutilizando conexiones y con reintentos."""
+        # Configuración del cliente HTTP persistente con soporte para proxy
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(15.0, connect=8.0),
+            "limits": httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0)
+        }
+        if self.proxy_url:
+            client_kwargs["proxy"] = self.proxy_url
+
+        self._client = httpx.Client(**client_kwargs)
+
+    def send_alert(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        parse_mode: str | None = "Markdown"
+    ) -> bool:
+        """Envía una alerta con formato seguro, fallback a texto plano ante error 400 y reintentos ante 429."""
         if not self.bot_token:
             logger.warning("TELEGRAM: Bot token no configurado. Mensaje omitido.")
             return False
@@ -61,11 +84,12 @@ class TelegramNotifier:
 
         clean_text = sanitize_message(text)
 
-        payload = {
+        payload: dict[str, Any] = {
             "chat_id": target_chat,
-            "text": clean_text,
-            "parse_mode": "Markdown"
+            "text": clean_text
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
         # Intentar hasta 3 veces con intervalos breves si hay problemas en la red
         for attempt in range(3):
@@ -75,11 +99,39 @@ class TelegramNotifier:
                     logger.info("TELEGRAM: Notificación enviada con éxito.")
                     self.last_error = None
                     return True
-                else:
-                    err_msg = f"HTTP {res.status_code}: {res.text}"
-                    logger.error(f"TELEGRAM: {err_msg}")
-                    self.last_error = err_msg
-                    return False
+
+                # Caso 1: Error 400 (Bad Request - comúnmente fallo de parseo Markdown por caracteres especiales)
+                if res.status_code == 400 and payload.get("parse_mode"):
+                    logger.warning("TELEGRAM: Error 400 en parseo de entidades. Reintentando como texto plano...")
+                    payload.pop("parse_mode", None)
+                    res_fallback = self._client.post(f"{self.base_url}/sendMessage", json=payload)
+                    if res_fallback.status_code == 200:
+                        logger.info("TELEGRAM: Notificación entregada con éxito tras fallback a texto plano.")
+                        self.last_error = None
+                        return True
+                    else:
+                        err_msg = f"HTTP {res_fallback.status_code}: {res_fallback.text}"
+                        logger.error(f"TELEGRAM: Fallback también falló: {err_msg}")
+                        self.last_error = err_msg
+                        return False
+
+                # Caso 2: Error 429 (Flood control / Rate limit)
+                if res.status_code == 429:
+                    try:
+                        data = res.json()
+                        retry_after = int(data.get("parameters", {}).get("retry_after", 1))
+                    except (ValueError, TypeError, KeyError):
+                        retry_after = 1
+                    logger.warning(f"TELEGRAM: Rate limit 429 alcanzado. Esperando {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue
+
+                # Otros errores HTTP (401, 403, 500, etc.)
+                err_msg = f"HTTP {res.status_code}: {res.text}"
+                logger.error(f"TELEGRAM: {err_msg}")
+                self.last_error = err_msg
+                return False
+
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 logger.warning(f"TELEGRAM: Fallo de red temporal (intento {attempt + 1}/3): {e}")
                 if attempt < 2:
@@ -101,7 +153,7 @@ class TelegramNotifier:
         return user_id in self.allowed_user_ids
 
     def handle_command(self, user_id: int, command: str) -> str:
-        """Procesa comandos /status, /pause, /resume y /report respetando permisos."""
+        """Procesa comandos /status, /pause, /resume, /report y /ayuda respetando permisos."""
         if not self.is_user_authorized(user_id):
             logger.warning(f"Intento de comando no autorizado por user_id={user_id}")
             return "⛔ Acceso denegado. Usuario no autorizado."
@@ -109,7 +161,8 @@ class TelegramNotifier:
         cmd = command.strip().lower()
         if cmd == "/status":
             state = "⏸️ PAUSADO" if self.is_paused else "🟢 ACTIVO"
-            return f"🤖 *Estado del Bot*: {state}\nServicios: OK"
+            mode = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN (Binance Real)"
+            return f"🤖 *Estado del Bot*: {state}\nModo: {mode}\nServicios: OK"
         elif cmd == "/pause":
             self.is_paused = True
             logger.warning("Bot pausado mediante comando de Telegram.")
@@ -120,5 +173,180 @@ class TelegramNotifier:
             return "▶️ Operaciones del bot reanudadas."
         elif cmd == "/report":
             return "📊 Para generar el reporte detallado, ingrese al Dashboard Streamlit o ejecute el exportador fiscal."
+        elif cmd in ("/help", "/ayuda", "/start"):
+            return (
+                "🤖 *Comandos Disponibles*:\n"
+                "- `/status`: Ver estado y modo operativo del bot\n"
+                "- `/pause`: Pausar operaciones comerciales\n"
+                "- `/resume`: Reanudar operaciones comerciales\n"
+                "- `/report`: Enlace a reportes fiscales\n"
+                "- `/ayuda`: Mostrar este menú de ayuda"
+            )
         else:
-            return f"❓ Comando no reconocido: {command}"
+            return f"❓ Comando no reconocido: {command}. Usa /ayuda para ver los disponibles."
+
+
+class TelegramQueueDispatcher:
+    """Cola asíncrona en segundo plano para envío de alertas sin bloquear la interfaz ni el motor."""
+
+    def __init__(self, notifier: TelegramNotifier, rate_limit_delay: float = 0.5):
+        self.notifier = notifier
+        self.rate_limit_delay = rate_limit_delay
+        self._queue: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=1000)
+        self._is_running = False
+        self._worker_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._is_running:
+            return
+        self._is_running = True
+        self._worker_thread = threading.Thread(
+            target=self._process_queue,
+            daemon=True,
+            name="TelegramQueueWorker"
+        )
+        self._worker_thread.start()
+        logger.info("TelegramQueueDispatcher iniciado en segundo plano.")
+
+    def stop(self) -> None:
+        self._is_running = False
+        if self._worker_thread and self._worker_thread.is_alive():
+            try:
+                self._queue.put_nowait(("", "__STOP__"))
+            except queue.Full:
+                pass
+            self._worker_thread.join(timeout=2.0)
+        logger.info("TelegramQueueDispatcher detenido.")
+
+    def queue_alert(self, text: str, chat_id: str | None = None) -> bool:
+        """Encola un mensaje para ser enviado en segundo plano de forma no bloqueante."""
+        try:
+            self._queue.put_nowait((text, chat_id))
+            return True
+        except queue.Full:
+            logger.error("TELEGRAM: Cola de mensajes llena (1000 mensajes). Descartando alerta.")
+            return False
+
+    def wait_until_empty(self, timeout: float = 5.0) -> bool:
+        """Espera a que todos los mensajes en la cola sean procesados."""
+        deadline = time.time() + timeout
+        while not self._queue.empty() and time.time() < deadline:
+            time.sleep(0.05)
+        return self._queue.empty()
+
+    def _process_queue(self) -> None:
+        while self._is_running:
+            try:
+                item = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            text, chat_id = item
+            if chat_id == "__STOP__":
+                self._queue.task_done()
+                break
+
+            try:
+                self.notifier.send_alert(text, chat_id=chat_id)
+            except (httpx.RequestError, ValueError, TypeError, OSError) as e:
+                logger.error(f"Error procesando mensaje en cola de Telegram: {e}")
+            finally:
+                self._queue.task_done()
+
+            if self.rate_limit_delay > 0:
+                time.sleep(self.rate_limit_delay)
+
+
+class TelegramCommandPoller:
+    """Escucha activa de comandos y consultas en lenguaje natural vía long-polling (getUpdates)."""
+
+    def __init__(
+        self,
+        notifier: TelegramNotifier,
+        ai_agent: Any = None,
+        poll_interval: float = 2.0
+    ):
+        self.notifier = notifier
+        self.ai_agent = ai_agent
+        self.poll_interval = poll_interval
+        self._last_offset = 0
+        self._is_running = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._is_running:
+            return
+        self._is_running = True
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            daemon=True,
+            name="TelegramCommandPoller"
+        )
+        self._thread.start()
+        logger.info("TelegramCommandPoller iniciado en segundo plano.")
+
+    def stop(self) -> None:
+        self._is_running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        logger.info("TelegramCommandPoller detenido.")
+
+    def poll_once(self) -> int:
+        """Consulta actualizaciones pendientes y ejecuta comandos o consultas con IA si son de usuarios autorizados."""
+        url = f"{self.notifier.base_url}/getUpdates"
+        params: dict[str, str | int] = {
+            "offset": self._last_offset + 1,
+            "timeout": 5
+        }
+        try:
+            res = self.notifier._client.get(url, params=params)
+            if res.status_code != 200:
+                return 0
+            data = res.json()
+            if not data.get("ok"):
+                return 0
+            updates = data.get("result", [])
+            processed = 0
+            for update in updates:
+                update_id = int(update.get("update_id", 0))
+                self._last_offset = max(self._last_offset, update_id)
+
+                msg = update.get("message") or update.get("channel_post")
+                if not msg:
+                    continue
+
+                from_user = msg.get("from", {})
+                user_id = from_user.get("id")
+                chat_id = str(msg.get("chat", {}).get("id"))
+                text = str(msg.get("text", "")).strip()
+
+                if text.startswith("/"):
+                    response = self.notifier.handle_command(user_id=user_id, command=text)
+                    self.notifier.send_alert(response, chat_id=chat_id)
+                    processed += 1
+                elif text:
+                    # Consulta en lenguaje natural
+                    if not self.notifier.is_user_authorized(user_id):
+                        logger.warning(f"Consulta no autorizada de user_id={user_id}")
+                        self.notifier.send_alert("⛔ Acceso denegado. Usuario no autorizado.", chat_id=chat_id)
+                    else:
+                        if self.ai_agent:
+                            ai_response = self.ai_agent.ask(text)
+                            self.notifier.send_alert(ai_response, chat_id=chat_id)
+                        else:
+                            self.notifier.send_alert(
+                                "ℹ️ *Asistente de IA no configurado*.\n"
+                                "Configura `AI_API_KEY` en `config/.env` para habilitar preguntas en lenguaje natural, "
+                                "o utiliza comandos directos como `/status`, `/report` o `/ayuda`.",
+                                chat_id=chat_id
+                            )
+                    processed += 1
+            return processed
+        except (httpx.RequestError, ValueError, TypeError, OSError) as e:
+            logger.debug(f"Error consultando getUpdates: {e}")
+            return 0
+
+    def _run_loop(self) -> None:
+        while self._is_running:
+            self.poll_once()
+            time.sleep(self.poll_interval)

@@ -1,12 +1,15 @@
 """Punto de entrada principal para la ejecución del bot P2P Binance (Engine).
-Orquesta la seguridad, validación fail-closed de IP, auditoría, sincronización de órdenes
-y notificaciones por Telegram.
+Orquesta la seguridad, validación fail-closed de IP, auditoría, sincronización de órdenes,
+simulación Sandbox y notificaciones resilientes por Telegram.
 """
 
 import logging
+import os
 import signal
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import src.data.models  # noqa: F401
 from config.settings import Settings
@@ -15,9 +18,15 @@ from src.core.binance_client import (
     BinanceP2PClient,
     BinanceWeightExceededError,
 )
+from src.core.binance_mock import MockBinanceP2PClient
 from src.core.history_ingestor import HistoryIngestor
 from src.data.database import Base, SessionLocal, engine
-from src.integrations.telegram_notifier import TelegramNotifier
+from src.integrations.ai_assistant import TelegramAIAgent
+from src.integrations.telegram_notifier import (
+    TelegramCommandPoller,
+    TelegramNotifier,
+    TelegramQueueDispatcher,
+)
 from src.security.api_key_manager import ApiKeyManager
 from src.security.audit_logger import AuditLogger
 from src.security.permissions import StartupPermissionValidator
@@ -30,10 +39,24 @@ logging.basicConfig(
 logger = logging.getLogger("p2p_engine")
 
 
-class P2PBotEngine:
-    """Motor orquestador del bot P2P Binance."""
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Manejador HTTP simple para probes de salud (Koyeb, Render, Docker)."""
 
-    def __init__(self):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok","service":"p2p-bot-merchant"}\n')
+
+    def log_message(self, format: str, *args: object) -> None:
+        # Suprimir logs continuos de sondeos de salud
+        pass
+
+
+class P2PBotEngine:
+    """Motor orquestador del bot P2P Binance con soporte dual Producción / Sandbox."""
+
+    def __init__(self, use_sandbox: bool | None = None):
         self.is_running = True
         logger.info("==> Inicializando p2p-bot-merchant...")
 
@@ -47,6 +70,12 @@ class P2PBotEngine:
         except (ValueError, RuntimeError) as e:
             logger.critical(f"FAIL-CLOSED: Error cargando configuración: {e}")
             sys.exit(1)
+
+        # Determinar si opera en modo Sandbox o Real
+        if use_sandbox is not None:
+            self.use_sandbox = use_sandbox
+        else:
+            self.use_sandbox = self.settings.USE_SANDBOX
 
         # 3. Auditoría e integridad
         self.audit = AuditLogger(SessionLocal)
@@ -67,15 +96,30 @@ class P2PBotEngine:
             db_session_factory=SessionLocal
         )
 
-        # 6. Notificador de Telegram
+        # 6. Notificador de Telegram resiliente y cola en background
         self.notifier = TelegramNotifier(
             bot_token=self.settings.TELEGRAM_BOT_TOKEN,
             default_chat_id=self.settings.TELEGRAM_ALERT_CHAT_ID,
-            allowed_user_ids=self.settings.telegram_allowed_users
+            allowed_user_ids=self.settings.telegram_allowed_users,
+            proxy_url=self.settings.TELEGRAM_PROXY_URL,
+            api_base_url=self.settings.TELEGRAM_API_BASE_URL,
+            use_sandbox=self.use_sandbox
         )
+        self.dispatcher = TelegramQueueDispatcher(self.notifier)
+        self.dispatcher.start()
 
-        # 7. Cliente Binance P2P
-        self.client = None
+        # Inicializar Asistente de IA para responder consultas en lenguaje natural
+        self.ai_agent = TelegramAIAgent(
+            api_key=self.settings.AI_API_KEY,
+            provider=self.settings.AI_PROVIDER,
+            model_name=self.settings.AI_MODEL_NAME,
+            db_session_factory=SessionLocal
+        )
+        self.poller = TelegramCommandPoller(self.notifier, ai_agent=self.ai_agent, poll_interval=2.0)
+        self.poller.start()
+
+        # 7. Cliente Binance P2P (o Sandbox)
+        self.client: BinanceP2PClient | MockBinanceP2PClient | None = None
         self._setup_binance_client()
 
         # Registrar evento de inicio en auditoría append-only
@@ -85,10 +129,36 @@ class P2PBotEngine:
             ip_address="127.0.0.1",
             status="SUCCESS"
         )
-        self.notifier.send_alert("🟢 *Bot P2P Merchant iniciado exitosamente* en modo seguro.")
+        mode_label = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN"
+        self.dispatcher.queue_alert(
+            f"🟢 *Bot P2P Merchant iniciado exitosamente*\n"
+            f"Modo: {mode_label}\n"
+            f"Monitoreo y escucha de comandos activos."
+        )
+
+        # 8. Iniciar servidor HTTP ligero para probes de salud (Koyeb, Render, Docker)
+        self.httpd: HTTPServer | None = None
+        self._start_healthcheck_server()
+
+    def _start_healthcheck_server(self) -> None:
+        """Inicia un listener HTTP en el puerto indicado por PORT (default 8000)."""
+        port_str = os.getenv("PORT", "8000")
+        try:
+            port = int(port_str)
+            self.httpd = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+            http_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+            http_thread.start()
+            logger.info(f"Servidor de Healthcheck activo en http://0.0.0.0:{port}")
+        except (ValueError, OSError) as e:
+            logger.warning(f"No se pudo iniciar el servidor de healthcheck en puerto {port_str}: {e}")
 
     def _setup_binance_client(self):
-        """Intenta recuperar las credenciales cifradas de Binance."""
+        """Inicializa el cliente real de Binance o el simulador Sandbox."""
+        if self.use_sandbox:
+            self.client = MockBinanceP2PClient(enable_default_orders=True)
+            logger.info("🧪 Modo Sandbox activo: Usando MockBinanceP2PClient.")
+            return
+
         try:
             api_key = self.key_manager.get_secret("binance_api_key")
             private_key = self.key_manager.get_secret("binance_private_key")
@@ -96,24 +166,31 @@ class P2PBotEngine:
             logger.info("Cliente de Binance P2P inicializado con credenciales cifradas.")
         except (KeyError, ValueError):
             logger.warning(
-                "⚠️ No se encontraron credenciales de Binance ('binance_api_key' o 'binance_private_key') en la DB. "
-                "Para agregarlas de forma segura ejecuta: python scripts/rotate_api_keys.py. "
-                "El bot continuará en modo monitoreo pasivo / datos locales."
+                "⚠️ No se encontraron credenciales de Binance en la DB. "
+                "Activando automáticamente Modo Sandbox para pruebas operativas continuas."
             )
-            self.client = None
+            self.use_sandbox = True
+            self.notifier.use_sandbox = True
+            self.client = MockBinanceP2PClient(enable_default_orders=True)
 
     def run_cycle(self):
         """Ejecuta una iteración de sincronización y monitoreo."""
         if self.client:
             try:
                 ingestor = HistoryIngestor(self.client, SessionLocal)
-                count = ingestor.ingest_recent_orders(trade_type="BUY", days_back=1)
-                logger.info(f"Sincronización completada: {count} órdenes procesadas.")
+                count = ingestor.ingest_recent_orders(trade_type="ALL", days_back=1)
+                mode_str = "[SANDBOX]" if self.use_sandbox else "[PROD]"
+                logger.info(f"{mode_str} Sincronización completada: {count} órdenes procesadas.")
+                if count > 0:
+                    self.dispatcher.queue_alert(
+                        f"📦 *{mode_str} Nuevas Órdenes P2P*\n"
+                        f"Se han registrado e ingestadas *{count}* órdenes en la base de datos."
+                    )
             except (RuntimeError, BinanceAuthError, BinanceWeightExceededError) as e:
                 logger.error(f"Error en ciclo de sincronización Binance: {e}")
-                self.notifier.send_alert(f"⚠️ Error en sincronización Binance: {e}")
+                self.dispatcher.queue_alert(f"⚠️ Error en sincronización Binance: {e}")
         else:
-            logger.info("Ciclo activo: Motor funcionando (esperando credenciales de Binance para sincronización en vivo).")
+            logger.info("Ciclo inactivo: Cliente no inicializado.")
 
     def start(self, poll_interval_seconds: int = 30):
         """Inicia el bucle principal de ejecución."""
@@ -129,13 +206,18 @@ class P2PBotEngine:
         """Cierre limpio y auditado (fail-closed)."""
         logger.info("==> Señal de terminación recibida. Cerrando bot...")
         self.is_running = False
+        self.poller.stop()
+        self.dispatcher.queue_alert("🔴 *Bot P2P Merchant detenido limpiamente*.")
+        self.dispatcher.wait_until_empty(timeout=2.0)
+        self.dispatcher.stop()
+        if self.httpd:
+            self.httpd.shutdown()
         self.audit.log(
             event_type="ENGINE_STOP",
             key_identifier="SYSTEM",
             ip_address="127.0.0.1",
             status="SUCCESS"
         )
-        self.notifier.send_alert("🔴 *Bot P2P Merchant detenido limpiamente*.")
         sys.exit(0)
 
 
