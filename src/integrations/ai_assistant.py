@@ -171,7 +171,9 @@ GEMINI_TOOL_DECLARATIONS = [
 
 
 class AIKeyPool:
-    """Pool y rotador dinámico de API Keys con cooldown silencioso ante límites de tasa (429/403)."""
+    """Pool y balanceador Round-Robin proactivo de API Keys de IA con failover silencioso,
+    enfriamiento automático ante saturación (429/503/red) y telemetría en tiempo real.
+    """
 
     def __init__(self, raw_keys: str | list[str]):
         if isinstance(raw_keys, str):
@@ -198,13 +200,22 @@ class AIKeyPool:
     def total_keys(self) -> int:
         return len(self.keys)
 
+    @staticmethod
+    def mask_key(k: str) -> str:
+        """Enmascara una clave para no revelar secretos en logs ni en Telegram."""
+        if len(k) > 10:
+            return f"{k[:6]}...{k[-4:]}"
+        return "[CLAVE]"
+
     def record_success(self, key: str) -> None:
         """Registra una llamada exitosa para una clave."""
         with self._lock:
             self._call_counts[key] = self._call_counts.get(key, 0) + 1
 
-    def get_active_key(self) -> str | None:
-        """Devuelve la clave actualmente activa o la primera disponible fuera de cooldown."""
+    def get_next_key(self) -> str | None:
+        """Devuelve la siguiente clave disponible usando Round-Robin proactivo,
+        distribuyendo la carga equitativamente y saltando aquellas en enfriamiento.
+        """
         with self._lock:
             if not self.keys:
                 return None
@@ -216,24 +227,36 @@ class AIKeyPool:
                 if cd_until <= now:
                     if cd_until > 0 and self._restored_times.get(k, 0) < cd_until:
                         self._restored_times[k] = now
-                    self._current_index = idx
+                    # Avanzar el puntero para la próxima petición (Round-Robin proactivo)
+                    self._current_index = (idx + 1) % len(self.keys)
                     return k
-            return self.keys[self._current_index]
+
+            # Si todas las claves están en enfriamiento, retornar la que expire primero
+            best_idx = min(range(len(self.keys)), key=lambda i: self._cooldowns.get(self.keys[i], 0))
+            self._current_index = (best_idx + 1) % len(self.keys)
+            return self.keys[best_idx]
+
+    def get_active_key(self) -> str | None:
+        """Obtiene la clave activa delegando en get_next_key() para asegurar rotación continua."""
+        return self.get_next_key()
 
     def mark_rate_limited(self, exhausted_key: str, cooldown_seconds: float = 60.0) -> str | None:
-        """Pone la clave agotada en cooldown y rota silenciosamente a la siguiente disponible."""
+        """Pone la clave agotada o saturada en cooldown y rota silenciosamente a la siguiente disponible."""
         with self._lock:
             if not self.keys:
                 return None
             now = time.time()
             self._cooldowns[exhausted_key] = now + cooldown_seconds
             self._rate_limit_counts[exhausted_key] = self._rate_limit_counts.get(exhausted_key, 0) + 1
-            self._current_index = (self._current_index + 1) % len(self.keys)
-            next_key = self.keys[self._current_index]
-            masked_key = f"{exhausted_key[:6]}...{exhausted_key[-4:]}" if len(exhausted_key) > 10 else "[CLAVE]"
+
+            if self.keys and self.keys[self._current_index % len(self.keys)] == exhausted_key:
+                self._current_index = (self._current_index + 1) % len(self.keys)
+
+            next_key = self.keys[self._current_index % len(self.keys)]
+            masked_key = self.mask_key(exhausted_key)
             logger.warning(
                 f"GEMINI: Clave {masked_key} en cooldown ({cooldown_seconds}s). "
-                f"Rotando silenciosamente al slot [{self._current_index + 1}/{len(self.keys)}]."
+                f"Slot actual [{((self._current_index) % len(self.keys)) + 1}/{len(self.keys)}]."
             )
             return next_key
 
@@ -241,19 +264,20 @@ class AIKeyPool:
         """Devuelve telemetría completa de cada clave del pool en tiempo real."""
         with self._lock:
             now = time.time()
-            active_key = self.keys[self._current_index] if self.keys else None
+            current_active_idx = self._current_index % len(self.keys) if self.keys else 0
+            active_key = self.keys[current_active_idx] if self.keys else None
             keys_info: list[dict[str, Any]] = []
 
             for i, k in enumerate(self.keys):
-                masked = f"{k[:6]}...{k[-4:]}" if len(k) > 10 else f"Clave #{i+1}"
+                masked = self.mask_key(k)
                 cd_until = self._cooldowns.get(k, 0)
                 is_in_cooldown = cd_until > now
                 remaining_cd = round(cd_until - now, 1) if is_in_cooldown else 0.0
 
-                if k == active_key and not is_in_cooldown:
-                    estado = "🟢 ACTIVA"
-                elif is_in_cooldown:
+                if is_in_cooldown:
                     estado = f"⏳ ENFRIAMIENTO (restan {int(remaining_cd)}s)"
+                elif k == active_key:
+                    estado = "🟢 ACTIVA"
                 else:
                     estado = "⚪ DISPONIBLE (En espera)"
 
@@ -274,7 +298,7 @@ class AIKeyPool:
 
             return {
                 "total_claves": len(self.keys),
-                "indice_activo": self._current_index + 1,
+                "indice_activo": current_active_idx + 1,
                 "claves": keys_info
             }
 
@@ -315,7 +339,8 @@ class TelegramAIAgent:
         self._client = httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0))
 
     def _call_gemini_with_failover(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any] | None, str | None]:
-        """Envía una petición a Gemini rotando silenciosamente entre las claves del pool y modelos de respaldo."""
+        """Envía una petición a Gemini rotando proactivamente con Round-Robin entre las claves del pool
+        y realizando failover silencioso ante 429, 503, 500 o fallos de red hacia claves y modelos de respaldo."""
         models_to_try = [self.model_name]
         for fallback in ("gemini-flash-lite-latest", "gemini-3.5-flash-lite"):
             if fallback not in models_to_try:
@@ -324,7 +349,7 @@ class TelegramAIAgent:
         attempts = max(self.key_pool.total_keys, 1)
         for model in models_to_try:
             for _ in range(attempts):
-                key = self.key_pool.get_active_key()
+                key = self.key_pool.get_next_key()
                 if not key:
                     break
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
@@ -333,16 +358,37 @@ class TelegramAIAgent:
                     if res.status_code == 200:
                         self.key_pool.record_success(key)
                         return 200, res.json(), None
+
+                    # Cuota agotada o permisos limitados
                     if res.status_code in (429, 403):
-                        logger.warning(f"Error de cuota Gemini (HTTP {res.status_code}). Intentando clave de respaldo...")
+                        logger.warning(
+                            f"GEMINI: Cuota alcanzada (HTTP {res.status_code}) en {self.key_pool.mask_key(key)}. "
+                            "Rotando silenciosamente a clave de respaldo..."
+                        )
                         self.key_pool.mark_rate_limited(key, cooldown_seconds=60.0)
                         continue
+
+                    # Sobrecarga temporal de servidores de Google (503) o error interno de servidor (500, 502, 504)
+                    if res.status_code in (500, 502, 503, 504):
+                        logger.warning(
+                            f"GEMINI: Servidor sobrecargado (HTTP {res.status_code}) en {self.key_pool.mask_key(key)}. "
+                            "Poniendo en enfriamiento breve y rotando a clave de respaldo..."
+                        )
+                        self.key_pool.mark_rate_limited(key, cooldown_seconds=30.0)
+                        continue
+
+                    # Clave inválida o argumento erróneo
                     if res.status_code == 400:
-                        logger.warning(f"Error 400 en clave Gemini ({res.text[:100]}). Intentando clave de respaldo...")
+                        logger.warning(
+                            f"GEMINI: Error 400 en {self.key_pool.mask_key(key)} ({res.text[:100]}). "
+                            "Poniendo en enfriamiento y probando respaldo..."
+                        )
                         self.key_pool.mark_rate_limited(key, cooldown_seconds=300.0)
                         continue
-                    if res.status_code in (404, 503):
-                        logger.warning(f"Modelo {model} retornó HTTP {res.status_code}. Probando modelo de respaldo...")
+
+                    # Modelo no disponible o deprecated (404) -> probar siguiente modelo
+                    if res.status_code == 404:
+                        logger.warning(f"Modelo {model} no disponible (HTTP 404). Probando siguiente modelo...")
                         break
 
                     logger.error(f"Error de API Gemini: HTTP {res.status_code} - {res.text}")

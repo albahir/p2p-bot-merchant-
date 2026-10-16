@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from src.data.database import Base, SessionLocal, engine
 from src.data.models import Order
 from src.data.repositories import OrderRepository
-from src.integrations.ai_assistant import AIAssistantTools, TelegramAIAgent
+from src.integrations.ai_assistant import AIAssistantTools, AIKeyPool, TelegramAIAgent
 
 
 def setup_function():
@@ -232,4 +232,55 @@ def test_ai_key_pool_telemetry_and_status_summary():
     assert "Telemetría del Pool de Claves" in summary
     assert "ENFRIAMIENTO" in summary
     assert "Clave #2" in summary
+
+
+def test_ai_key_pool_round_robin_rotation():
+    """El pool debe distribuir peticiones consecutivas equitativamente entre todas las claves (Round-Robin)."""
+    pool = AIKeyPool(["key_1", "key_2", "key_3"])
+    assert pool.get_next_key() == "key_1"
+    assert pool.get_next_key() == "key_2"
+    assert pool.get_next_key() == "key_3"
+    assert pool.get_next_key() == "key_1"
+
+
+def test_ai_key_pool_skips_key_in_cooldown():
+    """Si una clave está en enfriamiento, Round-Robin debe saltarla y elegir la siguiente disponible."""
+    pool = AIKeyPool(["key_1", "key_2", "key_3"])
+    pool.mark_rate_limited("key_2", cooldown_seconds=60.0)
+    assert pool.get_next_key() == "key_1"
+    assert pool.get_next_key() == "key_3"  # key_2 fue saltada por cooldown
+    assert pool.get_next_key() == "key_1"
+
+
+def test_ai_agent_silently_rotates_on_service_unavailable_503():
+    """Si una clave recibe HTTP 503 (servidor saturado), debe rotar silenciosamente a la siguiente clave."""
+    agent = TelegramAIAgent(
+        api_key="key_saturated, key_backup",
+        provider="gemini",
+        db_session_factory=SessionLocal
+    )
+    mock_resp_503 = MagicMock(status_code=503)
+    mock_resp_503.text = '{"error": {"code": 503, "message": "The model is overloaded."}}'
+    mock_resp_503.json.return_value = {"error": {"code": 503}}
+
+    mock_resp_200 = MagicMock(status_code=200)
+    mock_resp_200.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "Respuesta generada con éxito tras failover 503."}]
+                }
+            }
+        ]
+    }
+
+    with patch.object(agent._client, "post", side_effect=[mock_resp_503, mock_resp_200]) as mock_post:
+        response = agent.ask("¿Cuánto gané hoy?")
+        assert "Respuesta generada con éxito" in response
+        assert mock_post.call_count == 2
+        first_url = mock_post.call_args_list[0][0][0]
+        second_url = mock_post.call_args_list[1][0][0]
+        assert "key=key_saturated" in first_url
+        assert "key=key_backup" in second_url
+
 
