@@ -160,7 +160,7 @@ class TelegramAIAgent:
         self,
         api_key: str = "",
         provider: str = "gemini",
-        model_name: str = "gemini-3.5-flash-lite",
+        model_name: str = "gemini-1.5-flash",
         db_session_factory=SessionLocal
     ):
         self.api_key = api_key.strip()
