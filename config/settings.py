@@ -67,6 +67,20 @@ class Settings(BaseSettings):
         description="URL pública para auto-ping keep-alive anti-suspensión (ej. https://p2p-bot-merchant.onrender.com)"
     )
 
+    # Google Sheets
+    GOOGLE_SHEET_ID: str | None = Field(
+        default=None,
+        description="ID del documento Google Sheets para sincronización remota"
+    )
+    GOOGLE_SERVICE_ACCOUNT_JSON: str | None = Field(
+        default=None,
+        description="Contenido JSON de la cuenta de servicio de Google para entornos Cloud"
+    )
+    GOOGLE_CREDENTIALS_FILE: str = Field(
+        default="config/google_credentials.json",
+        description="Ruta local al archivo de credenciales de Google Service Account"
+    )
+
     # Entorno y Operaciones
     ENVIRONMENT: str = Field(default="development")
     USE_SANDBOX: bool = Field(default=True, description="Activa el simulador P2P si no hay claves reales")

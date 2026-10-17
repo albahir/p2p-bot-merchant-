@@ -189,11 +189,14 @@ class TelegramNotifier:
             return "📊 Para generar el reporte detallado, ingrese al Dashboard Streamlit o ejecute el exportador fiscal."
         elif cmd in ("/keys", "/claves", "/ai_status"):
             return "🔑 Usa `/keys` o pregúntale al bot '¿cuál es el estado de las claves?' para ver la telemetría en vivo."
+        elif cmd in ("/sheets", "/sync_sheets", "/hojas"):
+            return self._handle_sheets_sync()
         elif cmd in ("/help", "/ayuda", "/start"):
             return (
                 "🤖 *Comandos Disponibles*:\n"
                 "- `/status`: Ver estado y modo operativo del bot\n"
                 "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
+                "- `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
                 "- `/pause`: Pausar operaciones comerciales\n"
                 "- `/resume`: Reanudar operaciones comerciales\n"
                 "- `/report`: Enlace a reportes fiscales\n"
@@ -201,6 +204,65 @@ class TelegramNotifier:
             )
         else:
             return f"❓ Comando no reconocido: {command}. Usa /ayuda para ver los disponibles."
+
+    def _handle_sheets_sync(self) -> str:
+        """Sincroniza el histórico fiscal con Google Sheets y retorna el estado con enlace directo."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from config.settings import Settings
+        from src.data.database import SessionLocal
+        from src.data.repositories import OrderRepository
+        from src.reporting.sheets_exporter import SheetsExporter
+        from src.reporting.tax_engine import FIFOCostMethod
+
+        try:
+            settings = Settings()
+        except (ValueError, KeyError, OSError, RuntimeError):
+            return "⚠️ No se pudo cargar la configuración del sistema."
+
+        if not settings.GOOGLE_SHEET_ID:
+            return (
+                "⚠️ *Google Sheets no está configurado*.\n\n"
+                "Para activarlo, define `GOOGLE_SHEET_ID` y las credenciales de servicio en `config/.env` o variables de entorno."
+            )
+
+        db = SessionLocal()
+        try:
+            repo = OrderRepository(db)
+            completed_orders = repo.list_completed()
+            if not completed_orders:
+                return "ℹ️ No hay órdenes completadas para sincronizar en Google Sheets."
+
+            fifo = FIFOCostMethod()
+            results = fifo.process_orders(completed_orders)
+
+            exporter = SheetsExporter(
+                credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
+                credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+            )
+            success = exporter.export(settings.GOOGLE_SHEET_ID, results)
+            sheet_url = SheetsExporter.get_sheet_url(settings.GOOGLE_SHEET_ID)
+
+            if success:
+                total_profit_ves = sum(r.net_profit_fiat for r in results)
+                total_profit_usd = sum(r.net_profit_usd for r in results)
+                return (
+                    f"📊 *Google Sheets Sincronizado Exitosamente*\n\n"
+                    f"• Órdenes sincronizadas: `{len(results)}`\n"
+                    f"• Ganancia Consolidada: `{total_profit_ves:,.2f} VES` (`${total_profit_usd:,.2f} USD`)\n\n"
+                    f"🔗 [Abrir en Google Sheets]({sheet_url})"
+                )
+            else:
+                return (
+                    f"❌ *Error al sincronizar con Google Sheets*.\n\n"
+                    f"Verifica que la cuenta de servicio tenga permisos de Editor sobre el documento.\n"
+                    f"🔗 [Ver Hoja]({sheet_url})"
+                )
+        except (SQLAlchemyError, OSError, ValueError, KeyError, RuntimeError) as e:
+            logger.error(f"Error ejecutando /sheets: {e}")
+            return f"❌ Error interno sincronizando Google Sheets: {e}"
+        finally:
+            db.close()
 
 
 class TelegramQueueDispatcher:

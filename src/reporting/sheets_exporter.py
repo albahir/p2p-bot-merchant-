@@ -1,47 +1,145 @@
 """Exportador de métricas y datos de órdenes hacia Google Sheets."""
 
+import json
 import logging
+import os
+from datetime import UTC, datetime
 from typing import Any
 
 from src.reporting.tax_engine import TradeResult
+
+try:
+    import gspread
+    from gspread.exceptions import GSpreadException
+except ImportError:
+    gspread = None  # type: ignore[assignment]
+    GSpreadException = Exception  # type: ignore[misc, assignment]
 
 logger = logging.getLogger("sheets_exporter")
 
 
 class SheetsExporter:
-    """Exportador para sincronización remota con Google Sheets."""
+    """Exportador para sincronización remota con Google Sheets (Multi-Pestaña)."""
 
-    def __init__(self, credentials_path: str = "config/google_credentials.json"):
+    def __init__(
+        self,
+        credentials_path: str = "config/google_credentials.json",
+        credentials_json: str | dict[str, Any] | None = None,
+    ):
         self.credentials_path = credentials_path
+        self.credentials_json = credentials_json
+
+    def _get_client(self) -> Any:
+        """Obtiene una instancia autenticada de gspread de manera segura."""
+        if gspread is None:
+            logger.warning("gspread no está instalado. Sincronización omitida.")
+            return None
+
+        try:
+            if self.credentials_json:
+                if isinstance(self.credentials_json, str):
+                    creds_dict = json.loads(self.credentials_json)
+                else:
+                    creds_dict = self.credentials_json
+                return gspread.service_account_from_dict(creds_dict)
+
+            if os.path.exists(self.credentials_path):
+                return gspread.service_account(filename=self.credentials_path)
+
+            logger.warning("No se encontraron credenciales de Google Service Account (archivo ni JSON).")
+            return None
+        except (gspread.exceptions.GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            logger.error(f"Error inicializando cliente de Google Sheets: {e}")
+            return None
+
+    def _get_or_create_worksheet(self, sh: Any, title: str, rows: int = 100, cols: int = 20) -> Any:
+        """Busca una pestaña por título o la crea si no existe."""
+        for ws in sh.worksheets():
+            if ws.title == title:
+                return ws
+        return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
     def export(self, sheet_id: str, results: list[TradeResult]) -> bool:
-        """Exporta los resultados a una hoja remota de cálculo."""
-        try:
-            import gspread
-        except ImportError:
-            logger.warning("gspread no está instalado. Sincronización omitida.")
+        """Exporta los resultados a una hoja remota de cálculo con formato multi-pestaña."""
+        if not sheet_id:
+            logger.warning("No se proporcionó sheet_id para la exportación.")
             return False
-        else:
-            try:
-                gc = gspread.service_account(filename=self.credentials_path)
-                sh = gc.open_by_key(sheet_id)
-                worksheet = sh.sheet1
-                # Cabeceras
-                headers: list[Any] = ["Order", "Crypto", "Revenue VES", "Cost VES", "Profit VES", "Profit USD"]
-                data_to_write: list[list[Any]] = [headers]
-                for r in results:
-                    data_to_write.append([
-                        r.order_number,
-                        r.crypto_amount,
-                        r.total_revenue_fiat,
-                        r.acquisition_cost_fiat,
-                        r.net_profit_fiat,
-                        r.net_profit_usd,
-                    ])
-                worksheet.clear()
-                worksheet.append_rows(data_to_write)
-                logger.info("Datos sincronizados a Google Sheets exitosamente.")
-                return True
-            except (gspread.exceptions.APIError, OSError) as e:
-                logger.error(f"Error exportando a Google Sheets: {e}")
-                return False
+
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            sh = client.open_by_key(sheet_id)
+
+            # 1. Pestaña: Detalle Fiscal
+            ws_detalle = self._get_or_create_worksheet(sh, "Detalle Fiscal", rows=max(100, len(results) + 10), cols=15)
+            headers_detalle: list[Any] = [
+                "Orden",
+                "Tipo",
+                "Cripto (USDT)",
+                "Precio Venta (VES)",
+                "Ingreso Total (VES)",
+                "Costo Adquisición (VES)",
+                "Comisión (VES)",
+                "Tasa BCV",
+                "Ganancia Neta (VES)",
+                "Ganancia Neta (USD)",
+            ]
+            data_detalle: list[list[Any]] = [headers_detalle]
+            for r in results:
+                data_detalle.append([
+                    r.order_number,
+                    r.trade_type,
+                    round(r.crypto_amount, 4),
+                    round(r.sell_price_fiat, 2),
+                    round(r.total_revenue_fiat, 2),
+                    round(r.acquisition_cost_fiat, 2),
+                    round(r.fee_fiat, 2),
+                    round(r.bcv_rate, 4),
+                    round(r.net_profit_fiat, 2),
+                    round(r.net_profit_usd, 2),
+                ])
+
+            ws_detalle.clear()
+            ws_detalle.append_rows(data_detalle)
+
+            # 2. Pestaña: Resumen Ejecutivo
+            ws_resumen = self._get_or_create_worksheet(sh, "Resumen Ejecutivo", rows=30, cols=5)
+            total_crypto = sum(r.crypto_amount for r in results)
+            total_revenue = sum(r.total_revenue_fiat for r in results)
+            total_cost = sum(r.acquisition_cost_fiat for r in results)
+            total_fees = sum(r.fee_fiat for r in results)
+            total_profit_ves = sum(r.net_profit_fiat for r in results)
+            total_profit_usd = sum(r.net_profit_usd for r in results)
+            margin_pct = (total_profit_ves / total_revenue * 100.0) if total_revenue > 0 else 0.0
+
+            sync_timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            headers_resumen: list[Any] = ["Métrica", "Valor"]
+            data_resumen: list[list[Any]] = [
+                headers_resumen,
+                ["Órdenes Procesadas", len(results)],
+                ["Volumen USDT Vendido", round(total_crypto, 2)],
+                ["Ingreso Total (VES)", round(total_revenue, 2)],
+                ["Costo Total Adquisición (VES)", round(total_cost, 2)],
+                ["Comisiones Totales (VES)", round(total_fees, 2)],
+                ["Ganancia Neta Consolidada (VES)", round(total_profit_ves, 2)],
+                ["Ganancia Neta Consolidada (USD)", round(total_profit_usd, 2)],
+                ["Margen Operativo Neto (%)", f"{margin_pct:.2f}%"],
+                ["Última Sincronización", sync_timestamp],
+            ]
+
+            ws_resumen.clear()
+            ws_resumen.append_rows(data_resumen)
+
+            logger.info(f"Google Sheets '{sheet_id}' sincronizado exitosamente con 2 pestañas.")
+            return True
+        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            logger.error(f"Error exportando a Google Sheets: {e}")
+            return False
+
+    @staticmethod
+    def get_sheet_url(sheet_id: str) -> str:
+        """Devuelve el enlace directo al documento en Google Sheets."""
+        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"

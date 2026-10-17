@@ -130,6 +130,32 @@ with tab_tax:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         width="stretch"
                     )
+
+                # Sincronización con Google Sheets
+                st.write("---")
+                st.markdown("#### :material/table_chart: Sincronización con Google Sheets")
+                from config.settings import Settings
+                from src.reporting.sheets_exporter import SheetsExporter
+
+                try:
+                    dashboard_settings = Settings()
+                    sheet_id = dashboard_settings.GOOGLE_SHEET_ID
+                    if sheet_id:
+                        sheet_url = SheetsExporter.get_sheet_url(sheet_id)
+                        st.markdown(f"🔗 **Documento vinculado**: [{sheet_id}]({sheet_url})")
+                        if st.button("📊 Sincronizar Ahora con Google Sheets", use_container_width=True):
+                            exporter = SheetsExporter(
+                                credentials_path=dashboard_settings.GOOGLE_CREDENTIALS_FILE,
+                                credentials_json=dashboard_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+                            )
+                            if exporter.export(sheet_id, tax_results):
+                                st.success(f"¡Sincronizado exitosamente! [Abrir Google Sheets]({sheet_url})")
+                            else:
+                                st.error("Error al sincronizar con Google Sheets. Revisa credenciales o permisos.")
+                    else:
+                        st.info("💡 Para activar la sincronización con Google Sheets, define `GOOGLE_SHEET_ID` en `config/.env` o variables de entorno.")
+                except (ValueError, KeyError, OSError, RuntimeError) as ex:
+                    st.warning(f"Configuración de Google Sheets no disponible: {ex}")
     finally:
         db.close()
 

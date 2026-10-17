@@ -138,6 +138,18 @@
     - Inyección de BCVService en HistoryIngestor: Se refactorizó `HistoryIngestor` para aceptar `bcv_service: Any = None` como parámetro inyectable, evitando consultas externas durante pruebas y eliminando instanciaciones repetitivas en bucles de ingesta.
     - Determinismo en Pruebas E2E: En `test_sandbox_metrics.py` se desacopla la prueba del scraping en vivo inyectando una tasa controlada (36.50 VES/USD) y se verifica la coherencia matemática de conversión fiat a USD mediante `pytest.approx()`.
     - Node.js LTS Portable: Descargado e instalado Node.js v20.18.0 LTS y npx 10.8.2 en `c:\p2p-bot-merchant\.bin\nodejs`, incorporado al PATH de usuario y referenciado en `mcp_config.json`.
+23. **Estrategia de IP Estática y Hoja de Ruta para Despliegue en VPS (ADR 023)**:
+    - Diagnóstico de Red en Render: Render opera con IPs de salida dinámicas y compartidas que cambian en cada reinicio o deploy. La Regla #1 de la Constitución y la API oficial de Binance exigen IP Whitelist estricta para operar P2P en producción con claves reales.
+    - Solución Primaria (VPS Dedicada): Migración del stack completo vía Docker Compose (`docker/docker-compose.yml`) a una VPS con IPv4 fija garantizada (ej. Hetzner, DigitalOcean, AWS Lightsail), asegurando operación 24/7 sin suspensiones y con IP fija permanente para Binance.
+    - Solución Alternativa (Egress Proxy Estático): Canalización de peticiones salientes a Binance a través de proxy con IP fija (`BINANCE_PROXY_URL`) mientras el bot permanezca en Render.
+    - Detección de IP Pública en Startup: Notificación automática en Telegram con la IP saliente detectada al arrancar el motor.
+24. **Conexión de Alta Fidelidad con Google Sheets y Comando /sheets (ADR 024)**:
+    - Exportador Multi-Pestaña (`SheetsExporter`): Implementada sincronización en dos pestañas estructuradas:
+      1. `Detalle Fiscal`: Órdenes individuales con precio venta, ingreso, costo FIFO, comisiones, tasa oficial BCV y ganancia neta en VES y USD.
+      2. `Resumen Ejecutivo`: Métricas agregadas (volumen USDT, ingreso total, costos, comisiones, ganancia neta consolidada, margen % y timestamp de sincronización).
+    - Soporte Flexible de Credenciales: Compatibilidad dual con `GOOGLE_SERVICE_ACCOUNT_JSON` (string JSON en variable de entorno para entornos Cloud como Render) y `config/google_credentials.json` (archivo en disco).
+    - Interfaz Streamlit & Bot de Telegram: Añadido botón de sincronización de 1-clic y enlace al documento en la pestaña fiscal del Dashboard. Incorporado comando `/sheets` y `/sync_sheets` en `TelegramNotifier` para consultar el enlace directo y disparar la exportación remota.
+    - Suite de Pruebas: Ampliada a **51/51 tests pasando al 100%**.
 
 ---
 
@@ -145,7 +157,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (46/46 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (51/51 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).
