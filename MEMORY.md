@@ -159,6 +159,11 @@
     - Notificación en UI y Telegram: Tanto la respuesta a `/sheets` / `/sync_sheets` como el botón de sincronización en el Dashboard muestran de forma transparente `exporter.last_error`.
     - Formalización de SPEC-013: Creada especificación exhaustiva en `.specify/specs/013-sheets-vps-stitch-enhancements/` abarcando Google Sheets, despliegue VPS para IP Whitelist fija en Binance, modernización con Google Stitch UI (MCP) y monitor de spread P2P vs BCV.
     - Suite de Pruebas: Ampliada a **52/52 tests pasando al 100%**.
+26. **Resiliencia de Carga de Configuración en Telegram y Fixture Global CI (ADR 026)**:
+    - Diagnóstico de Causa Raíz en CI: Al invocar `/sheets` en entornos sin `config/.env` ni `MASTER_ENCRYPTION_KEY` explícita (como runners efímeros de GitHub Actions), la instanciación de `Settings()` fallaba con `ValueError` por validación de clave maestra, retornando un error genérico ("No se pudo cargar la configuración") en lugar del mensaje específico "Google Sheets no está configurado".
+    - Resiliencia y Fallback Suave en `_handle_sheets_sync`: Si `Settings()` falla su validación de arranque, `TelegramNotifier` degrada suavemente a lectura directa de variables de entorno (`os.getenv("GOOGLE_SHEET_ID")`). Si la variable no está presente, devuelve limpiamente el mensaje explicativo para el usuario.
+    - Fixture Global en `tests/conftest.py`: Creado fixture autouse que inyecta una clave maestra de prueba cuando no existe en el entorno, protegiendo todos los tests unitarios ejecutados en CI.
+    - Suite de Pruebas: Ampliada a **53/53 tests pasando al 100%**.
 
 ---
 
@@ -166,7 +171,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (52/52 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (53/53 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).

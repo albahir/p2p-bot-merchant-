@@ -207,6 +207,8 @@ class TelegramNotifier:
 
     def _handle_sheets_sync(self) -> str:
         """Sincroniza el histórico fiscal con Google Sheets y retorna el estado con enlace directo."""
+        import os
+
         from sqlalchemy.exc import SQLAlchemyError
 
         from config.settings import Settings
@@ -215,12 +217,21 @@ class TelegramNotifier:
         from src.reporting.sheets_exporter import SheetsExporter
         from src.reporting.tax_engine import FIFOCostMethod
 
+        sheet_id: str | None = None
+        creds_json: str | None = None
+        creds_file: str = "config/google_credentials.json"
+
         try:
             settings = Settings()
+            sheet_id = settings.GOOGLE_SHEET_ID
+            creds_json = settings.GOOGLE_SERVICE_ACCOUNT_JSON
+            creds_file = settings.GOOGLE_CREDENTIALS_FILE
         except (ValueError, KeyError, OSError, RuntimeError):
-            return "⚠️ No se pudo cargar la configuración del sistema."
+            sheet_id = os.getenv("GOOGLE_SHEET_ID")
+            creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+            creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "config/google_credentials.json")
 
-        if not settings.GOOGLE_SHEET_ID:
+        if not sheet_id:
             return (
                 "⚠️ *Google Sheets no está configurado*.\n\n"
                 "Para activarlo, define `GOOGLE_SHEET_ID` y las credenciales de servicio en `config/.env` o variables de entorno."
@@ -237,11 +248,11 @@ class TelegramNotifier:
             results = fifo.process_orders(completed_orders)
 
             exporter = SheetsExporter(
-                credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
-                credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+                credentials_path=creds_file,
+                credentials_json=creds_json,
             )
-            success = exporter.export(settings.GOOGLE_SHEET_ID, results)
-            sheet_url = SheetsExporter.get_sheet_url(settings.GOOGLE_SHEET_ID)
+            success = exporter.export(sheet_id, results)
+            sheet_url = SheetsExporter.get_sheet_url(sheet_id)
 
             if success:
                 total_profit_ves = sum(r.net_profit_fiat for r in results)
