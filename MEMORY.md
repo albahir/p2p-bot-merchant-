@@ -206,6 +206,19 @@
       - Integrados proveedores autorizados y regulados de verificación de identidad: **Verifik** (`api.verifik.co`) y **Didit** (`api.didit.me`).
       - Arquitectura en cascada ética y legal: 1) Caché local de contrapartes legítimas, 2) Verifik KYC API, 3) Didit KYC API, 4) SENIAT Oficial RIF, 5) CNE Consulta Ciudadana.
     - Suite de Pruebas: Ampliada y actualizada a **64/64 tests pasando al 100%**.
+29. **Reglas Contables y Fiscales para Declaración P2P en Venezuela y Mapeo API Oficial Binance (ADR 029)**:
+    - Formalización de Reglas Contables en [`.agents/rules/p2p-fiscal-rules.md`](file:///c:/p2p-bot-merchant/.agents/rules/p2p-fiscal-rules.md):
+      - Definidos los 3 reportes base requeridos por Binance My Tax Hub / SUMM: Transaction History, Deposit History y Withdrawal History.
+      - Definidas las 6 piezas clave de reconstrucción contable para comerciantes P2P: Saldo inicial, Entradas cripto, Salidas cripto, Volumen operado, Comisiones y Saldo final (verificado mediante la ecuación $\text{Saldo Inicial} + \text{Entradas} - \text{Salidas} = \text{Saldo Final Esperado}$).
+      - Definida la conciliación obligatoria con la capa bancaria externa en Venezuela (comprobantes de transferencias y Pago Móvil en VES, tasa oficial diaria del BCV y control de gastos operativos/IGTF).
+    - Mapeo oficial contra la Documentación de Desarrolladores de Binance ([developers.binance.com/en/docs/introduction](https://developers.binance.com/en/docs/introduction) y [developers.binance.com/en/docs/catalog](https://developers.binance.com/en/docs/catalog)):
+      - Historial de órdenes P2P/C2C: `GET /sapi/v1/c2c/orderMatch/listUserOrderHistory` (Signed `USER_DATA`, paginación en ventanas de 30 días).
+      - Historial de depósitos cripto: `GET /sapi/v1/capital/deposit/hisrec` (Signed `USER_DATA`, Weight: 1).
+      - Historial de retiros cripto: `GET /sapi/v1/capital/withdraw/history` (Signed `USER_DATA`, Weight: 1).
+      - Historial de conversiones spot directas: `GET /sapi/v1/convert/tradeFlow`.
+      - Historial de airdrops/recompensas: `GET /sapi/v1/asset/assetDividend`.
+      - Balance consolidado de billeteras: `GET /sapi/v1/asset/wallet/balance`.
+    - Actualización de reglas globales en [`.agents/rules/global-rules.md`](file:///c:/p2p-bot-merchant/.agents/rules/global-rules.md) y skill [`.agents/skills/binance-p2p/SKILL.md`](file:///c:/p2p-bot-merchant/.agents/skills/binance-p2p/SKILL.md).
 
 ---
 
