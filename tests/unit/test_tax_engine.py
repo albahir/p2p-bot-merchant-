@@ -29,12 +29,15 @@ def test_fifo_vs_average_cost_calculations():
     assert avg_results[0].acquisition_cost_fiat == 5640.0
     assert avg_results[0].net_profit_fiat == 1095.0
 
+    assert fifo_results[0].created_at is not None
+    assert avg_results[0].created_at is not None
     assert fifo_results[0].net_profit_fiat != avg_results[0].net_profit_fiat
 
 def test_excel_report_generation(tmp_path):
+    fixed_time = datetime(2026, 10, 15, 14, 30, 0, tzinfo=UTC)
     orders = [
-        Order(order_number="BUY_1", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=3500.0, crypto_amount=100.0, unit_price=35.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
-        Order(order_number="SELL_1", trade_type="SELL", asset="USDT", fiat="VES", fiat_amount=3700.0, crypto_amount=100.0, unit_price=37.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
+        Order(order_number="BUY_1", trade_type="BUY", asset="USDT", fiat="VES", fiat_amount=3500.0, crypto_amount=100.0, unit_price=35.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=fixed_time),
+        Order(order_number="SELL_1", trade_type="SELL", asset="USDT", fiat="VES", fiat_amount=3700.0, crypto_amount=100.0, unit_price=37.0, fee_fiat=0.0, bcv_rate=35.0, order_status="COMPLETED", created_at=fixed_time),
     ]
     fifo = FIFOCostMethod()
     results = fifo.process_orders(orders)
@@ -46,3 +49,7 @@ def test_excel_report_generation(tmp_path):
     wb = openpyxl.load_workbook(output_file)
     assert "Detalle" in wb.sheetnames
     assert "Resumen" in wb.sheetnames
+    ws_detalle = wb["Detalle"]
+    assert ws_detalle.cell(row=1, column=1).value == "Fecha y Hora (UTC)"
+    assert ws_detalle.cell(row=2, column=1).value == "2026-10-15 14:30:00"
+

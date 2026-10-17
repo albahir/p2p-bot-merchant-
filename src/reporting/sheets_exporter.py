@@ -101,6 +101,7 @@ class SheetsExporter:
             # 1. Pestaña: Detalle Fiscal
             ws_detalle = self._get_or_create_worksheet(sh, "Detalle Fiscal", rows=max(100, len(results) + 10), cols=15)
             headers_detalle: list[Any] = [
+                "Fecha y Hora (UTC)",
                 "Orden",
                 "Tipo",
                 "Cripto (USDT)",
@@ -114,7 +115,9 @@ class SheetsExporter:
             ]
             data_detalle: list[list[Any]] = [headers_detalle]
             for r in results:
+                date_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "-"
                 data_detalle.append([
+                    date_str,
                     r.order_number,
                     r.trade_type,
                     round(r.crypto_amount, 4),

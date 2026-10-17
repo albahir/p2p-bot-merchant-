@@ -58,3 +58,16 @@ class Order(Base):
     bcv_rate = Column(Float, default=0.0, nullable=False)
     order_status = Column(String(30), nullable=False)  # COMPLETED, CANCELLED
     created_at = Column(DateTime, nullable=False)
+
+
+class IdentityCache(Base):
+    """Caché persistente de identidades consultadas (Cédula -> Nombre oficial)."""
+    __tablename__ = "identities"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    nationality = Column(String(2), nullable=False)  # V o E
+    cedula = Column(String(20), unique=True, index=True, nullable=False)
+    full_name = Column(String(255), nullable=False)
+    source = Column(String(50), nullable=False)  # SENIAT, CNE, MANUAL
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+

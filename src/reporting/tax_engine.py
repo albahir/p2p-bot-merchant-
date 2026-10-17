@@ -4,6 +4,8 @@ Módulo puro sin dependencias del motor de trading de Binance.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
+from typing import cast
 
 from src.data.models import Order
 
@@ -27,6 +29,7 @@ class TradeResult:
     net_profit_fiat: float
     bcv_rate: float
     net_profit_usd: float
+    created_at: datetime | None = None
 
 
 class CostMethod(ABC):
@@ -92,6 +95,7 @@ class FIFOCostMethod(CostMethod):
                     net_profit_fiat=net_profit,
                     bcv_rate=rate,
                     net_profit_usd=profit_usd,
+                    created_at=cast(datetime | None, order.created_at),
                 ))
 
         return results
@@ -137,6 +141,7 @@ class WeightedAverageCostMethod(CostMethod):
                     net_profit_fiat=net_profit,
                     bcv_rate=rate,
                     net_profit_usd=profit_usd,
+                    created_at=cast(datetime | None, order.created_at),
                 ))
 
         return results

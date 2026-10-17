@@ -20,7 +20,11 @@
 - [ ] **T11**: Documentar la guía de obtención de API Key de Stitch y sincronización de pantallas.
 - [ ] **T12**: Aplicar mejoras de diseño fintech (Glassmorphism, tarjetas de métricas, estilos de tablas) al Dashboard Streamlit.
 
-### Fase 4: Monitores Proactivos (Spread BCV vs P2P y Cierre Mensual)
+### Fase 4: Monitores Proactivos, Cierre Mensual y Verificación de Cédula
 - [ ] **T13**: Diseñar e implementar `SpreadMonitor` en `src/core/spread_monitor.py` para comparar el mercado P2P contra `bcv.org.ve`.
 - [ ] **T14**: Integrar alertas de spread en `TelegramQueueDispatcher`.
-- [ ] **T15**: Implementar el cron de cierre fiscal mensual para envío de `.xlsx` a Telegram.
+- [x] **T15**: Actualizar `TradeResult`, `ExcelReporter` y `SheetsExporter` para incluir la columna de "Fecha y Hora" en el Detalle Fiscal.
+- [x] **T16**: Implementar `send_document()` en `TelegramNotifier` y el servicio de cierre fiscal mensual automatizado con envío de `.xlsx` a Telegram y comando `/cierre_mensual`.
+- [x] **T17**: Implementar `IdentityService` en `src/security/identity_service.py` con triple fallback en cascada (Caché local SQLite, SENIAT XML, CNE scraping) y extractor de cédula desde métodos de pago.
+- [x] **T18**: Escribir suite de pruebas unitarias para Fecha/Hora, Cierre Mensual y Servicio de Identidad con 100% de cobertura.
+- [x] **T19**: Ejecutar suite completa (`pytest`, `ruff`, `mypy`) y documentar en `memory.md`.

@@ -21,6 +21,7 @@ class ExcelReporter:
         else:
             detail_data = [
                 {
+                    "Fecha y Hora (UTC)": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "-",
                     "Número de Orden": r.order_number,
                     "Tipo": r.trade_type,
                     "Cripto (USDT)": r.crypto_amount,
@@ -30,7 +31,7 @@ class ExcelReporter:
                     "Comisión (VES)": r.fee_fiat,
                     "Ganancia Neta (VES)": r.net_profit_fiat,
                     "Tasa BCV": r.bcv_rate,
-                    "Ganancia Neta (USD)": r.net_profit_usd
+                    "Ganancia Neta (USD)": r.net_profit_usd,
                 }
                 for r in results
             ]

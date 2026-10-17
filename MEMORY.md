@@ -164,6 +164,17 @@
     - Resiliencia y Fallback Suave en `_handle_sheets_sync`: Si `Settings()` falla su validación de arranque, `TelegramNotifier` degrada suavemente a lectura directa de variables de entorno (`os.getenv("GOOGLE_SHEET_ID")`). Si la variable no está presente, devuelve limpiamente el mensaje explicativo para el usuario.
     - Fixture Global en `tests/conftest.py`: Creado fixture autouse que inyecta una clave maestra de prueba cuando no existe en el entorno, protegiendo todos los tests unitarios ejecutados en CI.
     - Suite de Pruebas: Ampliada a **53/53 tests pasando al 100%**.
+27. **Fecha/Hora en Detalle Fiscal, Cierre Mensual a Telegram y Verificación de Cédula (ADR 027)**:
+    - Inclusión de Fecha y Hora en Detalle Fiscal: `TradeResult` propaga `created_at` desde el modelo `Order` hacia `ExcelReporter` y `SheetsExporter`. Se agregó la columna "Fecha y Hora (UTC)" como primer campo del Detalle Fiscal.
+    - Cierre Fiscal Mensual Automatizado (`MonthlyFiscalCloser`): Genera el libro contable de ventas de cualquier mes calendario, calcula métricas acumuladas (órdenes, volumen USDT, ingresos brutos, costos de adquisición FIFO, comisiones, ganancia neta en VES y USD, y margen operativo %).
+    - Envío de Documentos Binarios en Telegram: Implementado `send_document()` en `TelegramNotifier` con `multipart/form-data`, reintentos, rate limit (429) y sanitización estricta del caption. Permite al bot despachar el archivo `.xlsx` directamente al chat privado vía comando `/cierre [YYYY-MM]`.
+    - Servicio de Identidad con Triple Fallback (`IdentityService`):
+      1. Caché Local SQLite (`identities`): Consulta instantánea a 0 ms.
+      2. SENIAT XML API (`/getContribuyente/getrif`): Obtención de nombre oficial y RIF.
+      3. CNE Scraping (`/web/registro_electoral/ce.php`): Extracción de nombres y apellidos oficiales del registro electoral.
+      - Extracción de cédula desde métodos de pago P2P (`extract_cedula_from_payment_details`) con normalización de puntos.
+      - Integrado en Telegram (`/cedula V12345678`) y en las herramientas del Asistente de IA de Google Gemini (`consultar_titular_cedula`).
+    - Suite de Pruebas: Ampliada a **61/61 tests pasando al 100%**.
 
 ---
 
@@ -171,7 +182,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (53/53 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (61/61 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
-   - `mypy src/` (0 errores en 31 archivos fuente).
+   - `mypy src/` (0 errores en 33 archivos fuente).
    - `ruff check .` (0 errores de linting).

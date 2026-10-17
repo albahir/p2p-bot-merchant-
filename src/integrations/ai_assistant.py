@@ -111,6 +111,24 @@ class AIAssistantTools:
         finally:
             db.close()
 
+    def consultar_titular_cedula(self, cedula: str, nacionalidad: str = "V") -> dict[str, Any]:
+        """Consulta el titular oficial de una cédula de identidad en Venezuela (SENIAT/CNE/Caché)."""
+        from src.security.identity_service import IdentityService
+        db = self.session_factory()
+        try:
+            service = IdentityService(db=db)
+            info = service.lookup(nationality=nacionalidad, cedula=cedula)
+            return {
+                "cedula": f"{info.nationality}-{info.cedula}",
+                "nombre_titular": info.full_name if info.is_valid else "No encontrado",
+                "fuente": info.source,
+                "verificado": info.is_valid,
+                "error": info.error_message,
+            }
+        finally:
+            db.close()
+
+
 
 GEMINI_TOOL_DECLARATIONS = [
     {
@@ -165,6 +183,24 @@ GEMINI_TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {}
+        }
+    },
+    {
+        "name": "consultar_titular_cedula",
+        "description": "Verifica una cédula de identidad venezolana (V o E) y devuelve el nombre y titular legal oficial a través del SENIAT o CNE.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "cedula": {
+                    "type": "STRING",
+                    "description": "Número de cédula de identidad a verificar (ej. '12345678')."
+                },
+                "nacionalidad": {
+                    "type": "STRING",
+                    "description": "Nacionalidad: 'V' para venezolanos o 'E' para extranjeros (por defecto 'V')."
+                }
+            },
+            "required": ["cedula"]
         }
     }
 ]
@@ -476,6 +512,11 @@ class TelegramAIAgent:
                 tool_result = self.tools.consultar_estado_sistema()
             elif tool_name == "consultar_estado_claves_ia":
                 tool_result = self.tools.consultar_estado_claves_ia()
+            elif tool_name == "consultar_titular_cedula":
+                tool_result = self.tools.consultar_titular_cedula(
+                    cedula=str(tool_args.get("cedula", "")),
+                    nacionalidad=str(tool_args.get("nacionalidad", "V")),
+                )
             else:
                 tool_result = {"error": f"Herramienta desconocida: {tool_name}"}
 

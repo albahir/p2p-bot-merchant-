@@ -68,7 +68,8 @@ def test_sheets_exporter_export_success_multi_tab():
 
         # Verificar datos escritos en Detalle
         detalle_call_args = mock_ws_detalle.append_rows.call_args[0][0]
-        assert detalle_call_args[0][0] == "Orden"
+        assert detalle_call_args[0][0] == "Fecha y Hora (UTC)"
+        assert detalle_call_args[0][1] == "Orden"
         assert len(detalle_call_args) == 3  # Header + 2 registros
 
         assert mock_ws_resumen.clear.called

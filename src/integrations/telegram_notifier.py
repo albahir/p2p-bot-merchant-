@@ -10,10 +10,12 @@ Garantiza el principio constitucional de "Cero Secretos":
 """
 
 import logging
+import os
 import queue
 import re
 import threading
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -148,6 +150,92 @@ class TelegramNotifier:
                 return False
         return False
 
+    def send_document(
+        self,
+        file_path: str,
+        caption: str | None = None,
+        chat_id: str | None = None,
+        parse_mode: str | None = "Markdown",
+    ) -> bool:
+        """Envía un archivo binario (ej. .xlsx) al chat de Telegram con sanitización de caption."""
+        if self.is_paused:
+            logger.info("TELEGRAM: Notificador pausado, omitiendo envío de documento.")
+            return False
+
+        if not os.path.exists(file_path):
+            self.last_error = f"Archivo no encontrado: {file_path}"
+            logger.error(f"TELEGRAM: {self.last_error}")
+            return False
+
+        target_chat = chat_id or self.default_chat_id
+        if not target_chat:
+            self.last_error = "No hay un chat_id configurado para enviar el documento."
+            logger.warning(f"TELEGRAM: {self.last_error}")
+            return False
+
+        sanitized_caption = sanitize_message(caption) if caption else ""
+        data: dict[str, Any] = {"chat_id": str(target_chat)}
+        if sanitized_caption:
+            data["caption"] = sanitized_caption
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+
+        filename = os.path.basename(file_path)
+
+        for attempt in range(3):
+            try:
+                with open(file_path, "rb") as f:
+                    file_bytes = f.read()
+                files = {"document": (filename, file_bytes, "application/octet-stream")}
+                res = self._client.post(f"{self.base_url}/sendDocument", data=data, files=files)
+                if res.status_code == 200:
+                    logger.info(f"TELEGRAM: Documento '{filename}' enviado con éxito.")
+                    self.last_error = None
+                    return True
+
+                if res.status_code == 400 and data.get("parse_mode"):
+                    logger.warning("TELEGRAM: Error 400 en parseo de entidades de caption. Reintentando sin parse_mode...")
+                    data.pop("parse_mode", None)
+                    res_fallback = self._client.post(f"{self.base_url}/sendDocument", data=data, files=files)
+                    if res_fallback.status_code == 200:
+                        logger.info(f"TELEGRAM: Documento '{filename}' entregado con éxito tras fallback.")
+                        self.last_error = None
+                        return True
+                    else:
+                        err_msg = f"HTTP {res_fallback.status_code}: {res_fallback.text}"
+                        self.last_error = err_msg
+                        return False
+
+                if res.status_code == 429:
+                    try:
+                        resp_data = res.json()
+                        retry_after = int(resp_data.get("parameters", {}).get("retry_after", 1))
+                    except (ValueError, TypeError, KeyError):
+                        retry_after = 1
+                    time.sleep(retry_after)
+                    continue
+
+                err_msg = f"HTTP {res.status_code}: {res.text}"
+                logger.error(f"TELEGRAM: Error enviando documento: {err_msg}")
+                self.last_error = err_msg
+                return False
+
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                logger.warning(f"TELEGRAM: Fallo de red temporal al enviar documento (intento {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    time.sleep(1.0)
+                    continue
+                err_msg = f"Error de conectividad al enviar documento tras 3 intentos ({e})"
+                logger.error(f"TELEGRAM: {err_msg}")
+                self.last_error = err_msg
+                return False
+            except (OSError, httpx.RequestError, ValueError, TypeError) as e:
+                err_msg = str(e)
+                logger.error(f"TELEGRAM: Excepción inesperada enviando documento: {err_msg}")
+                self.last_error = err_msg
+                return False
+        return False
+
     def is_user_authorized(self, user_id: int | str | None) -> bool:
         """Verifica si un remitente de comando está en la lista autorizada o es el dueño del chat."""
         if user_id is None:
@@ -191,12 +279,18 @@ class TelegramNotifier:
             return "🔑 Usa `/keys` o pregúntale al bot '¿cuál es el estado de las claves?' para ver la telemetría en vivo."
         elif cmd in ("/sheets", "/sync_sheets", "/hojas"):
             return self._handle_sheets_sync()
+        elif cmd in ("/cierre", "/cierre_mensual"):
+            return self._handle_monthly_close(command)
+        elif cmd in ("/cedula", "/identidad", "/consultar_cedula"):
+            return self._handle_cedula_lookup(command)
         elif cmd in ("/help", "/ayuda", "/start"):
             return (
                 "🤖 *Comandos Disponibles*:\n"
                 "- `/status`: Ver estado y modo operativo del bot\n"
                 "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
                 "- `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
+                "- `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
+                "- `/cedula V12345678`: Consultar titular oficial por cédula (SENIAT/CNE)\n"
                 "- `/pause`: Pausar operaciones comerciales\n"
                 "- `/resume`: Reanudar operaciones comerciales\n"
                 "- `/report`: Enlace a reportes fiscales\n"
@@ -275,6 +369,79 @@ class TelegramNotifier:
             return f"❌ Error interno sincronizando Google Sheets: {e}"
         finally:
             db.close()
+
+    def _handle_monthly_close(self, command: str) -> str:
+        """Procesa el comando /cierre [YYYY-MM] y despacha el archivo Excel a Telegram."""
+        from src.data.database import SessionLocal
+        from src.reporting.monthly_closer import MonthlyFiscalCloser
+
+        parts = command.strip().split()
+        now = datetime.now(UTC)
+        year = now.year
+        month = now.month
+
+        # Por defecto el cierre es del mes anterior, o del mes especificado en el comando
+        if len(parts) > 1:
+            arg = parts[1]
+            try:
+                if "-" in arg:
+                    y_str, m_str = arg.split("-")
+                    year = int(y_str)
+                    month = int(m_str)
+                else:
+                    month = int(arg)
+            except (ValueError, TypeError):
+                return "⚠️ Formato inválido. Usa `/cierre` (mes anterior) o `/cierre YYYY-MM` (ej. `/cierre 2026-09`)."
+        else:
+            # Mes anterior por defecto
+            if month == 1:
+                year -= 1
+                month = 12
+            else:
+                month -= 1
+
+        closer = MonthlyFiscalCloser(session_factory=SessionLocal, notifier=self)
+        file_path, metrics = closer.execute_close(year=year, month=month, send_telegram=True)
+
+        if not file_path:
+            msg = metrics.get("message") or metrics.get("error") or "No hay datos para el período."
+            return f"ℹ️ {msg}"
+
+        return f"✅ Cierre fiscal de `{year}-{month:02d}` generado y enviado como documento adjunto."
+
+    def _handle_cedula_lookup(self, command: str) -> str:
+        """Procesa /cedula [V-12345678] consultando vía IdentityService (Caché -> SENIAT -> CNE)."""
+        from src.data.database import SessionLocal
+        from src.security.identity_service import (
+            IdentityService,
+            extract_cedula_from_payment_details,
+        )
+
+        parts = command.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            return "ℹ️ Uso: `/cedula V-12345678` o `/cedula 12345678`"
+
+        extracted = extract_cedula_from_payment_details(parts[1])
+        if not extracted:
+            return f"⚠️ No se pudo reconocer una cédula válida en '{parts[1]}'."
+
+        nat, num = extracted
+        db = SessionLocal()
+        try:
+            service = IdentityService(db=db)
+            info = service.lookup(nationality=nat, cedula=num)
+            if info.is_valid:
+                return (
+                    f"👤 *Identidad Verificada*:\n\n"
+                    f"• Cédula: `{info.nationality}-{info.cedula}`\n"
+                    f"• Nombre Completo: *{info.full_name}*\n"
+                    f"• Fuente: `{info.source}`"
+                )
+            else:
+                return f"❌ No se encontró registro para `{nat}-{num}`: {info.error_message}"
+        finally:
+            db.close()
+
 
 
 class TelegramQueueDispatcher:
