@@ -22,6 +22,7 @@ config/.env
 # Reportes y temporales
 reporte_fiscal_*.xlsx
 *.log
+logs/
 
 # Testing y cobertura
 .pytest_cache/
