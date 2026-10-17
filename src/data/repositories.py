@@ -15,7 +15,8 @@ class OrderRepository:
         self.db = db
 
     def get_by_order_number(self, order_number: str) -> Order | None:
-        return self.db.query(Order).filter(Order.order_number == order_number).first()
+        result = self.db.query(Order).filter(Order.order_number == order_number).first()
+        return cast(Order | None, result)
 
     def create(self, order: Order) -> Order:
         self.db.add(order)
@@ -29,7 +30,8 @@ class OrderRepository:
             query = query.filter(cast(Any, Order.created_at >= start_date))
         if end_date:
             query = query.filter(cast(Any, Order.created_at <= end_date))
-        return query.order_by(Order.created_at.asc()).all()
+        results = query.order_by(Order.created_at.asc()).all()
+        return cast(list[Order], results)
 
 
 class SecurityRepository:
@@ -39,7 +41,8 @@ class SecurityRepository:
         self.db = db
 
     def get_last_event(self) -> SecurityEvent | None:
-        return self.db.query(SecurityEvent).order_by(SecurityEvent.id.desc()).first()
+        result = self.db.query(SecurityEvent).order_by(SecurityEvent.id.desc()).first()
+        return cast(SecurityEvent | None, result)
 
     def log_event(self, event: SecurityEvent) -> SecurityEvent:
         self.db.add(event)
@@ -48,7 +51,8 @@ class SecurityRepository:
         return event
 
     def get_secret(self, key_name: str) -> EncryptedSecret | None:
-        return self.db.query(EncryptedSecret).filter(EncryptedSecret.key_name == key_name).first()
+        result = self.db.query(EncryptedSecret).filter(EncryptedSecret.key_name == key_name).first()
+        return cast(EncryptedSecret | None, result)
 
     def upsert_secret(self, key_name: str, nonce: str, ciphertext: str, tag: str) -> EncryptedSecret:
         secret = self.get_secret(key_name)
@@ -66,4 +70,4 @@ class SecurityRepository:
             secret.tag = tag  # type: ignore[assignment]
         self.db.commit()
         self.db.refresh(secret)
-        return secret
+        return cast(EncryptedSecret, secret)

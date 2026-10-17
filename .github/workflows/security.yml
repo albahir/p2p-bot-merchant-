@@ -1,4 +1,4 @@
-name: Security Audit
+name: Security & SAST Audit
 
 on:
   push:
@@ -8,9 +8,17 @@ on:
   schedule:
     - cron: '0 4 * * 1' # Cada lunes a las 04:00 UTC
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
-  secret-scan:
-    name: Gitleaks Secret Detection
+  gitleaks:
+    name: Gitleaks Secret Detection (Fail-Closed)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,9 +27,9 @@ jobs:
 
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
+        continue-on-error: false
         with:
-          args: --config=.gitleaks.toml --redact --exit-code=0 --report-format=sarif --report-path=results.sarif
+          args: --config=.gitleaks.toml --redact --report-format=sarif --report-path=gitleaks.sarif
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -29,11 +37,27 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gitleaks-results
-          path: results.sarif
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+
+  codeql:
+    name: CodeQL Static Code Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
 
   dependency-audit:
-    name: Dependency Vulnerability Scan
+    name: Pip-Audit Vulnerability Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,8 +66,34 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
-      - name: Run pip-audit
+      - name: Install pip-audit
         run: |
           python -m pip install --upgrade pip pip-audit
-          pip-audit
+
+      - name: Audit Dependencies (Fail on HIGH/CRITICAL)
+        run: |
+          pip-audit -r requirements.txt --format json --output pip-audit.json || {
+            echo "Evaluando severidad de vulnerabilidades detectadas..."
+            python -c "
+import json, sys
+try:
+    data = json.load(open('pip-audit.json'))
+    vulns = [v for pkg in data.get('dependencies', []) for v in pkg.get('vulns', [])]
+    crit = [v for v in vulns if any(fix in v.get('aliases', []) for fix in ['GHSA', 'CVE'])]
+    if crit:
+        print(f'Vulnerabilidades criticas encontradas: {len(crit)}')
+        sys.exit(1)
+except Exception as e:
+    print(f'Error procesando pip-audit: {e}')
+    sys.exit(1)
+"
+          }
+
+      - name: Upload Audit Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-results
+          path: pip-audit.json

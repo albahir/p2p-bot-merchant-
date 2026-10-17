@@ -5,30 +5,91 @@ on:
     branches: [ main ]
     tags: [ 'v*.*.*' ]
 
+# Evitar despliegues concurrentes simultáneos para prevenir condiciones de carrera
+concurrency:
+  group: cd-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
+  build-and-scan:
+    name: Build & Security Container Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Engine Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.engine
+          load: true
+          tags: p2p-engine:${{ github.sha }}
+
+      - name: Build Dashboard Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.dashboard
+          load: true
+          tags: p2p-dashboard:${{ github.sha }}
+
+      - name: Scan Engine Container (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: p2p-engine:${{ github.sha }}
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
   deploy-staging:
-    name: Deploy to Staging VPS
+    name: Deploy to Staging VPS & Smoke Test
+    needs: build-and-scan
     runs-on: ubuntu-latest
     environment: staging
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Docker images
-        run: |
-          docker compose -f docker/docker-compose.yml build
+      - name: Set up Python for Smoke Tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
 
-      - name: Smoke Tests
+      - name: Install Dependencies
         run: |
-          echo "Ejecutando smoke tests en contenedor..."
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run Operational Smoke Tests
+        run: python scripts/smoke_test.py --stage=staging
 
   deploy-production:
-    name: Deploy to Production
+    name: Deploy to Production (Manual Approval Required)
     needs: deploy-staging
     runs-on: ubuntu-latest
-    environment: production
+    environment:
+      name: production
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy Production
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
         run: |
-          echo "Despliegue a producción completado con aprobación manual."
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run Production Health & Operational Verification
+        run: python scripts/smoke_test.py --stage=production

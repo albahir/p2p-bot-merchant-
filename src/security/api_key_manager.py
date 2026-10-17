@@ -5,6 +5,7 @@ Decodifica únicamente en memoria volátil. Nunca persiste secretos en texto pla
 import binascii
 import logging
 import os
+from typing import cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -109,7 +110,7 @@ class ApiKeyManager:
                 ip_address=ip_address,
                 status="SUCCESS"
             )
-            return decrypted_bytes.decode("utf-8")
+            return cast(str, decrypted_bytes.decode("utf-8"))
         except KeyError:
             raise
         except (SQLAlchemyError, binascii.Error, InvalidTag) as e:
