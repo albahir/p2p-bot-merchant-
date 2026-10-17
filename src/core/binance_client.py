@@ -178,7 +178,8 @@ class BinanceP2PClient:
             response = client.post(url, json=payload)
             self.check_weight(response.headers)
             raw_data = self._handle_response_errors(response)
-            return BinanceSearchResponse.model_validate(raw_data)
+            validated = BinanceSearchResponse.model_validate(raw_data)
+            return cast(BinanceSearchResponse, validated)
 
     def get_order_history(
         self,
@@ -210,7 +211,8 @@ class BinanceP2PClient:
             response = client.get(url, params=signed_params, headers=headers)
             self.check_weight(response.headers)
             raw_data = self._handle_response_errors(response)
-            return BinanceOrderHistoryResponse.model_validate(raw_data)
+            validated_history = BinanceOrderHistoryResponse.model_validate(raw_data)
+            return cast(BinanceOrderHistoryResponse, validated_history)
 
     def create_ad(self, ad_payload: dict[str, Any]) -> dict[str, Any]:
         """Crea un anuncio en Binance P2P."""
