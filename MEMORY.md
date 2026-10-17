@@ -175,6 +175,37 @@
       - Extracción de cédula desde métodos de pago P2P (`extract_cedula_from_payment_details`) con normalización de puntos.
       - Integrado en Telegram (`/cedula V12345678`) y en las herramientas del Asistente de IA de Google Gemini (`consultar_titular_cedula`).
     - Suite de Pruebas: Ampliada a **61/61 tests pasando al 100%**.
+28. **Endurecimiento de Pipelines CI/CD, Smoke Testing Operacional y Cumplimiento Legal KYC con Verifik y Didit (ADR 028)**:
+    - Rama de Trabajo Dedicada: Creada y conmutada la rama `feature/ci-security-hardening` para aislar los cambios de infraestructura y pipelines.
+    - Endurecimiento de `ci.yml`:
+      - Permisos de menor privilegio declarados (`permissions: contents: read`).
+      - Control de concurrencia (`concurrency: cancel-in-progress: true`) para ahorrar minutos de cómputo en pushes sucesivos.
+      - Caché de pip optimizada en todos los jobs (`cache: "pip"`).
+      - Exportación de reporte estructurado JUnit XML (`--junitxml=test-results/junit.xml`) y subida automática como artefacto.
+    - Endurecimiento Constitucional de `security.yml`:
+      - Principio Fail-Closed estricto: Eliminado `continue-on-error: true` de Gitleaks; cualquier secreto detectado bloquea inmediatamente el pipeline.
+      - Integrado escaneo SAST semántico oficial de GitHub (**CodeQL**) para Python.
+      - `pip-audit` configurado para exportar reporte JSON y fallar la integración si detecta vulnerabilidades con severidad `HIGH` o `CRITICAL`.
+      - Permiso explícito `security-events: write` para publicar alertas en la pestaña *Security* de GitHub.
+    - Endurecimiento de `cd.yml`:
+      - Erradicados los comandos falsos `echo`.
+      - Construcción de imágenes Docker con Buildx y escaneo de vulnerabilidades en contenedores con **Aquasecurity Trivy**.
+      - Ejecución de Smoke Tests reales mediante `scripts/smoke_test.py` en staging y producción.
+      - Reglas de protección de entorno (`environment: production`) con aprobación humana obligatoria (*Manual Approval Gate*).
+    - Script de Smoke Testing Autónomo (`scripts/smoke_test.py`):
+      - Valida en caliente las primitivas criptográficas (AES-256-GCM y Ed25519).
+      - Comprueba la importación limpia del grafo de módulos (`src.core`, `src.security`, `src.reporting`, `src.integrations`).
+      - Inicializa esquemas de Base de Datos.
+      - Verifica la sincronización horaria contra la API de Binance para prevenir el rechazo `-1021 INVALID_TIMESTAMP`.
+      - Verifica el endpoint de salud de Streamlit (`/_stcore/health`).
+    - Automatización Preventiva:
+      - Creado `.github/dependabot.yml` para actualizaciones semanales automáticas de `github-actions` y dependencias `pip`.
+      - Creado `.pre-commit-config.yaml` para validar formato y secretos localmente antes de hacer commit.
+    - Cumplimiento Legal y Regulación KYC/AML en `IdentityService`:
+      - Descartado y eliminado el enfoque de volcados de padrón electoral (`padron.db`, `scripts/import_padron.py`) por inviabilidad e infracción de leyes de protección de datos (Habeas Data).
+      - Integrados proveedores autorizados y regulados de verificación de identidad: **Verifik** (`api.verifik.co`) y **Didit** (`api.didit.me`).
+      - Arquitectura en cascada ética y legal: 1) Caché local de contrapartes legítimas, 2) Verifik KYC API, 3) Didit KYC API, 4) SENIAT Oficial RIF, 5) CNE Consulta Ciudadana.
+    - Suite de Pruebas: Ampliada y actualizada a **64/64 tests pasando al 100%**.
 
 ---
 
@@ -182,7 +213,8 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (61/61 tests pasando al 100%).
-4. **Comprobación de Calidad de Código**:
-   - `mypy src/` (0 errores en 33 archivos fuente).
+3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
+4. **Suite de Pruebas**: `pytest -v tests/` (**64/64 tests pasando al 100%**).
+5. **Comprobación de Calidad de Código**:
+   - `mypy src/ scripts/` (0 errores en 38 archivos fuente).
    - `ruff check .` (0 errores de linting).

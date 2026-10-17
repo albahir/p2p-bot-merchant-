@@ -260,7 +260,8 @@ class TelegramNotifier:
                 f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`."
             )
 
-        cmd = command.strip().lower()
+        clean_cmd_str = command.strip()
+        cmd = clean_cmd_str.split()[0].lower() if clean_cmd_str else ""
         if cmd == "/status":
             state = "⏸️ PAUSADO" if self.is_paused else "🟢 ACTIVO"
             mode = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN (Binance Real)"
@@ -283,6 +284,8 @@ class TelegramNotifier:
             return self._handle_monthly_close(command)
         elif cmd in ("/cedula", "/identidad", "/consultar_cedula"):
             return self._handle_cedula_lookup(command)
+        elif cmd in ("/guardar_cedula", "/registrar_cedula", "/agregar_cedula"):
+            return self._handle_save_cedula(command)
         elif cmd in ("/help", "/ayuda", "/start"):
             return (
                 "🤖 *Comandos Disponibles*:\n"
@@ -290,7 +293,8 @@ class TelegramNotifier:
                 "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
                 "- `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
                 "- `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
-                "- `/cedula V12345678`: Consultar titular oficial por cédula (SENIAT/CNE)\n"
+                "- `/cedula V12345678`: Consultar titular oficial por cédula\n"
+                "- `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
                 "- `/pause`: Pausar operaciones comerciales\n"
                 "- `/resume`: Reanudar operaciones comerciales\n"
                 "- `/report`: Enlace a reportes fiscales\n"
@@ -439,6 +443,33 @@ class TelegramNotifier:
                 )
             else:
                 return f"❌ No se encontró registro para `{nat}-{num}`: {info.error_message}"
+        finally:
+            db.close()
+
+    def _handle_save_cedula(self, command: str) -> str:
+        """Procesa /guardar_cedula V12345678 NOMBRE COMPLETO y lo guarda en la base de datos local."""
+        from src.data.database import SessionLocal
+        from src.security.identity_service import (
+            IdentityService,
+            extract_cedula_from_payment_details,
+        )
+
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 3:
+            return "ℹ️ Uso: `/guardar_cedula V-18234567 NOMBRE COMPLETO`"
+
+        extracted = extract_cedula_from_payment_details(parts[1])
+        if not extracted:
+            return f"⚠️ Cédula inválida: '{parts[1]}'."
+
+        nat, num = extracted
+        nombre = parts[2].strip().upper()
+
+        db = SessionLocal()
+        try:
+            service = IdentityService(db=db)
+            service.save_to_cache(nationality=nat, cedula=num, full_name=nombre, source="MANUAL")
+            return f"✅ Identidad registrada con éxito:\n\n• Cédula: `{nat}-{num}`\n• Titular: *{nombre}*"
         finally:
             db.close()
 

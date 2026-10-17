@@ -44,3 +44,18 @@ def test_telegram_command_sheets_settings_error_graceful_fallback(monkeypatch):
         assert "Google Sheets no está configurado" in res
 
 
+def test_telegram_command_guardar_cedula_and_lookup():
+    notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
+
+    # Guardar identidad
+    res_save = notifier.handle_command(user_id=1001, command="/guardar_cedula V18234567 MANUEL ALEJANDRO RODRIGUEZ")
+    assert "Identidad registrada con éxito" in res_save
+    assert "MANUEL ALEJANDRO RODRIGUEZ" in res_save
+
+    # Consultar identidad guardada
+    res_lookup = notifier.handle_command(user_id=1001, command="/cedula V18234567")
+    assert "Identidad Verificada" in res_lookup
+    assert "MANUEL ALEJANDRO RODRIGUEZ" in res_lookup
+
+
+
