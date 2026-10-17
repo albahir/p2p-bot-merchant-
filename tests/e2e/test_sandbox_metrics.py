@@ -11,6 +11,8 @@ Verifica:
 8. Reacción dinámica de métricas ante la ejecución de un nuevo trade simulado.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -67,7 +69,9 @@ def test_sandbox_fail_closed_on_large_window():
 def test_sandbox_ingestion_and_metrics_lifecycle(test_db_session):
     """Prueba el ciclo completo: Sandbox -> Ingestor -> DB -> KPIs -> FIFO/Average -> Nuevo Trade."""
     client = MockBinanceP2PClient(enable_default_orders=True)
-    ingestor = HistoryIngestor(client, db_session_factory=test_db_session)
+    mock_bcv = MagicMock()
+    mock_bcv.fetch_current_rate.return_value = 36.50
+    ingestor = HistoryIngestor(client, db_session_factory=test_db_session, bcv_service=mock_bcv)
 
     # 1. Primera Ingesta: deben registrarse 5 órdenes (2 BUY, 1 CANCELLED, 2 SELL)
     inserted_first = ingestor.ingest_recent_orders(trade_type="ALL", days_back=7)
@@ -108,7 +112,9 @@ def test_sandbox_ingestion_and_metrics_lifecycle(test_db_session):
 
     # El comerciante tuvo spread positivo y comisiones cubiertas: ganancia neta debe ser > 0
     assert fifo_profit_ves > 300.0, f"Ganancia FIFO inesperada: {fifo_profit_ves}"
-    assert fifo_profit_usd > 5.0, f"Ganancia USD inesperada: {fifo_profit_usd}"
+    assert fifo_profit_usd > 0.0, f"Ganancia USD inesperada: {fifo_profit_usd}"
+    expected_fifo_usd = sum(r.net_profit_fiat / r.bcv_rate for r in fifo_results)
+    assert fifo_profit_usd == pytest.approx(expected_fifo_usd, rel=1e-3)
 
     # 6. Motor Fiscal: Método Costo Promedio Ponderado
     avg_engine = WeightedAverageCostMethod()

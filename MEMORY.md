@@ -133,6 +133,11 @@
     - Resiliencia SSL Gubernamental: Manejo seguro de certificados locales del BCV (`verify=False` en HTTPX con User-Agent estándar de navegador), fallback en cascada a endpoints secundarios y memoria caché local en caso de caídas del portal.
     - Servidores MCP Configurados: Configuración global en `~/.gemini/config/mcp_config.json` para Puppeteer, Filesystem y GitHub MCP via Stdio `npx`.
     - Suite de pruebas expandida: **46/46 tests pasando al 100%**.
+22. **Inyección de Dependencias en Ingestor, Aislamiento Determinista de CI y Node.js Portable (ADR 022)**:
+    - Diagnóstico de Causa Raíz en CI: En GitHub Actions, `BCVService` consultó el portal oficial en vivo obteniendo 880.1159 VES/USD. El dataset de prueba en sandbox maneja operaciones a ~36.5-38.0 VES/USDT con ganancia de 317.38 VES. Al dividir 317.38 / 880.1159 = 0.3606 USD, la prueba falló la aserción estática `> 5.0` (la cual asumía una tasa antigua de 36.5 VES/USD).
+    - Inyección de BCVService en HistoryIngestor: Se refactorizó `HistoryIngestor` para aceptar `bcv_service: Any = None` como parámetro inyectable, evitando consultas externas durante pruebas y eliminando instanciaciones repetitivas en bucles de ingesta.
+    - Determinismo en Pruebas E2E: En `test_sandbox_metrics.py` se desacopla la prueba del scraping en vivo inyectando una tasa controlada (36.50 VES/USD) y se verifica la coherencia matemática de conversión fiat a USD mediante `pytest.approx()`.
+    - Node.js LTS Portable: Descargado e instalado Node.js v20.18.0 LTS y npx 10.8.2 en `c:\p2p-bot-merchant\.bin\nodejs`, incorporado al PATH de usuario y referenciado en `mcp_config.json`.
 
 ---
 

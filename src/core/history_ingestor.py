@@ -5,6 +5,7 @@ más allá de la ventana de 6 meses de Binance.
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from src.core.binance_client import BinanceP2PClient
 from src.data.database import SessionLocal
@@ -17,9 +18,19 @@ logger = logging.getLogger("history_ingestor")
 class HistoryIngestor:
     """Sincronizador de historial P2P hacia la base de datos local."""
 
-    def __init__(self, client: BinanceP2PClient, db_session_factory=SessionLocal):
+    def __init__(
+        self,
+        client: BinanceP2PClient,
+        db_session_factory=SessionLocal,
+        bcv_service: Any = None,
+    ):
         self.client = client
         self.session_factory = db_session_factory
+        if bcv_service is None:
+            from src.reporting.bcv_service import BCVService
+            self.bcv_service = BCVService()
+        else:
+            self.bcv_service = bcv_service
 
     def ingest_recent_orders(self, trade_type: str = "ALL", days_back: int = 7) -> int:
         """Descarga órdenes de los últimos N días y las inserta de forma idempotente.
@@ -74,8 +85,7 @@ class HistoryIngestor:
                         raw_status = item.get("orderStatus", "COMPLETED")
                         status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
                         fee_val = float(item.get("commission") or item.get("takerCommission") or 0.0)
-                        from src.reporting.bcv_service import BCVService
-                        bcv_val = BCVService().fetch_current_rate()
+                        bcv_val = self.bcv_service.fetch_current_rate()
                         order = Order(
                             order_number=order_num,
                             trade_type=t_type,
@@ -108,8 +118,7 @@ class HistoryIngestor:
                         raw_status = item.orderStatus
                         status_str = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
                         fee_val = float(item.fee_decimal if hasattr(item, "fee_decimal") else 0.0)
-                        from src.reporting.bcv_service import BCVService
-                        bcv_val = BCVService().fetch_current_rate()
+                        bcv_val = self.bcv_service.fetch_current_rate()
                         order = Order(
                             order_number=order_num,
                             trade_type=t_type,
