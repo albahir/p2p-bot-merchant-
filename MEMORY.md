@@ -150,6 +150,15 @@
     - Soporte Flexible de Credenciales: Compatibilidad dual con `GOOGLE_SERVICE_ACCOUNT_JSON` (string JSON en variable de entorno para entornos Cloud como Render) y `config/google_credentials.json` (archivo en disco).
     - Interfaz Streamlit & Bot de Telegram: Añadido botón de sincronización de 1-clic y enlace al documento en la pestaña fiscal del Dashboard. Incorporado comando `/sheets` y `/sync_sheets` en `TelegramNotifier` para consultar el enlace directo y disparar la exportación remota.
     - Suite de Pruebas: Ampliada a **51/51 tests pasando al 100%**.
+25. **Diagnóstico Detallado de Permisos en Google Sheets y Hoja de Ruta SPEC-013 (ADR 025)**:
+    - Diagnóstico de Causa Raíz: Al interactuar con `/sheets` y sincronizar, si la cuenta de servicio de Google no tiene permisos de edición sobre la hoja o falta el archivo de credenciales, el error era genérico y no indicaba la cuenta exacta que requería acceso.
+    - Extracción y Exposición de `client_email`: `SheetsExporter` inspecciona las credenciales configuradas (`GOOGLE_SERVICE_ACCOUNT_JSON` o `google_credentials.json`), extrae el correo de la cuenta de servicio (`client_email`) y tipifica los fallos de Google Drive/Sheets API:
+      - HTTP 403 (Permiso Denegado): Informa el correo exacto (ej. `bot-p2p@...iam.gserviceaccount.com`) al que se le debe compartir la hoja como "Editor".
+      - HTTP 404 (Hoja No Encontrada): Informa que el `sheet_id` configurado no existe o no es accesible.
+      - Credenciales Faltantes: Notifica claramente la ausencia de `GOOGLE_SERVICE_ACCOUNT_JSON` o del archivo en disco.
+    - Notificación en UI y Telegram: Tanto la respuesta a `/sheets` / `/sync_sheets` como el botón de sincronización en el Dashboard muestran de forma transparente `exporter.last_error`.
+    - Formalización de SPEC-013: Creada especificación exhaustiva en `.specify/specs/013-sheets-vps-stitch-enhancements/` abarcando Google Sheets, despliegue VPS para IP Whitelist fija en Binance, modernización con Google Stitch UI (MCP) y monitor de spread P2P vs BCV.
+    - Suite de Pruebas: Ampliada a **52/52 tests pasando al 100%**.
 
 ---
 
@@ -157,7 +166,7 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (51/51 tests pasando al 100%).
+3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (52/52 tests pasando al 100%).
 4. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 31 archivos fuente).
    - `ruff check .` (0 errores de linting).

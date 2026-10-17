@@ -28,11 +28,31 @@ class SheetsExporter:
     ):
         self.credentials_path = credentials_path
         self.credentials_json = credentials_json
+        self.last_error: str | None = None
+        self.client_email: str | None = None
+        self._extract_client_email()
+
+    def _extract_client_email(self) -> None:
+        """Extrae el email de la cuenta de servicio si está disponible."""
+        try:
+            if self.credentials_json:
+                if isinstance(self.credentials_json, str):
+                    data = json.loads(self.credentials_json)
+                else:
+                    data = self.credentials_json
+                self.client_email = data.get("client_email")
+            elif os.path.exists(self.credentials_path):
+                with open(self.credentials_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.client_email = data.get("client_email")
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
 
     def _get_client(self) -> Any:
         """Obtiene una instancia autenticada de gspread de manera segura."""
         if gspread is None:
-            logger.warning("gspread no está instalado. Sincronización omitida.")
+            self.last_error = "El paquete 'gspread' no está instalado en el entorno."
+            logger.warning(self.last_error)
             return None
 
         try:
@@ -46,9 +66,14 @@ class SheetsExporter:
             if os.path.exists(self.credentials_path):
                 return gspread.service_account(filename=self.credentials_path)
 
-            logger.warning("No se encontraron credenciales de Google Service Account (archivo ni JSON).")
+            self.last_error = (
+                "Credenciales no encontradas: Define la variable 'GOOGLE_SERVICE_ACCOUNT_JSON' "
+                "o coloca el archivo en 'config/google_credentials.json'."
+            )
+            logger.warning(self.last_error)
             return None
-        except (gspread.exceptions.GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = f"Error en credenciales de Google: {e}"
             logger.error(f"Error inicializando cliente de Google Sheets: {e}")
             return None
 
@@ -62,7 +87,8 @@ class SheetsExporter:
     def export(self, sheet_id: str, results: list[TradeResult]) -> bool:
         """Exporta los resultados a una hoja remota de cálculo con formato multi-pestaña."""
         if not sheet_id:
-            logger.warning("No se proporcionó sheet_id para la exportación.")
+            self.last_error = "No se configuró 'GOOGLE_SHEET_ID' para la exportación."
+            logger.warning(self.last_error)
             return False
 
         client = self._get_client()
@@ -134,9 +160,24 @@ class SheetsExporter:
             ws_resumen.append_rows(data_resumen)
 
             logger.info(f"Google Sheets '{sheet_id}' sincronizado exitosamente con 2 pestañas.")
+            self.last_error = None
             return True
         except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
-            logger.error(f"Error exportando a Google Sheets: {e}")
+            err_str = str(e)
+            if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
+                email_hint = f" ({self.client_email})" if self.client_email else ""
+                self.last_error = (
+                    f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
+                    f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
+                )
+            elif "404" in err_str or "SpreadsheetNotFound" in err_str:
+                self.last_error = f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
+            elif "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
+                self.last_error = "Google Sheets API o Google Drive API no están habilitadas en tu Google Cloud Console."
+            else:
+                self.last_error = f"Error exportando a Google Sheets: {e}"
+
+            logger.error(self.last_error)
             return False
 
     @staticmethod

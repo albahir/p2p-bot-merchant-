@@ -99,9 +99,26 @@ def test_sheets_exporter_creates_missing_worksheets():
 def test_sheets_exporter_handles_gspread_api_error_fail_closed():
     import gspread
     mock_client = MagicMock()
-    mock_client.open_by_key.side_effect = gspread.exceptions.GSpreadException("Google API 403 Permission Denied")
+    mock_client.open_by_key.side_effect = gspread.exceptions.GSpreadException("Google API 403 Permission Denied: caller does not have permission")
+
+    with patch("gspread.service_account_from_dict", return_value=mock_client):
+        exporter = SheetsExporter(credentials_json={"type": "service_account", "client_email": "bot@test.iam.gserviceaccount.com"})
+        success = exporter.export(sheet_id="forbidden_sheet", results=create_sample_results())
+        assert success is False
+        assert exporter.last_error is not None
+        assert "Permiso denegado (HTTP 403)" in exporter.last_error
+        assert "bot@test.iam.gserviceaccount.com" in exporter.last_error
+
+
+def test_sheets_exporter_handles_404_not_found():
+    import gspread
+    mock_client = MagicMock()
+    mock_client.open_by_key.side_effect = gspread.exceptions.GSpreadException("SpreadsheetNotFound: 404")
 
     with patch("gspread.service_account_from_dict", return_value=mock_client):
         exporter = SheetsExporter(credentials_json={"type": "service_account"})
-        success = exporter.export(sheet_id="forbidden_sheet", results=create_sample_results())
+        success = exporter.export(sheet_id="missing_sheet_999", results=create_sample_results())
         assert success is False
+        assert exporter.last_error is not None
+        assert "Hoja no encontrada (HTTP 404)" in exporter.last_error
+        assert "missing_sheet_999" in exporter.last_error

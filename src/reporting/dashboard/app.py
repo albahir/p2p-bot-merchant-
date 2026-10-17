@@ -151,7 +151,8 @@ with tab_tax:
                             if exporter.export(sheet_id, tax_results):
                                 st.success(f"¡Sincronizado exitosamente! [Abrir Google Sheets]({sheet_url})")
                             else:
-                                st.error("Error al sincronizar con Google Sheets. Revisa credenciales o permisos.")
+                                err_msg = exporter.last_error or "Revisa credenciales o permisos de la hoja."
+                                st.error(f"Error al sincronizar con Google Sheets: {err_msg}")
                     else:
                         st.info("💡 Para activar la sincronización con Google Sheets, define `GOOGLE_SHEET_ID` en `config/.env` o variables de entorno.")
                 except (ValueError, KeyError, OSError, RuntimeError) as ex:

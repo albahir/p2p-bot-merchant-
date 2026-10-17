@@ -253,9 +253,10 @@ class TelegramNotifier:
                     f"🔗 [Abrir en Google Sheets]({sheet_url})"
                 )
             else:
+                error_detail = exporter.last_error or "Verifica que la cuenta de servicio tenga permisos de Editor sobre el documento."
                 return (
-                    f"❌ *Error al sincronizar con Google Sheets*.\n\n"
-                    f"Verifica que la cuenta de servicio tenga permisos de Editor sobre el documento.\n"
+                    f"❌ *Error al sincronizar con Google Sheets*:\n\n"
+                    f"⚠️ {error_detail}\n\n"
                     f"🔗 [Ver Hoja]({sheet_url})"
                 )
         except (SQLAlchemyError, OSError, ValueError, KeyError, RuntimeError) as e:
