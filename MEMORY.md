@@ -219,6 +219,16 @@
       - Historial de airdrops/recompensas: `GET /sapi/v1/asset/assetDividend`.
       - Balance consolidado de billeteras: `GET /sapi/v1/asset/wallet/balance`.
     - Actualización de reglas globales en [`.agents/rules/global-rules.md`](file:///c:/p2p-bot-merchant/.agents/rules/global-rules.md) y skill [`.agents/skills/binance-p2p/SKILL.md`](file:///c:/p2p-bot-merchant/.agents/skills/binance-p2p/SKILL.md).
+30. **Arquitectura de Reconstrucción Fiscal P2P de 6 Piezas, Parser Binance y OCR Bancario Multimodal con Gemini Vision (SPEC-014 / ADR 030)**:
+    - Formalización de SDD: Creados los artefactos de especificación [`.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/spec.md`](file:///c:/p2p-bot-merchant/.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/spec.md), [`plan.md`](file:///c:/p2p-bot-merchant/.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/plan.md) y [`tasks.md`](file:///c:/p2p-bot-merchant/.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/tasks.md) estructurados en 6 fases y 18 tareas atómicas TDD.
+    - Consenso de Agentes del Sistema:
+      - **PM**: Resuelve la conciliación fiscal y la dificultad operativa de procesar comprobantes bancarios en bolívares.
+      - **Architect**: Diseña el aislamiento de la ingesta de archivos (`src/core/file_parser.py`), el servicio OCR (`src/integrations/receipt_ocr.py`) y el motor de 6 piezas (`src/reporting/fiscal_reconciler.py`).
+      - **Security**: Prohíbe almacenamiento inseguro de comprobantes bancarios y procesa Base64 exclusivamente en búfer de memoria volátil.
+      - **Backend**: Establece pruebas unitarias e idempotencia estricta en tablas `wallet_movements`, `bank_vouchers` y `fiscal_period_snapshots`.
+      - **Frontend**: Diseña el panel visual de 6 piezas con semáforo de balance y uploader drag-and-drop.
+      - **QA**: Valida fixtures basados en los archivos reales exportados de Binance en español.
+    - Evaluación de Capacidad de Gemini Vision: Las 3 API keys configuradas en `AIKeyPool` con balanceo round-robin proporcionan 45 peticiones/minuto y 4,500 peticiones/día, superando con creces la carga requerida para el volumen de comprobantes P2P.
 
 ---
 
