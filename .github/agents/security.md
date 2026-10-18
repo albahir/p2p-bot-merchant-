@@ -9,5 +9,7 @@ Garantizar la impenetrabilidad del bot, la protección de fondos, la estricta cu
 - **Fail-Closed Enforcement**: Asegurar que ante cualquier inconsistencia (IP no autorizada, respuesta HTTP 4xx/5xx desconocida, error de timestamp o intento de doble ejecución), el sistema se detenga de forma segura y alerte al operador.
 - **Validación de Integridad y Resiliencia**:
   - Supervisar el encadenamiento criptográfico SHA-256 en la tabla append-only `security_events`.
-  - Diseñar validaciones de inputs y sanitización de payloads de entrada en formularios del Dashboard.
+  - Diseñar validaciones de inputs y sanitización estricta de payloads en formularios y subida de archivos en el Dashboard (Memory-only, límite de tamaño y validación de tipos MIME).
+  - Auditar la configuración de servidores MCP (`mcp_config.json`) para prevenir ejecución arbitraria de código o exposición de credenciales de entorno.
   - Mitigar bloqueos de IP (WAF/Cloudflare) supervisando el header `x-mbx-used-weight` y el control de desincronización de reloj (clock drift).
+

@@ -127,7 +127,39 @@ class IdentityService:
             logger.warning(f"Error consultando caché de identidades: {e}")
         return None
 
+    def lookup_from_vouchers(self, nationality: str, cedula: str) -> IdentityInfo | None:
+        """Búsqueda en histórico de comprobantes bancarios registrados (verificados por banco emisor)."""
+        if not self.db:
+            return None
+        try:
+            from src.data.models import BankVoucher
+
+            clean_num = re.sub(r"\D", "", cedula)
+            vouchers = (
+                self.db.query(BankVoucher)
+                .filter(BankVoucher.sender_id.isnot(None), BankVoucher.sender_name.isnot(None))
+                .order_by(BankVoucher.id.desc())
+                .all()
+            )
+            for v in vouchers:
+                v_sender_id = str(v.sender_id)
+                v_clean = re.sub(r"\D", "", v_sender_id)
+                if v_clean == clean_num and v.sender_name:
+                    nat = "E" if "E" in v_sender_id.upper()[:2] else nationality.upper()
+                    self.save_to_cache(nat, clean_num, v.sender_name, source="BANK_VOUCHER")
+                    return IdentityInfo(
+                        nationality=nat,
+                        cedula=clean_num,
+                        full_name=str(v.sender_name).strip().upper(),
+                        source="BANK_VOUCHER",
+                        is_valid=True,
+                    )
+        except SQLAlchemyError as e:
+            logger.warning(f"Error consultando comprobantes para identidad: {e}")
+        return None
+
     def save_to_cache(self, nationality: str, cedula: str, full_name: str, source: str) -> None:
+
         """Guarda una identidad legítimamente verificada en la caché local."""
         if not self.db:
             return
@@ -271,6 +303,12 @@ class IdentityService:
             logger.info(f"Identidad {clean_nat}-{clean_cedula} encontrada en caché local de contrapartes.")
             return from_cache
 
+        # 1b. Historial de Comprobantes Bancarios OCR (Verificado por banco emisor)
+        from_voucher = self.lookup_from_vouchers(clean_nat, clean_cedula)
+        if from_voucher:
+            logger.info(f"Identidad {clean_nat}-{clean_cedula} resuelta desde histórico de comprobantes bancarios.")
+            return from_voucher
+
         # 2. Verifik KYC API (Proveedor regulado LATAM)
         name_verifik = self._lookup_verifik(clean_nat, clean_cedula)
         if name_verifik:
@@ -323,13 +361,18 @@ class IdentityService:
                 is_valid=True,
             )
 
-        # Si todos los métodos fallan
-        logger.warning(f"Identidad {clean_nat}-{clean_cedula} no pudo verificarse en ningún proveedor.")
+        # Si todos los métodos fallan (SENIAT/CNE caídos o inaccesibles)
+        logger.warning(f"Identidad {clean_nat}-{clean_cedula} no pudo resolverse en línea (portales públicos caídos o bloqueados).")
         return IdentityInfo(
             nationality=clean_nat,
             cedula=clean_cedula,
             full_name="",
             source="NONE",
             is_valid=False,
-            error_message="No se pudo verificar la identidad a través de Verifik, Didit, SENIAT ni CNE.",
+            error_message=(
+                "No se pudo verificar la identidad a través de portales en línea (SENIAT y CNE inactivos o bloqueando consultas). "
+                "Puedes registrar la identidad localmente con `/guardar_cedula V12345678 NOMBRE` o subir una foto del comprobante bancario."
+            ),
         )
+
+

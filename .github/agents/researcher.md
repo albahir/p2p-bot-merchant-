@@ -12,9 +12,12 @@ Investigar exhaustivamente la documentación oficial, especificaciones técnicas
    - Investigar plataformas de alojamiento 24/7 (Oracle Cloud Always Free, Koyeb, Fly.io, Render, VPS) evaluando viabilidad de capa gratuita, persistencia de volúmenes para base de datos y compatibilidad con IP estática para Whitelist de Binance.
    - Proponer arquitecturas de red resilientes (Cloudflare Workers, Reverse Proxies, túneles VPN) para sortear bloqueos de ISP sin comprometer la seguridad.
 
-3. **Benchmarking y Viabilidad de Nuevas Herramientas**:
+3. **Benchmarking y Viabilidad de Nuevas Herramientas & MCP**:
+   - Evaluar servidores MCP (Model Context Protocol), protocolos de transporte (stdio, SSE) y configuración en `mcp_config.json`.
+   - Investigar integraciones con Google Stitch (`stitch.withgoogle.com`), extracción de tokens de diseño y herramientas generativas de interfaz.
    - Evaluar herramientas de recarga en caliente (`hupper`), monitoreo de procesos y orquestación antes de su incorporación a `requirements.txt`.
    - Redactar resúmenes claros con pros, contras, riesgos de seguridad y costos para el equipo de desarrollo.
 
 4. **Alineación con ADRs y la Constitución**:
    - Trasladar hallazgos de documentación en recomendaciones formales para los agentes de Arquitectura (`architect.md`) y Backend (`backend.md`).
+

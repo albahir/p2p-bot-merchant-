@@ -194,3 +194,39 @@ def test_sheets_exporter_four_tabs(sample_data):
             assert mock_ws_movs.append_rows.called
             assert mock_ws_vouchers.clear.called
             assert mock_ws_vouchers.append_rows.called
+
+
+def test_excel_reporter_compliance_report(sample_data, tmp_path):
+    """Verifica que el informe de Compliance Bancario se genere con las 4 pestañas requeridas."""
+    _, orders, _, vouchers = sample_data
+    out_file = str(tmp_path / "certificacion_origen_fondos.xlsx")
+
+    res_path = ExcelReporter.generate_compliance_report(
+        orders=orders,
+        vouchers=vouchers,
+        account_holder="INVERSIONES COMERCIO DIGITAL C.A.",
+        rif="J-12345678-9",
+        period="Octubre 2026",
+        output_path=out_file,
+    )
+
+    assert os.path.exists(res_path)
+    excel_file = pd.ExcelFile(res_path)
+    sheet_names = excel_file.sheet_names
+
+    assert "Certificación Institucional" in sheet_names
+    assert "Entradas (Ventas P2P)" in sheet_names
+    assert "Salidas (Compras P2P)" in sheet_names
+    assert "Traza de Conciliación" in sheet_names
+
+    df_cert = pd.read_excel(res_path, sheet_name="Certificación Institucional")
+    assert any("INVERSIONES COMERCIO DIGITAL" in str(v) for v in df_cert["Valor"].values)
+
+    df_ventas = pd.read_excel(res_path, sheet_name="Entradas (Ventas P2P)")
+    assert len(df_ventas) == 1
+    assert "SELL-102" in df_ventas["Número de Orden"].values
+
+    df_compras = pd.read_excel(res_path, sheet_name="Salidas (Compras P2P)")
+    assert len(df_compras) == 1
+    assert "BUY-101" in df_compras["Número de Orden"].values
+

@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.data.models import BankVoucher, Order
@@ -181,16 +182,25 @@ class BankReceiptOCR:
         if not candidates:
             return None
 
-        # Si hay más de un candidato por monto, desempatar por cédula/nombre si está disponible
-        if len(candidates) > 1 and receipt.sender_cedula:
-            clean_cedula = re.sub(r"\D", "", receipt.sender_cedula)
-            for cand in candidates:
-                # Comprobar en número de orden o metadatos
-                if clean_cedula in str(cand.order_number):
-                    return cand
+        # Si hay más de un candidato por monto, desempatar por nombre de contraparte o cédula
+        if len(candidates) > 1:
+            if receipt.sender_name:
+                sender_words = [w.lower() for w in re.split(r"\s+", receipt.sender_name) if len(w) > 2]
+                for cand in candidates:
+                    if cand.counterparty_name:
+                        cand_lower = cand.counterparty_name.lower()
+                        if any(w in cand_lower for w in sender_words):
+                            return cand
+
+            if receipt.sender_cedula:
+                clean_cedula = re.sub(r"\D", "", receipt.sender_cedula)
+                for cand in candidates:
+                    if clean_cedula in str(cand.order_number) or (cand.counterparty_name and clean_cedula in cand.counterparty_name):
+                        return cand
 
         # Retornar el primer candidato compatible
         return candidates[0]
+
 
     def process_and_save_voucher(
         self,
@@ -228,7 +238,28 @@ class BankReceiptOCR:
         )
 
         saved_voucher = voucher_repo.create(voucher)
+
+        # Auto-alimentar la base de datos de identidades con el titular verificado por el banco
+        if extracted.sender_cedula and extracted.sender_name:
+            try:
+                from src.security.identity_service import IdentityService
+
+                id_service = IdentityService(db=db)
+                clean_cedula = re.sub(r"\D", "", extracted.sender_cedula)
+                nat = "E" if extracted.sender_cedula.strip().upper().startswith("E") else "V"
+                if clean_cedula and len(clean_cedula) >= 5:
+                    id_service.save_to_cache(
+                        nationality=nat,
+                        cedula=clean_cedula,
+                        full_name=extracted.sender_name,
+                        source="BANK_RECEIPT_OCR",
+                    )
+            except (SQLAlchemyError, ValueError, KeyError) as e:
+                logger.warning(f"No se pudo persistir identidad desde comprobante OCR: {e}")
+
+
         return saved_voucher, matched_order
+
 
 
 def process_and_save_voucher(

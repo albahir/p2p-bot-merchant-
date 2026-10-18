@@ -288,10 +288,13 @@ class TelegramNotifier:
             return self._handle_save_cedula(command)
         elif cmd in ("/conciliacion", "/reconciliacion", "/reconstruccion"):
             return self._handle_fiscal_reconciliation(command)
+        elif cmd in ("/spread", "/arbitraje", "/margen"):
+            return self._handle_spread_monitor(command)
         elif cmd in ("/help", "/ayuda", "/start"):
             return (
                 "🤖 *Comandos Disponibles*:\n"
                 "- `/status`: Ver estado y modo operativo del bot\n"
+                "- `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
                 "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
                 "- `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
                 "- `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
@@ -475,6 +478,63 @@ class TelegramNotifier:
             return f"✅ Identidad registrada con éxito:\n\n• Cédula: `{nat}-{num}`\n• Titular: *{nombre}*"
         finally:
             db.close()
+
+    def _handle_spread_monitor(self, command: str) -> str:
+        """Procesa /spread y reporta cotizaciones bancarias, arbitraje y brecha BCV."""
+        from src.core.spread_monitor import SpreadMonitor
+        from src.data.database import SessionLocal
+        from src.data.models import Order
+
+        monitor = SpreadMonitor()
+        quotes = monitor.get_market_quotes()
+        if not quotes:
+            return "ℹ️ No hay cotizaciones disponibles en este momento."
+
+        bcv_rate = 820.0
+        db = SessionLocal()
+        try:
+            from typing import cast
+
+            from sqlalchemy.exc import SQLAlchemyError
+            latest = db.query(Order).filter(cast(Any, Order.bcv_rate > 0)).order_by(Order.id.desc()).first()
+            if latest and latest.bcv_rate:
+                bcv_rate = float(latest.bcv_rate)
+        except (SQLAlchemyError, ValueError, TypeError) as e:
+            logger.warning(f"Error consultando última tasa BCV: {e}")
+        finally:
+            db.close()
+
+        ref_price = quotes[0].buy_rate
+        bcv_gap = monitor.calculate_bcv_gap(p2p_price=ref_price, bcv_rate=bcv_rate)
+
+        lines = [
+            "📈 *Monitor de Spreads P2P (Binance VES / USDT)*\n",
+            f"🏛️ *BCV Oficial*: `{bcv_rate:,.2f} Bs` (Brecha: `{bcv_gap:+.2f}%`)",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        # Bancos principales
+        for q in quotes[:5]:
+            calc = monitor.calculate_cycle_net_profit(crypto_amount=100.0, buy_price=q.buy_rate, sell_price=q.sell_rate)
+            icon = "🟢" if calc.warning_level == "OK" else ("🟡" if calc.warning_level == "CRITICAL_MARGIN" else "🔴")
+            lines.append(
+                f"{icon} *{q.bank_name}*:\n"
+                f"   Compra: `{q.buy_rate:,.2f}` | Venta: `{q.sell_rate:,.2f}`\n"
+                f"   Spread: `{q.spread_pct:+.2f}%` (`{q.spread_ves:+.2f} Bs`) | Retorno: `+{calc.net_profit_ves:,.2f} Bs`"
+            )
+
+        cross = monitor.find_best_cross_arbitrage(quotes)
+        if cross:
+            lines.append("━━━━━━━━━━━━━━━━━━━━")
+            lines.append(
+                f"⚡ *Mejor Arbitraje Cruzado*:\n"
+                f"Comprar en *{cross['buy_bank']}* (`{cross['buy_rate']:,.2f}`)\n"
+                f"➔ Vender en *{cross['sell_bank']}* (`{cross['sell_rate']:,.2f}`)\n"
+                f"Spread Cruzado: `{cross['spread_pct']:+.2f}%` | Retorno: `+{cross['net_profit_ves_100u']:,.2f} Bs/100u`"
+            )
+
+        lines.append("\n💡 *Regla de Oro*: En VES se requiere un spread ≥ *0.80%* para amortizar comisiones de Binance (0.35%) y bancarias (0.30% Pago Móvil).")
+        return "\n".join(lines)
 
     def get_file_bytes(self, file_id: str) -> bytes | None:
         """Descarga en memoria volátil los bytes de un archivo o foto de Telegram."""

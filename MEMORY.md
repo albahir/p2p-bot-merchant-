@@ -246,6 +246,42 @@
     - **Exportación Integral de 4 Pestañas**: `ExcelReporter` y `SheetsExporter` sincronizan las 4 hojas de auditoría fiscal (*Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*).
     - **Control Visual y Conversacional**: Implementada pestaña interactiva en Streamlit (`fiscal_reconstruction_view.py`) y comando `/conciliacion` junto a procesamiento automático de fotos de comprobantes en Telegram (`TelegramCommandPoller`).
     - **Modernización de Base Declarativa ORM**: Migrado `Base = declarative_base()` a `class Base(DeclarativeBase): pass` en `src/data/database.py`, eliminando falsos positivos en Mypy para todas las clases entidad.
+32. **Alineación de Agentes y Arquitectura de Terminal P2P con Tokens de Google Stitch y MCP (ADR 032)**:
+    - **Revisión Interdisciplinaria de Fase 3 (SPEC-013)**: Participación activa de `PM`, `Architect`, `Frontend`, `Researcher`, `Security` y `QA` para diseñar la modernización visual y operativa del Dashboard sin comprometer la Constitución Fail-closed.
+    - **Expansión de Perfiles de Agente**:
+      - `frontend.md`: Especializado en Streamlit 2026 (`width="stretch"`, `st.container(border=True)`, Material Symbols), tokens de diseño Glassmorphism de Google Stitch y arquitectura modular de componentes.
+      - `researcher.md`: Especializado en especificaciones de servidores MCP (`mcp_config.json`), protocolos stdio/SSE y documentación técnica de Stitch.
+      - `architect.md`: Incorpora gobernanza de sistemas de diseño (`theme.py`), contratos de componentes modulares y desacoplamiento de capas UI/Servicios.
+      - `security.md`: Auditoría de sanitización CSS/HTML (`st.html`), control memory-only para subida de comprobantes en UI y prevención de inyección en llamadas de herramientas MCP.
+    - **Plan Atómico de Tareas**: Desglose detallado de la Fase 3 en `tasks.md` abarcando configuración de MCP (`T10`), guía de integración (`T11`), theme engine (`T12a`), componentes modulares (`T12b` a `T12e`), refactorización e integración (`T12f`) y cobertura de pruebas unitarias (`T12g`).
+33. **Ejecución de Fase 3 (SPEC-013) y Conciliación P2P ante Anonimato de Binance (ADR 033)**:
+    - **Diagnóstico de Privacidad en Binance**: Se confirmó que Binance jamás expone la Cédula de Identidad en su API o exportaciones C2C. Para superar esto sin degradar la precisión contable, se implementó un motor de coincidencia multi-criterio:
+      1. *Identificador Primario por Monto*: Coincidencia del monto exacto en bolívares (`fiat_amount == amount_ves` con tolerancia $\pm 0.05\text{ VES}$), el cual es altamente específico en operaciones P2P.
+      2. *Captura de Contraparte*: Añadida columna `counterparty_name` a `Order` en `src/data/models.py` y parseo en `BinanceFileParser`.
+      3. *Desempate Inteligente*: En caso de colisión de montos, el algoritmo compara las palabras clave del nombre y apellido extraídos del comprobante bancario (`sender_name`) contra `counterparty_name` de Binance.
+      4. *Blindaje Anti-Terceros*: Cruce con `IdentityService` (SENIAT/CNE) para auditar que la cuenta bancaria pertenezca a la misma persona física.
+    - **Cierre de Fase 3 (Terminal P2P Stitch)**:
+      - Servidor MCP registrado en `C:\Users\jonan\.gemini\config\mcp_config.json` y documentación en `docs/stitch_mcp_setup.md`.
+      - Tema Glassmorphism Obsidian Fintech implementado en `src/reporting/dashboard/theme.py`.
+      - Componentes modulares desacoplados: `terminal_header.py`, `kpi_cards.py`, `receipt_center.py` y `ai_telemetry.py`.
+      - `app.py` actualizado cumpliendo al 100% los estándares Streamlit 2026.
+34. **Rentabilidad Real P2P, Matriz de Arbitraje Interbancario y Compliance Bancario (ADR 034)**:
+    - **Fórmula de Rentabilidad Neta Real**: Integrado el cálculo matemático exacto que deduce comisiones invisibles: comisiones de anuncio Binance Maker (0.35% usuario normal hasta 0.15% PRO) y comisiones bancarias interbancarias (0.30% Pago Móvil en compra y venta).
+    - **Regla del Spread Mínimo Viable (0.80% en VES)**: Detección proactiva de márgenes deficitarios. Si el spread bruto es menor al 0.80%, el sistema clasifica la operación como `CRITICAL_MARGIN` o `LOSS`.
+    - **Servicio `SpreadMonitor` (`src/core/spread_monitor.py`)**:
+      - Generación de matriz comparativa por banco en tiempo real (BDV, Banesco, Mercantil, Bancamiga, Pago Móvil, Banco Activo).
+      - Algoritmo de arbitraje cruzado óptimo (`find_best_cross_arbitrage`): identifica la combinación más rentable (comprar en banco más barato y vender en el más caro).
+      - Cálculo de la brecha cambiaria respecto a la tasa oficial del Banco Central de Venezuela (BCV).
+    - **Componentes Visuales en Dashboard (`arbitrage_matrix.py`)**:
+      - Incorporada pestaña `:material/candlestick_chart: Monitor & Arbitraje P2P` en `src/reporting/dashboard/app.py`.
+      - Matriz interactiva de cotizaciones bancarias con badges semánticos de rentabilidad.
+      - Calculadora interactiva de ciclos Maker con desglose al centavo de costos, ROI porcentual y diagnósticos de seguridad.
+    - **Dossier Institucional de Compliance Bancario (`ExcelReporter.generate_compliance_report`)**:
+      - Generación de informe en Excel con 4 hojas institucionales (*Certificación Institucional*, *Entradas (Ventas P2P)*, *Salidas (Compras P2P)* y *Traza de Conciliación 1 a 1*) diseñado para sustentar fondos ante departamentos de prevención de legitimación de capitales (Compliance) en la banca venezolana.
+      - Botón de descarga directa integrado en la pestaña fiscal de la interfaz Streamlit.
+    - **Comando `/spread` en Telegram**:
+      - Despacho inmediato del resumen de cotizaciones bancarias, arbitraje cruzado y brecha BCV con formato Markdown protegido contra filtraciones.
+    - **Calidad y Verificación**: Suite expandida a **99/99 tests pasando al 100%**, Mypy limpio (0 errores en 43 archivos) y Ruff limpio.
 
 ---
 
@@ -254,7 +290,7 @@
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
 3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**84/84 tests pasando al 100%**).
+4. **Suite de Pruebas**: `pytest -v tests/` (**99/99 tests pasando al 100%**).
 5. **Comprobación de Calidad de Código**:
-   - `mypy src/ scripts/` (0 errores en 42 archivos fuente).
+   - `mypy src/ scripts/` (0 errores en 43 archivos fuente).
    - `ruff check .` (0 errores de linting).

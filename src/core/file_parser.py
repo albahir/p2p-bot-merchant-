@@ -102,6 +102,7 @@ class BinanceFileParser:
         col_fee_taker = cols.get("comisión de tomador") or cols.get("taker fee")
         col_status = cols.get("estado") or cols.get("status")
         col_date = cols.get("hora de creación") or cols.get("created time")
+        col_counterparty = cols.get("contraparte") or cols.get("counterparty") or cols.get("counterpart")
 
         if not col_order_num or not col_type:
             logger.warning(f"Columnas clave no encontradas en {file_path}")
@@ -135,6 +136,11 @@ class BinanceFileParser:
             total_fee = fee_m + fee_t
 
             created_at = self._parse_datetime(row[col_date]) if col_date else datetime.now(UTC)
+            counterparty = (
+                str(row[col_counterparty]).strip()
+                if col_counterparty and not pd.isna(row[col_counterparty])
+                else None
+            )
 
             orders.append(
                 Order(
@@ -149,9 +155,11 @@ class BinanceFileParser:
                     fee_crypto=0.0,
                     bcv_rate=0.0,
                     order_status=order_status,
+                    counterparty_name=counterparty,
                     created_at=created_at,
                 )
             )
+
 
         return orders
 

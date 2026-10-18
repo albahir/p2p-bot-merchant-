@@ -58,4 +58,14 @@ def test_telegram_command_guardar_cedula_and_lookup():
     assert "MANUEL ALEJANDRO RODRIGUEZ" in res_lookup
 
 
+def test_telegram_command_spread():
+    notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
+    res = notifier.handle_command(user_id=1001, command="/spread")
+    assert "Monitor de Spreads P2P" in res
+    assert "BCV" in res
+    assert "Arbitraje" in res
+    assert "0.80%" in res
+
+
+
 
