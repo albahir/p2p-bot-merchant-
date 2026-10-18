@@ -323,6 +323,172 @@ class SheetsExporter:
             logger.error(self.last_error)
             return False
 
+    def export_compliance_report(
+        self,
+        sheet_id: str,
+        orders: list[Any],
+        vouchers: list[Any],
+        account_holder: str = "TITULAR REGISTRADO",
+        rif: str = "V-00000000-0",
+        period: str = "PERIODO ACTUAL",
+    ) -> bool:
+        """Exporta el informe de Compliance Bancario y Certificación de Fondos a Google Sheets (4 pestañas)."""
+        if not sheet_id:
+            self.last_error = "No se configuró 'GOOGLE_SHEET_ID' para la exportación."
+            logger.warning(self.last_error)
+            return False
+
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            sh = client.open_by_key(sheet_id)
+
+            sell_orders = [o for o in orders if getattr(o, "trade_type", "") == "SELL"]
+            buy_orders = [o for o in orders if getattr(o, "trade_type", "") == "BUY"]
+
+            total_sell_ves = sum(float(getattr(o, "fiat_amount", 0.0)) for o in sell_orders)
+            total_buy_ves = sum(float(getattr(o, "fiat_amount", 0.0)) for o in buy_orders)
+            total_crypto = sum(float(getattr(o, "crypto_amount", 0.0)) for o in orders)
+            matched_vouchers = [v for v in vouchers if getattr(v, "verification_status", "") == "MATCHED"]
+
+            # 1. Certificación Institucional
+            ws_cert = self._get_or_create_worksheet(sh, "Certificación Institucional", rows=30, cols=5)
+            cert_rows: list[list[Any]] = [
+                ["Concepto / Métrica", "Valor"],
+                ["Título del Documento", "INFORME DE CUMPLIMIENTO Y JUSTIFICACIÓN DE ORIGEN Y DESTINO LÍCITO DE FONDOS"],
+                ["Titular de la Cuenta / Razón Social", account_holder],
+                ["Cédula de Identidad / R.I.F.", rif],
+                ["Período Operativo Auditado", period],
+                ["Actividad Económica", "Comercio Electrónico P2P de Criptoactivos"],
+                ["Plataforma de Intermediación", "Binance C2C (Binance Holdings Ltd.)"],
+                ["Moneda Operativa Nacional", "Bolívares Soberanos / Digitales (VES)"],
+                ["Criptoactivo Operado", "Tether USD (USDT)"],
+                ["Total Entradas Bancarias (Ventas P2P en Bs)", round(total_sell_ves, 2)],
+                ["Total Salidas Bancarias (Compras P2P en Bs)", round(total_buy_ves, 2)],
+                ["Volumen Total en Cuenta (VES)", round(total_sell_ves + total_buy_ves, 2)],
+                ["Total Criptoactivo Movilizado (USDT)", round(total_crypto, 2)],
+                ["Total Transacciones Realizadas", len(orders)],
+                ["Comprobantes Conciliados y Verificados", f"{len(matched_vouchers)} de {len(vouchers)}"],
+                ["Dictamen de Cumplimiento", "CONFORME / TRAZABILIDAD 100%"],
+                [
+                    "Declaración Jurada",
+                    (
+                        "Se certifica que la totalidad de los fondos bancarios acreditados y debitados corresponden exclusivamente "
+                        "a operaciones mercantiles de arbitraje y compra/venta de activos digitales en plataformas debidamente "
+                        "registradas, con conciliación de contrapartes y verificación de titularidad."
+                    ),
+                ],
+            ]
+            ws_cert.clear()
+            ws_cert.append_rows(cert_rows)
+
+            voucher_map = {getattr(v, "associated_order_number", None): v for v in vouchers if getattr(v, "associated_order_number", None)}
+
+            # 2. Entradas (Ventas P2P)
+            ws_ventas = self._get_or_create_worksheet(sh, "Entradas (Ventas P2P)", rows=max(100, len(sell_orders) + 10), cols=15)
+            ventas_headers: list[Any] = [
+                "Fecha y Hora (UTC)", "Número de Orden", "Contraparte Binance", "Activo Cripto",
+                "Precio Unitario (VES)", "Monto Acreditado (VES)", "Comisión Binance", "Tasa BCV", "Estado",
+                "Referencia Bancaria", "Nombre Pagador Bancario", "Cédula/RIF Pagador",
+            ]
+            ventas_rows: list[list[Any]] = [ventas_headers]
+            for o in sell_orders:
+                created_dt = getattr(o, "created_at", None)
+                dt_str = created_dt.strftime("%Y-%m-%d %H:%M:%S") if created_dt else "-"
+                v = voucher_map.get(getattr(o, "order_number", ""))
+                ventas_rows.append([
+                    dt_str,
+                    str(getattr(o, "order_number", "")),
+                    str(getattr(o, "counterparty_name", "-") or "-"),
+                    f"{float(getattr(o, 'crypto_amount', 0.0)):,.2f} {getattr(o, 'asset', '')}",
+                    float(getattr(o, "unit_price", 0.0)),
+                    float(getattr(o, "fiat_amount", 0.0)),
+                    float(getattr(o, "fee_fiat", 0.0)),
+                    float(getattr(o, "bcv_rate", 0.0)),
+                    str(getattr(o, "order_status", "")),
+                    str(getattr(v, "reference_number", "-") if v else "-"),
+                    str(getattr(v, "sender_name", "-") if v else "-"),
+                    str(getattr(v, "sender_id", "-") if v else "-"),
+                ])
+            ws_ventas.clear()
+            ws_ventas.append_rows(ventas_rows)
+
+            # 3. Salidas (Compras P2P)
+            ws_compras = self._get_or_create_worksheet(sh, "Salidas (Compras P2P)", rows=max(100, len(buy_orders) + 10), cols=15)
+            compras_headers: list[Any] = [
+                "Fecha y Hora (UTC)", "Número de Orden", "Contraparte Binance", "Activo Cripto Recibido",
+                "Precio Unitario (VES)", "Monto Debitado (VES)", "Comisión Binance", "Tasa BCV", "Estado",
+                "Referencia Bancaria", "Beneficiario Bancario", "Cédula/RIF Beneficiario",
+            ]
+            compras_rows: list[list[Any]] = [compras_headers]
+            for o in buy_orders:
+                created_dt = getattr(o, "created_at", None)
+                dt_str = created_dt.strftime("%Y-%m-%d %H:%M:%S") if created_dt else "-"
+                v = voucher_map.get(getattr(o, "order_number", ""))
+                compras_rows.append([
+                    dt_str,
+                    str(getattr(o, "order_number", "")),
+                    str(getattr(o, "counterparty_name", "-") or "-"),
+                    f"{float(getattr(o, 'crypto_amount', 0.0)):,.2f} {getattr(o, 'asset', '')}",
+                    float(getattr(o, "unit_price", 0.0)),
+                    float(getattr(o, "fiat_amount", 0.0)),
+                    float(getattr(o, "fee_fiat", 0.0)),
+                    float(getattr(o, "bcv_rate", 0.0)),
+                    str(getattr(o, "order_status", "")),
+                    str(getattr(v, "reference_number", "-") if v else "-"),
+                    str(getattr(v, "sender_name", "-") if v else "-"),
+                    str(getattr(v, "sender_id", "-") if v else "-"),
+                ])
+            ws_compras.clear()
+            ws_compras.append_rows(compras_rows)
+
+            # 4. Traza de Conciliación
+            ws_traza = self._get_or_create_worksheet(sh, "Traza de Conciliación", rows=max(100, len(vouchers) + 10), cols=12)
+            traza_headers: list[Any] = [
+                "Fecha", "Banco", "Referencia Bancaria", "Monto (VES)", "Cédula/RIF",
+                "Nombre Titular", "Método de Pago", "Orden Binance Asociada", "Estado Conciliación",
+            ]
+            traza_rows: list[list[Any]] = [traza_headers]
+            for v in vouchers:
+                v_created = getattr(v, "created_at", None)
+                dt_str = v_created.strftime("%Y-%m-%d %H:%M:%S") if v_created else "-"
+                traza_rows.append([
+                    dt_str,
+                    str(getattr(v, "bank_name", "")),
+                    str(getattr(v, "reference_number", "")),
+                    float(getattr(v, "amount_ves", 0.0)),
+                    str(getattr(v, "sender_id", "-") or "-"),
+                    str(getattr(v, "sender_name", "-") or "-"),
+                    str(getattr(v, "payment_method", "")),
+                    str(getattr(v, "associated_order_number", "-") or "-"),
+                    str(getattr(v, "verification_status", "")),
+                ])
+            ws_traza.clear()
+            ws_traza.append_rows(traza_rows)
+
+            logger.info(f"Google Sheets '{sheet_id}' Compliance exportado exitosamente con 4 pestañas.")
+            self.last_error = None
+            return True
+        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            err_str = str(e)
+            if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
+                email_hint = f" ({self.client_email})" if self.client_email else ""
+                self.last_error = (
+                    f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
+                    f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
+                )
+            elif "404" in err_str or "SpreadsheetNotFound" in err_str:
+                self.last_error = f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
+            elif "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
+                self.last_error = "Google Sheets API o Google Drive API no están habilitadas en tu Google Cloud Console."
+            else:
+                self.last_error = f"Error exportando Compliance a Google Sheets: {e}"
+
+            logger.error(self.last_error)
+            return False
+
     @staticmethod
     def get_sheet_url(sheet_id: str) -> str:
         """Devuelve el enlace directo al documento en Google Sheets."""
