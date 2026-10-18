@@ -62,6 +62,18 @@
   - Integración con Telegram: comando `/conciliacion` y soporte para fotos de comprobantes bancarios vía OCR en tiempo real.
   - Suite completa de 84 tests pasando al 100% (64 previos + 20 nuevos).
 
+- [x] **Paquete 015 (Control de Acceso RBAC, Aislamiento de Invitados y Búsqueda Criptográfica MetaP2P)**:
+  - Modelo de datos `User` y `UserRepository` en SQLAlchemy para control de usuarios, roles (`ADMIN`, `TRADER`, `INVITADO`), contraseñas cifradas y asociación con IDs de Telegram.
+  - `AuthService` con algoritmo PBKDF2-HMAC-SHA256 (100,000 iteraciones), salting criptográfico, verificación en tiempo constante, tokens de sesión firmados con HMAC-SHA256 y auto-creación del Administrador principal.
+  - Conector `MetaP2PClient` (`https://api.metap2p.io/api`): autenticación con `POST /api/login`, almacenamiento volátil de JWT Bearer en memoria, auto-renovación ante expiración (HTTP 401) y consulta de DNI con formato normalizado.
+  - Integración en `IdentityService` como fallback prioritario antes de SENIAT y CNE.
+  - Aislamiento estricto de roles en Telegram:
+    - `INVITADO`: Menú móvil y teclado persistente reducido a 3 botones (`📈 Spreads P2P`, `🏛️ Tasa BCV`, `❓ Ayuda`). Bloqueo de comandos sensibles (`/cedula`, `/conciliacion`, `/cierre`, `/sheets`, etc.) con respuesta Fail-closed.
+    - `TRADER`: Acceso operativo y de auditoría (órdenes, conciliación, comprobantes OCR, búsqueda de cédulas), con prohibición estricta de pausar/reanudar el bot o modificar usuarios.
+    - `ADMIN`: Comandos de gestión de accesos `/usuarios`, `/autorizar`, `/revocar`, control de bot y aprobación interactiva de nuevos solicitantes con botones táctiles.
+  - Vista de Login Glassmorphism en Streamlit (`src/reporting/dashboard/views/login_view.py`) y renderizado condicional de pestañas en `app.py` según el rol (`INVITADO` solo visualiza Spreads y Mercado P2P).
+  - Suite de pruebas expandida a **119/119 tests pasando al 100%**.
+
 ### ⏸️ Paquetes Pausados
 - ⏸️ **Paquete 003 (Motor de Estrategias)**: Pausado temporalmente por el usuario.
 - ⏸️ **Paquete 004 (Verificación Bancaria)**: Pausado temporalmente por el usuario.
@@ -299,6 +311,40 @@
       - Suite expandida y verificada con **105/105 tests pasando al 100%** (`pytest`).
       - Tipado estricto `mypy src/` limpio (**0 errores en 44 archivos fuente**).
       - Linter estático `ruff check .` (**0 errores de estilo e importaciones**).
+36. **Control de Acceso Basado en Roles (RBAC), Aislamiento Visual Estricto y Búsqueda MetaP2P (ADR 036)**:
+    - **Aislamiento Multicapa para Invitados**:
+      - Los usuarios con rol `INVITADO` tienen acceso restringido única y exclusivamente a cotizaciones públicas y utilitarias: `/spread` y `/bcv`.
+      - Prohibición total de acceso a saldos, ganancias netas, órdenes Binance, comprobantes bancarios y consultas de Cédula de Identidad, tanto en Telegram como en el Dashboard Streamlit.
+      - Menú persistente en Telegram (`ReplyKeyboardMarkup`) y botones táctiles (`InlineKeyboardMarkup`) adaptados dinámicamente según el rol (solo 3 botones para invitados).
+    - **Gestión Dinámica de Acceso y Aprobación Interactiva**:
+      - Cuando un usuario no registrado interactúa con el bot, recibe un mensaje de bienvenida informando que su solicitud fue enviada al Administrador.
+      - El Administrador recibe de inmediato una notificación con botones táctiles interactivos: `[👁️ Aprobar Invitado]`, `[💼 Aprobar Trader]`, `[⛔ Bloquear]`, permitiendo delegar permisos sin salir de Telegram.
+      - Comandos de administración `/usuarios`, `/autorizar` y `/revocar` exclusivos para el rol `ADMIN`.
+    - **Conector REST de MetaP2P sin Web Scraping**:
+      - El análisis de la arquitectura reveló que MetaP2P opera como una Single Page Application (SPA) sobre la API REST `https://api.metap2p.io/api`.
+      - No se requiere emulación con navegadores headless: la autenticación (`POST /api/login`) y la búsqueda de DNI (`GET /api/dni/search`) se ejecutan de manera ultra-rápida y ligera mediante peticiones JSON nativas con `httpx`.
+      - Almacenamiento volátil del token de acceso (`access_token`) en memoria RAM y re-autenticación automática ante códigos de error HTTP 401.
+    - **Autenticación Web Segura en Streamlit (Obsidian Glassmorphism)**:
+      - Implementado `login_view.py` integrado armónicamente con los tokens de diseño Stitch Obsidian Fintech.
+      - Protección Fail-closed: si la sesión no está autenticada, `st.stop()` detiene inmediatamente la ejecución de cualquier vista o componente.
+      - Renderizado condicional de pestañas según el rol: `INVITADO` únicamente accede a `📈 Monitor & Arbitraje P2P`.
+37. **Deduplicación Anti-Spam de Alertas, Arbitraje Cruzado Interbancario Estricto y Directorio Permanente de Cédulas (ADR 037)**:
+    - **Deduplicación Inteligente Anti-Spam (`RateAlertService`)**:
+      - Se erradicó el reenvío redundante de alertas idénticas cada 10 minutos cuando el mercado no ha cambiado.
+      - Ahora se memorizan los últimos precios y spread (`last_arbitrage_buy_rate`, `last_arbitrage_sell_rate`, `last_arbitrage_spread_pct`).
+      - La alerta solo vuelve a dispararse si cambia el par de bancos o si, transcurrido el cooldown, las tasas varían al menos $\pm 0.50\text{ VES}$ o el spread porcentual $\ge 0.20\%$.
+    - **Arbitraje Interbancario Cruzado Garantizado (`SpreadMonitor`)**:
+      - Se corrigió la discrepancia donde un mismo banco con precios extremos (como Banco Activo) se emparejaba consigo mismo ("Comprar en Banco Activo ➔ Vender en Banco Activo").
+      - `find_best_cross_arbitrage` evalúa exhaustivamente todas las combinaciones `(q_buy, q_sell)` forzando la condición `q_buy.bank_name != q_sell.bank_name`.
+    - **Persistencia Permanente y Directorio de Cédulas en Base de Datos (`IdentityRepository`)**:
+      - Se implementó `IdentityRepository` para gestionar de forma centralizada, idempotente y permanente la tabla `identities` (`IdentityCache`).
+      - Toda consulta a MetaP2P, comprobantes OCR o portales públicos queda resguardada de forma indefinida en la base de datos local para debida diligencia.
+      - En Telegram: Nuevo comando `/cedulas` para listar el directorio permanente (restringido a `TRADER` y `ADMIN`).
+      - En Streamlit: Nueva pestaña `"👤 Directorio Cédulas"` con buscador en tiempo real, resolución de identidades y visualización del directorio histórico con filtrado reactivo.
+    - **Calidad y Verificación Rigurosa**:
+      - **123/123 pruebas unitarias y de integración pasando al 100%** (`pytest`).
+      - Tipado estricto `mypy src/` limpio (**0 errores en 48 archivos fuente**).
+      - Linter estático `ruff check .` (**0 errores de estilo e importaciones**).
 
 ---
 
@@ -307,7 +353,7 @@
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
 3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**105/105 tests pasando al 100%**).
+4. **Suite de Pruebas**: `pytest -v tests/` (**123/123 tests pasando al 100%**).
 5. **Comprobación de Calidad de Código**:
-   - `mypy src/ scripts/` (0 errores en 44 archivos fuente).
+   - `mypy src/` (0 errores en 48 archivos fuente).
    - `ruff check .` (0 errores de linting).

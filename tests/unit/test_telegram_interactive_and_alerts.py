@@ -112,3 +112,53 @@ def test_rate_alert_service_arbitrage_opportunity():
     assert "ARBITRAJE" in alert
     assert "Banco de Venezuela" in alert
     assert "Bancamiga" in alert
+
+
+def test_rate_alert_service_deduplication_anti_spam():
+    """Valida que alertas consecutivas con las mismas tasas NO se reenvíen (anti-spam)."""
+    from src.core.spread_monitor import BankRateQuote
+
+    # Cooldown de 0 segundos para probar la lógica de deduplicación de tasas
+    service = RateAlertService(cooldown_seconds=0)
+    quotes = [
+        BankRateQuote(bank_name="Banco Activo", buy_rate=998.50, sell_rate=1000.0),
+        BankRateQuote(bank_name="Banesco", buy_rate=1005.0, sell_rate=1021.0),
+    ]
+
+    # Primera vez: debe emitir alerta
+    first_alert = service.check_spread_opportunities(quotes)
+    assert first_alert is not None
+    assert "ARBITRAJE" in first_alert
+
+    # Segunda vez inmediatamente con las mismas tasas exactas: debe retornar None (DEDUPLICADO)
+    second_alert = service.check_spread_opportunities(quotes)
+    assert second_alert is None, "No debe reenviar la misma alerta con precios idénticos"
+
+
+def test_rate_alert_service_fires_on_significant_price_movement():
+    """Valida que si las tasas se mueven significativamente (>= 0.50 VES), se emite la nueva alerta."""
+    from src.core.spread_monitor import BankRateQuote
+
+    service = RateAlertService(cooldown_seconds=0)
+    quotes_initial = [
+        BankRateQuote(bank_name="Banco Activo", buy_rate=998.50, sell_rate=1000.0),
+        BankRateQuote(bank_name="Banesco", buy_rate=1005.0, sell_rate=1021.0),
+    ]
+    service.check_spread_opportunities(quotes_initial)
+
+    # Movimiento insignificante (< 0.50 VES y < 0.20% spread): 1021.0 -> 1021.10
+    quotes_tiny_shift = [
+        BankRateQuote(bank_name="Banco Activo", buy_rate=998.50, sell_rate=1000.0),
+        BankRateQuote(bank_name="Banesco", buy_rate=1005.0, sell_rate=1021.10),
+    ]
+    assert service.check_spread_opportunities(quotes_tiny_shift) is None
+
+    # Movimiento significativo (>= 0.50 VES): 1021.0 -> 1026.0 (+5 VES)
+    quotes_major_shift = [
+        BankRateQuote(bank_name="Banco Activo", buy_rate=998.50, sell_rate=1000.0),
+        BankRateQuote(bank_name="Banesco", buy_rate=1005.0, sell_rate=1026.0),
+    ]
+    major_alert = service.check_spread_opportunities(quotes_major_shift)
+    assert major_alert is not None
+    assert "1,026.00" in major_alert
+

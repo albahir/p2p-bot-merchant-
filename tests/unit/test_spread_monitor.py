@@ -83,3 +83,28 @@ def test_bcv_gap_calculation():
     gap = monitor.calculate_bcv_gap(p2p_price=1000.0, bcv_rate=800.0)
     # (1000 - 800) / 800 = 25%
     assert gap == 25.0
+
+
+def test_cross_arbitrage_guarantees_distinct_banks():
+    """Valida que find_best_cross_arbitrage nunca seleccione el mismo banco para compra y venta."""
+    # Banco Activo tiene tanto el precio de compra más bajo como el precio de venta más alto
+    quotes = [
+        BankRateQuote(bank_name="Banco Activo", buy_rate=998.50, sell_rate=1021.00),
+        BankRateQuote(bank_name="Banesco", buy_rate=1002.50, sell_rate=1012.80),
+        BankRateQuote(bank_name="Bancamiga", buy_rate=1000.80, sell_rate=1016.50),
+    ]
+    monitor = SpreadMonitor()
+    best_arb = monitor.find_best_cross_arbitrage(quotes)
+
+    assert best_arb is not None
+    # No puede ser Banco Activo -> Banco Activo
+    assert best_arb["buy_bank"] != best_arb["sell_bank"]
+    # La mejor combinación interbancaria es:
+    # Comprar en Bancamiga a 1000.80 y Vender en Banco Activo a 1021.00 (spread = 20.20 Bs, 2.02%)
+    # Supera a Banco Activo -> Bancamiga (18.00 Bs) y Banesco -> Banco Activo (18.50 Bs)
+    assert best_arb["buy_bank"] == "Bancamiga"
+    assert best_arb["sell_bank"] == "Banco Activo"
+    assert best_arb["spread_ves"] == round(1021.00 - 1000.80, 2)
+    assert best_arb["spread_pct"] == round((20.20 / 1000.80) * 100, 2)
+
+

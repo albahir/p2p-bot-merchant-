@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger("telegram_notifier")
 
@@ -46,7 +47,8 @@ class TelegramNotifier:
         allowed_user_ids: list[int] | None = None,
         proxy_url: str | None = None,
         api_base_url: str = "https://api.telegram.org",
-        use_sandbox: bool = True
+        use_sandbox: bool = True,
+        session_factory: Any = None,
     ):
         self.bot_token = bot_token
         self.default_chat_id = default_chat_id
@@ -56,6 +58,7 @@ class TelegramNotifier:
         self.base_url = f"{self.api_base_url}/bot{bot_token}"
         self.is_paused = False
         self.use_sandbox = use_sandbox
+        self.session_factory = session_factory
         self.last_error: str | None = None
 
         # Configuración del cliente HTTP persistente con soporte para proxy
@@ -68,8 +71,57 @@ class TelegramNotifier:
 
         self._client = httpx.Client(**client_kwargs)
 
-    def get_quick_actions_markup(self) -> dict[str, Any]:
-        """Genera un teclado inline interactivo con las acciones principales del bot."""
+    def get_user_role(self, user_id: int | str | None) -> str:
+        """Determina el rol de un usuario en el sistema: ADMIN, TRADER, INVITADO o NONE."""
+        if user_id is None:
+            return "NONE"
+
+        user_str = str(user_id).strip()
+
+        # 1. Consultar en la base de datos de usuarios
+        sf = self.session_factory
+        if sf is None:
+            try:
+                from src.data.database import SessionLocal
+                sf = SessionLocal
+            except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                sf = None
+
+        if sf is not None:
+            try:
+                db = sf()
+                try:
+                    from src.data.repositories import UserRepository
+                    repo = UserRepository(db)
+                    user = repo.get_by_telegram_id(user_str)
+                    if user and user.is_active:
+                        return str(user.role).upper()
+                finally:
+                    db.close()
+            except (SQLAlchemyError, RuntimeError, OSError) as e:
+                logger.debug(f"Error consultando rol de usuario en DB: {e}")
+
+        # 2. Fallback estático con allowed_user_ids y default_chat_id como ADMIN
+        if self.default_chat_id and user_str == str(self.default_chat_id).strip():
+            return "ADMIN"
+        for allowed in self.allowed_user_ids:
+            if str(allowed).strip() == user_str:
+                return "ADMIN"
+
+        return "NONE"
+
+    def get_quick_actions_markup(self, role: str = "ADMIN") -> dict[str, Any]:
+        """Genera un teclado inline interactivo adaptado al rol del usuario."""
+        if role.upper() == "INVITADO":
+            return {
+                "inline_keyboard": [
+                    [
+                        {"text": "📈 Spreads P2P", "callback_data": "/spread"},
+                        {"text": "🏛️ Tasa BCV", "callback_data": "/bcv"},
+                    ]
+                ]
+            }
+
         return {
             "inline_keyboard": [
                 [
@@ -91,13 +143,23 @@ class TelegramNotifier:
             ]
         }
 
-    def get_persistent_menu_markup(self) -> dict[str, Any]:
-        """Genera un teclado persistente de acceso rápido en la app móvil de Telegram."""
+    def get_persistent_menu_markup(self, role: str = "ADMIN") -> dict[str, Any]:
+        """Genera un teclado persistente en la app móvil adaptado al rol."""
+        if role.upper() == "INVITADO":
+            return {
+                "keyboard": [
+                    [{"text": "📈 Spreads P2P"}, {"text": "🏛️ Tasa BCV"}],
+                    [{"text": "❓ Ayuda"}],
+                ],
+                "resize_keyboard": True,
+                "one_time_keyboard": False,
+            }
+
         return {
             "keyboard": [
                 [{"text": "📈 Spreads P2P"}, {"text": "🏛️ Tasa BCV"}],
-                [{"text": "📊 Estado Bot"}, {"text": "📑 Cierre Mes"}],
-                [{"text": "⚖️ Conciliación"}, {"text": "🔄 Sync Sheets"}],
+                [{"text": "📊 Estado"}, {"text": "📑 Cierre Mes"}],
+                [{"text": "⚖️ Conciliación"}, {"text": "🔄 Sheets"}],
             ],
             "resize_keyboard": True,
             "one_time_keyboard": False,
@@ -306,27 +368,20 @@ class TelegramNotifier:
         return False
 
     def is_user_authorized(self, user_id: int | str | None) -> bool:
-        """Verifica si un remitente de comando está en la lista autorizada o es el dueño del chat."""
+        """Verifica si un remitente de comando está registrado y activo en el sistema."""
         if user_id is None:
             return False
-        user_str = str(user_id).strip()
-        # 1. Si coincide con el chat_id predeterminado (en chats privados 1-a-1, user_id == chat_id)
-        if self.default_chat_id and user_str == str(self.default_chat_id).strip():
-            return True
-        # 2. Si está en la lista explícita de allowed_user_ids
-        for allowed in self.allowed_user_ids:
-            if str(allowed).strip() == user_str:
-                return True
-        return False
+        return self.get_user_role(user_id) != "NONE"
 
     def handle_command(self, user_id: int | str | None, command: str) -> str:
-        """Procesa comandos /status, /pause, /resume, /report y /ayuda respetando permisos."""
-        if not self.is_user_authorized(user_id):
+        """Procesa comandos respetando permisos RBAC (ADMIN, TRADER, INVITADO)."""
+        role = self.get_user_role(user_id)
+        if role == "NONE":
             logger.warning(f"Intento de comando no autorizado por user_id={user_id}")
             return (
                 f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
                 f"Tu ID de Telegram es: `{user_id}`.\n"
-                f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`."
+                f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS` o solicita autorización al Administrador."
             )
 
         # Mapeo de botones de texto (Persistent Reply Keyboard)
@@ -334,11 +389,13 @@ class TelegramNotifier:
             "📈 spreads p2p": "/spread",
             "📈 spreads & arbitraje": "/spread",
             "🏛️ tasa bcv": "/bcv",
+            "📊 estado": "/status",
             "📊 estado bot": "/status",
             "📊 estado del sistema": "/status",
             "📑 cierre mes": "/cierre",
             "📑 cierre fiscal": "/cierre",
             "⚖️ conciliación": "/conciliacion",
+            "🔄 sheets": "/sheets",
             "🔄 sync sheets": "/sheets",
             "🔄 sincronizar sheets": "/sheets",
             "❓ ayuda": "/ayuda",
@@ -350,10 +407,54 @@ class TelegramNotifier:
             clean_cmd_str = command.strip()
 
         cmd = clean_cmd_str.split()[0].lower() if clean_cmd_str else ""
+
+        # --- Aislamiento estricto para INVITADO ---
+        if role == "INVITADO":
+            if cmd in ("/spread", "/arbitraje", "/margen"):
+                return self._handle_spread_monitor(clean_cmd_str)
+            elif cmd in ("/bcv", "/tasa", "/dolar_bcv"):
+                return self._handle_bcv_query()
+            elif cmd in ("/status", "/estado"):
+                return (
+                    "🤖 *Estado del Bot*: 🟢 EN LÍNEA\n"
+                    "• Modo: 👁️ Invitado (Acceso de Solo Lectura a Spreads y Tasa BCV)\n"
+                    "• Servicios: Operativos"
+                )
+            elif cmd in ("/help", "/ayuda", "/start", "/menu"):
+                return (
+                    "🤖 *P2P Merchant Bot — Modo Invitado*:\n\n"
+                    "• `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
+                    "• `/bcv`: Consultar cotización oficial BCV y brecha cambiaria\n"
+                    "• `/status`: Ver estado de disponibilidad del bot\n"
+                    "• `/ayuda`: Mostrar este menú de ayuda\n\n"
+                    "💡 *Tip*: Usa los botones táctiles en la parte inferior."
+                )
+            else:
+                return "⛔ *Acceso Restringido*: Esta opción está reservada para Traders y Administradores."
+
+        # --- Restricciones para TRADER ---
+        if role == "TRADER" and cmd in ("/pause", "/resume", "/usuarios", "/users", "/autorizar", "/aprobar", "/revocar", "/bloquear"):
+            return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
+
+        # --- Comandos Administrativos (ADMIN únicamente) ---
+        if cmd in ("/usuarios", "/users"):
+            if role != "ADMIN":
+                return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
+            return self._handle_admin_list_users()
+        elif cmd in ("/autorizar", "/aprobar"):
+            if role != "ADMIN":
+                return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
+            return self._handle_admin_authorize_user(clean_cmd_str)
+        elif cmd in ("/revocar", "/bloquear"):
+            if role != "ADMIN":
+                return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
+            return self._handle_admin_revoke_user(clean_cmd_str)
+
+        # --- Comandos Generales (ADMIN y TRADER) ---
         if cmd == "/status":
             state = "⏸️ PAUSADO" if self.is_paused else "🟢 ACTIVO"
             mode = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN (Binance Real)"
-            return f"🤖 *Estado del Bot*: {state}\nModo: {mode}\nServicios: OK"
+            return f"🤖 *Estado del Bot*: {state}\nModo: {mode}\nRol Operativo: `{role}`\nServicios: OK"
         elif cmd == "/pause":
             self.is_paused = True
             logger.warning("Bot pausado mediante comando de Telegram.")
@@ -376,6 +477,8 @@ class TelegramNotifier:
             return self._handle_monthly_close(clean_cmd_str)
         elif cmd in ("/cedula", "/identidad", "/consultar_cedula"):
             return self._handle_cedula_lookup(clean_cmd_str)
+        elif cmd in ("/cedulas", "/directorio_cedulas", "/historial_cedulas"):
+            return self._handle_list_cedulas()
         elif cmd in ("/guardar_cedula", "/registrar_cedula", "/agregar_cedula"):
             return self._handle_save_cedula(clean_cmd_str)
         elif cmd in ("/conciliacion", "/reconciliacion", "/reconstruccion"):
@@ -383,23 +486,167 @@ class TelegramNotifier:
         elif cmd in ("/spread", "/arbitraje", "/margen"):
             return self._handle_spread_monitor(clean_cmd_str)
         elif cmd in ("/help", "/ayuda", "/start", "/menu"):
-            return (
-                "🤖 *P2P Merchant Bot — Menú de Comandos y Operaciones*:\n\n"
-                "• `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
-                "• `/bcv`: Consultar cotización oficial BCV y brecha cambiaria\n"
-                "• `/status`: Ver estado y modo operativo del bot\n"
-                "• `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
-                "• `/conciliacion`: Resumen de 6 piezas fiscales y balance\n"
-                "• `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
-                "• `/sheets_compliance`: Expediente de Compliance en Google Sheets\n"
-                "• `/cedula V12345678`: Consultar titular oficial por cédula\n"
-                "• `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
-                "• `/keys`: Ver estado y cuota del pool de claves de IA\n"
-                "• `/pause` / `/resume`: Control de actividad del bot\n\n"
-                "💡 *Tip*: Puedes tocar directamente los botones interactivos abajo para ejecutar acciones sin escribir."
-            )
+            if role == "ADMIN":
+                return (
+                    "🤖 *P2P Merchant Bot — Menú de Administrador*:\n\n"
+                    "• `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
+                    "• `/bcv`: Consultar cotización oficial BCV y brecha cambiaria\n"
+                    "• `/status`: Ver estado y modo operativo del bot\n"
+                    "• `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
+                    "• `/conciliacion`: Resumen de 6 piezas fiscales y balance\n"
+                    "• `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
+                    "• `/sheets_compliance`: Expediente de Compliance en Google Sheets\n"
+                    "• `/cedula V12345678`: Consultar titular por cédula (MetaP2P/SENIAT)\n"
+                    "• `/cedulas`: Ver directorio de cédulas guardadas en base de datos\n"
+                    "• `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
+                    "• `/usuarios`: Listar usuarios y roles en el sistema\n"
+                    "• `/autorizar ID ROL`: Conceder rol (`ADMIN`, `TRADER`, `INVITADO`)\n"
+                    "• `/revocar ID`: Revocar acceso a un usuario\n"
+                    "• `/pause` / `/resume`: Control de actividad del bot\n\n"
+                    "💡 *Tip*: Puedes tocar directamente los botones interactivos abajo para ejecutar acciones sin escribir."
+                )
+            else:
+                return (
+                    "🤖 *P2P Merchant Bot — Menú de Operaciones (Trader)*:\n\n"
+                    "• `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
+                    "• `/bcv`: Consultar cotización oficial BCV y brecha cambiaria\n"
+                    "• `/status`: Ver estado y modo operativo del bot\n"
+                    "• `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
+                    "• `/conciliacion`: Resumen de 6 piezas fiscales y balance\n"
+                    "• `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
+                    "• `/sheets_compliance`: Expediente de Compliance en Google Sheets\n"
+                    "• `/cedula V12345678`: Consultar titular por cédula (MetaP2P/SENIAT)\n"
+                    "• `/cedulas`: Ver directorio de cédulas guardadas en base de datos\n"
+                    "• `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
+                    "• `/keys`: Ver estado y cuota del pool de claves de IA\n\n"
+                    "💡 *Tip*: Puedes tocar directamente los botones interactivos abajo para ejecutar acciones sin escribir."
+                )
         else:
             return f"❓ Comando no reconocido: {command}. Usa /ayuda para ver los disponibles."
+
+    def _handle_admin_list_users(self) -> str:
+        """Lista todos los usuarios registrados y sus roles en la base de datos."""
+        sf = self.session_factory
+        if sf is None:
+            try:
+                from src.data.database import SessionLocal
+                sf = SessionLocal
+            except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                return "⚠️ Base de datos no disponible para listar usuarios."
+
+        db = sf()
+        try:
+            from src.data.repositories import UserRepository
+            repo = UserRepository(db)
+            users = repo.list_all()
+            if not users:
+                return "👥 No hay usuarios registrados en la base de datos."
+            lines = ["👥 *Usuarios Registrados en el Sistema*:\n"]
+            for u in users:
+                status = "🟢 Activo" if u.is_active else "🔴 Inactivo"
+                tg = f"`{u.telegram_id}`" if u.telegram_id else "Sin Telegram"
+                lines.append(f"• *{u.username}* (ID: {tg}) | Rol: `{u.role}` | {status}")
+            return "\n".join(lines)
+        except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
+            logger.error(f"Error listando usuarios: {e}")
+            return f"⚠️ Error consultando lista de usuarios: {e}"
+        finally:
+            db.close()
+
+    def _handle_admin_authorize_user(self, cmd_str: str) -> str:
+        """Autoriza o cambia el rol de un usuario existente o crea uno nuevo."""
+        parts = cmd_str.split()
+        if len(parts) < 3:
+            return (
+                "ℹ️ *Uso incorrecto*:\n"
+                "Formato: `/autorizar <telegram_id_o_username> <ADMIN|TRADER|INVITADO>`\n"
+                "Ejemplo: `/autorizar 8888 TRADER`"
+            )
+        target_id = parts[1].strip()
+        target_role = parts[2].strip().upper()
+        if target_role not in ("ADMIN", "TRADER", "INVITADO"):
+            return f"⚠️ Rol inválido: `{target_role}`. Roles permitidos: `ADMIN`, `TRADER`, `INVITADO`."
+
+        sf = self.session_factory
+        if sf is None:
+            try:
+                from src.data.database import SessionLocal
+                sf = SessionLocal
+            except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                return "⚠️ Base de datos no disponible."
+
+        db = sf()
+        try:
+            from src.data.repositories import UserRepository
+            from src.security.auth_service import AuthService
+            repo = UserRepository(db)
+            user = repo.get_by_telegram_id(target_id)
+            if not user:
+                user = repo.get_by_username(target_id)
+
+            if user:
+                repo.update_role(int(user.id), target_role)
+                repo.set_active_status(int(user.id), True)
+                db.commit()
+                return f"✅ Usuario `{user.username}` (`{target_id}`) actualizado exitosamente al rol `{target_role}`."
+            else:
+                username = f"tg_{target_id}"
+                temp_hash = AuthService.hash_password(f"p2p_{target_id}")
+                new_user = repo.create_user(
+                    username=username,
+                    password_hash=temp_hash,
+                    role=target_role,
+                    telegram_id=target_id,
+                    is_active=True
+                )
+                db.commit()
+                return f"✅ Usuario `{new_user.username}` (`{target_id}`) autorizado exitosamente con rol `{target_role}`."
+        except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
+            db.rollback()
+            logger.error(f"Error autorizando usuario: {e}")
+            return f"⚠️ Error al autorizar usuario: {e}"
+        finally:
+            db.close()
+
+    def _handle_admin_revoke_user(self, cmd_str: str) -> str:
+        """Revoca el acceso desactivando a un usuario."""
+        parts = cmd_str.split()
+        if len(parts) < 2:
+            return (
+                "ℹ️ *Uso incorrecto*:\n"
+                "Formato: `/revocar <telegram_id_o_username>`\n"
+                "Ejemplo: `/revocar 8888`"
+            )
+        target_id = parts[1].strip()
+
+        sf = self.session_factory
+        if sf is None:
+            try:
+                from src.data.database import SessionLocal
+                sf = SessionLocal
+            except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                return "⚠️ Base de datos no disponible."
+
+        db = sf()
+        try:
+            from src.data.repositories import UserRepository
+            repo = UserRepository(db)
+            user = repo.get_by_telegram_id(target_id)
+            if not user:
+                user = repo.get_by_username(target_id)
+
+            if not user:
+                return f"⚠️ No se encontró al usuario `{target_id}` en la base de datos."
+
+            repo.set_active_status(int(user.id), False)
+            db.commit()
+            return f"🛑 Acceso del usuario `{user.username}` (`{target_id}`) revocado exitosamente (desactivado)."
+        except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
+            db.rollback()
+            logger.error(f"Error revocando usuario: {e}")
+            return f"⚠️ Error al revocar usuario: {e}"
+        finally:
+            db.close()
 
     def _handle_sheets_sync(self) -> str:
         """Sincroniza el histórico fiscal con Google Sheets y retorna el estado con enlace directo."""
@@ -534,13 +781,38 @@ class TelegramNotifier:
             info = service.lookup(nationality=nat, cedula=num)
             if info.is_valid:
                 return (
-                    f"👤 *Identidad Verificada*:\n\n"
+                    f"👤 *Identidad Verificada y Guardada*:\n\n"
                     f"• Cédula: `{info.nationality}-{info.cedula}`\n"
-                    f"• Nombre Completo: *{info.full_name}*\n"
-                    f"• Fuente: `{info.source}`"
+                    f"• Titular: *{info.full_name}*\n"
+                    f"• Fuente: `{info.source}`\n"
+                    f"• Estado: 💾 Almacenada permanentemente en base de datos"
                 )
             else:
                 return f"❌ No se encontró registro para `{nat}-{num}`: {info.error_message}"
+        finally:
+            db.close()
+
+    def _handle_list_cedulas(self) -> str:
+        """Lista las identidades consultadas y almacenadas permanentemente en la base de datos."""
+        from src.data.database import SessionLocal
+        from src.data.repositories import IdentityRepository
+
+        db = SessionLocal()
+        try:
+            repo = IdentityRepository(db)
+            records = repo.list_all(limit=25)
+            if not records:
+                return "ℹ️ Aún no hay cédulas consultadas o guardadas en la base de datos."
+
+            lines = [f"📋 *Directorio de Cédulas en Base de Datos* ({len(records)} registros):\n"]
+            for r in records:
+                date_str = r.created_at.strftime("%Y-%m-%d") if r.created_at else "-"
+                lines.append(f"• `{r.nationality}-{r.cedula}`: *{r.full_name}* (`{r.source}` - {date_str})")
+            lines.append("\n💡 Consulta una nueva cédula con `/cedula V12345678`.")
+            return "\n".join(lines)
+        except (SQLAlchemyError, RuntimeError, OSError) as e:
+            logger.error(f"Error consultando directorio de cédulas: {e}")
+            return f"❌ Error interno consultando cédulas: {e}"
         finally:
             db.close()
 
@@ -906,6 +1178,46 @@ class TelegramCommandPoller:
             self._thread.join(timeout=2.0)
         logger.info("TelegramCommandPoller detenido.")
 
+    def _notify_unauthorized_user(self, user_id: int | str | None, from_user: dict[str, Any], chat_id: str) -> None:
+        """Notifica al usuario no registrado y envía alerta con botones de aprobación al Administrador."""
+        logger.warning(f"Intento de acceso no autorizado por user_id={user_id}")
+        self.notifier.send_alert(
+            f"👋 *Bienvenido al Bot P2P Merchant*\n\n"
+            f"Tu ID de Telegram es: `{user_id}`.\n"
+            f"Tu cuenta está actualmente *pendiente de aprobación* por el Administrador.\n"
+            f"Se ha notificado al Administrador para autorizar tu acceso.",
+            chat_id=chat_id,
+        )
+
+        admin_chat = self.notifier.default_chat_id
+        if admin_chat and str(user_id) != str(admin_chat):
+            uname = from_user.get("username")
+            username_str = f"@{uname}" if uname else "N/A"
+            first = from_user.get("first_name", "")
+            last = from_user.get("last_name", "")
+            full_name = f"{first} {last}".strip() or "Usuario Telegram"
+
+            admin_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "👁️ Aprobar Invitado", "callback_data": f"/autorizar {user_id} INVITADO"},
+                        {"text": "💼 Aprobar Trader", "callback_data": f"/autorizar {user_id} TRADER"},
+                    ],
+                    [
+                        {"text": "⛔ Bloquear", "callback_data": f"/revocar {user_id}"}
+                    ]
+                ]
+            }
+            self.notifier.send_alert(
+                f"👤 *Nueva Solicitud de Acceso al Bot*\n\n"
+                f"• *ID*: `{user_id}`\n"
+                f"• *Usuario*: {username_str}\n"
+                f"• *Nombre*: {full_name}\n\n"
+                f"Seleccione el nivel de autorización:",
+                chat_id=str(admin_chat),
+                reply_markup=admin_markup,
+            )
+
     def poll_once(self) -> int:
         """Consulta actualizaciones pendientes y ejecuta comandos o consultas con IA si son de usuarios autorizados."""
         url = f"{self.notifier.base_url}/getUpdates"
@@ -936,18 +1248,16 @@ class TelegramCommandPoller:
                     cb_data = str(cb.get("data", "")).strip()
 
                     self.notifier.answer_callback_query(cb_id)
+                    role = self.notifier.get_user_role(user_id)
 
-                    if not self.notifier.is_user_authorized(user_id):
-                        self.notifier.send_alert(
-                            f"⛔ *Acceso denegado*. Usuario no autorizado.\nTu ID de Telegram es: `{user_id}`.",
-                            chat_id=chat_id,
-                        )
+                    if role == "NONE":
+                        self._notify_unauthorized_user(user_id, from_user, chat_id)
                     else:
                         response = self.notifier.handle_command(user_id=user_id, command=cb_data)
                         self.notifier.send_alert(
                             response,
                             chat_id=chat_id,
-                            reply_markup=self.notifier.get_quick_actions_markup(),
+                            reply_markup=self.notifier.get_quick_actions_markup(role=role),
                         )
                     processed += 1
                     continue
@@ -961,12 +1271,12 @@ class TelegramCommandPoller:
                 chat_id = str(msg.get("chat", {}).get("id"))
                 photos = msg.get("photo")
                 if photos and isinstance(photos, list) and len(photos) > 0:
-                    if not self.notifier.is_user_authorized(user_id):
-                        logger.warning(f"Foto no autorizada enviada por user_id={user_id}")
+                    role = self.notifier.get_user_role(user_id)
+                    if role == "NONE":
+                        self._notify_unauthorized_user(user_id, from_user, chat_id)
+                    elif role == "INVITADO":
                         self.notifier.send_alert(
-                            f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
-                            f"Tu ID de Telegram es: `{user_id}`.\n"
-                            f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`.",
+                            "⛔ *Acceso Restringido*: El procesamiento de comprobantes bancarios está reservado para Traders y Administradores.",
                             chat_id=chat_id,
                         )
                     else:
@@ -982,16 +1292,20 @@ class TelegramCommandPoller:
                     continue
 
                 text = str(msg.get("text", "")).strip()
+                role = self.notifier.get_user_role(user_id)
+
+                if role == "NONE":
+                    self._notify_unauthorized_user(user_id, from_user, chat_id)
+                    processed += 1
+                    continue
 
                 if text.startswith("/") or text.lower().startswith(("📈", "🏛️", "📊", "📑", "⚖️", "🔄", "❓")):
                     cmd = text.strip().lower()
                     if cmd in ("/keys", "/claves", "/ai_status") and self.ai_agent and hasattr(self.ai_agent, "key_pool"):
-                        if not self.notifier.is_user_authorized(user_id):
+                        if role == "INVITADO":
                             self.notifier.send_alert(
-                                f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
-                                f"Tu ID de Telegram es: `{user_id}`.\n"
-                                f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`.",
-                                chat_id=chat_id
+                                "⛔ *Acceso Restringido*: Esta opción está reservada para Traders y Administradores.",
+                                chat_id=chat_id,
                             )
                         else:
                             summary = self.ai_agent.key_pool.format_status_summary()
@@ -1001,21 +1315,20 @@ class TelegramCommandPoller:
 
                     response = self.notifier.handle_command(user_id=user_id, command=text)
                     markup = (
-                        self.notifier.get_persistent_menu_markup()
+                        self.notifier.get_persistent_menu_markup(role=role)
                         if text.lower().startswith(("/start", "/ayuda", "/menu", "/help"))
-                        else self.notifier.get_quick_actions_markup()
+                        else self.notifier.get_quick_actions_markup(role=role)
                     )
                     self.notifier.send_alert(response, chat_id=chat_id, reply_markup=markup)
                     processed += 1
                 elif text:
                     # Consulta en lenguaje natural
-                    if not self.notifier.is_user_authorized(user_id):
-                        logger.warning(f"Consulta no autorizada de user_id={user_id}")
+                    if role == "INVITADO":
                         self.notifier.send_alert(
-                            f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
-                            f"Tu ID de Telegram es: `{user_id}`.\n"
-                            f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`.",
-                            chat_id=chat_id
+                            "ℹ️ *Modo Invitado*: Solo puedes consultar spreads (`/spread`) y tasa BCV (`/bcv`).\n"
+                            "Usa los botones táctiles del teclado inferior.",
+                            chat_id=chat_id,
+                            reply_markup=self.notifier.get_persistent_menu_markup(role="INVITADO"),
                         )
                     else:
                         if self.ai_agent:
@@ -1026,7 +1339,7 @@ class TelegramCommandPoller:
                                 "ℹ️ *Asistente de IA no configurado*.\n"
                                 "Configura `AI_API_KEY` en `config/.env` para habilitar preguntas en lenguaje natural, "
                                 "o utiliza comandos directos como `/status`, `/report` o `/ayuda`.",
-                                chat_id=chat_id
+                                chat_id=chat_id,
                             )
                     processed += 1
             return processed

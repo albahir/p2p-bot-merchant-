@@ -12,6 +12,7 @@ from src.data.models import BankVoucher, FiscalPeriodSnapshot, WalletMovement
 from src.data.repositories import (
     BankVoucherRepository,
     FiscalSnapshotRepository,
+    IdentityRepository,
     WalletMovementRepository,
 )
 
@@ -176,3 +177,62 @@ def test_fiscal_snapshot_repository_upsert_and_retrieve():
     latest = repo.get_latest_snapshot()
     assert latest is not None
     assert latest.period == "2026-09"
+
+
+def test_identity_repository_crud():
+    """Valida la persistencia permanente, búsqueda y deduplicación de identidades."""
+    db = setup_in_memory_db()
+    repo = IdentityRepository(db)
+
+    # 1. Inserción inicial
+    saved = repo.upsert(
+        nationality="V",
+        cedula="18234567",
+        full_name="JUAN CARLOS PEREZ GOMEZ",
+        source="METAP2P",
+    )
+    assert saved.id is not None
+    assert saved.nationality == "V"
+    assert saved.cedula == "18234567"
+    assert saved.full_name == "JUAN CARLOS PEREZ GOMEZ"
+    assert saved.source == "METAP2P"
+
+    # 2. Búsqueda por cédula
+    found = repo.get_by_cedula("V", "18234567")
+    assert found is not None
+    assert found.full_name == "JUAN CARLOS PEREZ GOMEZ"
+
+    # 3. Upsert de actualización sin duplicar fila
+    updated = repo.upsert(
+        nationality="V",
+        cedula="18234567",
+        full_name="JUAN CARLOS PEREZ GOMEZ ACTUALIZADO",
+        source="SENIAT",
+    )
+    assert updated.id == saved.id
+    assert updated.full_name == "JUAN CARLOS PEREZ GOMEZ ACTUALIZADO"
+    assert updated.source == "SENIAT"
+    assert repo.count() == 1
+
+    # 4. Insertar otra identidad extranjera
+    repo.upsert(
+        nationality="E",
+        cedula="82111222",
+        full_name="MARIA SOFIA RODRIGUEZ",
+        source="METAP2P",
+    )
+    assert repo.count() == 2
+
+    # 5. Listar todos
+    all_identities = repo.list_all()
+    assert len(all_identities) == 2
+
+    # 6. Búsqueda por texto (query)
+    results_by_name = repo.search("RODRIGUEZ")
+    assert len(results_by_name) == 1
+    assert results_by_name[0].cedula == "82111222"
+
+    results_by_cedula = repo.search("18234567")
+    assert len(results_by_cedula) == 1
+    assert results_by_cedula[0].nationality == "V"
+

@@ -20,6 +20,9 @@ class RateAlertService:
         self.last_bcv_alert_time: float = 0.0
         self.last_arbitrage_alert_time: float = 0.0
         self.last_arbitrage_key: str | None = None
+        self.last_arbitrage_buy_rate: float | None = None
+        self.last_arbitrage_sell_rate: float | None = None
+        self.last_arbitrage_spread_pct: float | None = None
         self.monitor = SpreadMonitor()
         self.bcv_service = BCVService()
 
@@ -62,25 +65,53 @@ class RateAlertService:
         return None
 
     def check_spread_opportunities(self, quotes: list[BankRateQuote]) -> str | None:
-        """Identifica oportunidades destacadas de arbitraje interbancario (> 1.50% spread)."""
+        """Identifica oportunidades destacadas de arbitraje interbancario (> 1.50% spread).
+        Evita enviar alertas repetitivas si la oportunidad y las tasas no han cambiado.
+        """
         if not quotes:
             return None
 
         cross = self.monitor.find_best_cross_arbitrage(quotes)
-        if cross and cross["spread_pct"] >= 1.50:
-            key = f"{cross['buy_bank']}->{cross['sell_bank']}"
-            now = time.time()
-            if key != self.last_arbitrage_key or (now - self.last_arbitrage_alert_time) > self.cooldown_seconds:
-                self.last_arbitrage_key = key
-                self.last_arbitrage_alert_time = now
-                return (
-                    f"⚡ *¡OPORTUNIDAD DE ARBITRAJE INTERBANCARIO DETECTADA!* (Spread: `+{cross['spread_pct']:+.2f}%`)\n\n"
-                    f"• Compra en: *{cross['buy_bank']}* a `{cross['buy_rate']:,.2f} Bs`\n"
-                    f"• Venta en: *{cross['sell_bank']}* a `{cross['sell_rate']:,.2f} Bs`\n"
-                    f"• Spread Bruto: `+{cross['spread_ves']:+.2f} Bs`\n"
-                    f"• Retorno Estimado: `+{cross['net_profit_ves_100u']:,.2f} Bs` por cada 100 USDT\n\n"
-                    f"💡 Usa `/spread` para ver la matriz completa de bancos."
-                )
+        if not cross or cross["spread_pct"] < 1.50:
+            return None
+
+        key = f"{cross['buy_bank']}->{cross['sell_bank']}"
+        now = time.time()
+        is_new_key = (key != self.last_arbitrage_key)
+
+        # Evaluar si hubo cambio significativo en tasas o spread respecto a la última alerta
+        rates_changed = False
+        if (
+            self.last_arbitrage_buy_rate is not None
+            and self.last_arbitrage_sell_rate is not None
+            and self.last_arbitrage_spread_pct is not None
+        ):
+            rate_delta = abs(cross["buy_rate"] - self.last_arbitrage_buy_rate) + abs(
+                cross["sell_rate"] - self.last_arbitrage_sell_rate
+            )
+            spread_delta = abs(cross["spread_pct"] - self.last_arbitrage_spread_pct)
+            # Solo consideramos cambio si el spread varió en >= 0.20% o las tasas en >= 0.50 Bs
+            if spread_delta >= 0.20 or rate_delta >= 0.50:
+                rates_changed = True
+        else:
+            rates_changed = True
+
+        should_alert = is_new_key or (rates_changed and (now - self.last_arbitrage_alert_time) > self.cooldown_seconds)
+
+        if should_alert:
+            self.last_arbitrage_key = key
+            self.last_arbitrage_buy_rate = float(cross["buy_rate"])
+            self.last_arbitrage_sell_rate = float(cross["sell_rate"])
+            self.last_arbitrage_spread_pct = float(cross["spread_pct"])
+            self.last_arbitrage_alert_time = now
+            return (
+                f"⚡ *¡OPORTUNIDAD DE ARBITRAJE INTERBANCARIO DETECTADA!* (Spread: `+{cross['spread_pct']:+.2f}%`)\n\n"
+                f"• Compra en: *{cross['buy_bank']}* a `{cross['buy_rate']:,.2f} Bs`\n"
+                f"• Venta en: *{cross['sell_bank']}* a `{cross['sell_rate']:,.2f} Bs`\n"
+                f"• Spread Bruto: `+{cross['spread_ves']:+.2f} Bs`\n"
+                f"• Retorno Estimado: `+{cross['net_profit_ves_100u']:,.2f} Bs` por cada 100 USDT\n\n"
+                f"💡 Usa `/spread` para ver la matriz completa de bancos."
+            )
 
         return None
 
