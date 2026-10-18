@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
@@ -102,7 +102,7 @@ class TelegramNotifier:
                 logger.debug(f"Error consultando rol de usuario en DB: {e}")
 
         # 2. Fallback estático con allowed_user_ids y default_chat_id como ADMIN
-        if self.default_chat_id and user_str == str(self.default_chat_id).strip():
+        if self.default_chat_id and user_str == self.default_chat_id.strip():
             return "ADMIN"
         for allowed in self.allowed_user_ids:
             if str(allowed).strip() == user_str:
@@ -305,7 +305,7 @@ class TelegramNotifier:
             return False
 
         sanitized_caption = sanitize_message(caption) if caption else ""
-        data: dict[str, Any] = {"chat_id": str(target_chat)}
+        data: dict[str, Any] = {"chat_id": target_chat}
         if sanitized_caption:
             data["caption"] = sanitized_caption
         if parse_mode:
@@ -585,8 +585,8 @@ class TelegramNotifier:
                 user = repo.get_by_username(target_id)
 
             if user:
-                repo.update_role(int(user.id), target_role)
-                repo.set_active_status(int(user.id), True)
+                repo.update_role(cast(int, user.id), target_role)
+                repo.set_active_status(cast(int, user.id), True)
                 db.commit()
                 return f"✅ Usuario `{user.username}` (`{target_id}`) actualizado exitosamente al rol `{target_role}`."
             else:
@@ -638,7 +638,7 @@ class TelegramNotifier:
             if not user:
                 return f"⚠️ No se encontró al usuario `{target_id}` en la base de datos."
 
-            repo.set_active_status(int(user.id), False)
+            repo.set_active_status(cast(int, user.id), False)
             db.commit()
             return f"🛑 Acceso del usuario `{user.username}` (`{target_id}`) revocado exitosamente (desactivado)."
         except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
@@ -857,12 +857,9 @@ class TelegramNotifier:
         bcv_rate = 820.0
         db = SessionLocal()
         try:
-            from typing import cast
-
-            from sqlalchemy.exc import SQLAlchemyError
             latest = db.query(Order).filter(cast(Any, Order.bcv_rate > 0)).order_by(Order.id.desc()).first()
             if latest and latest.bcv_rate:
-                bcv_rate = float(latest.bcv_rate)
+                bcv_rate = float(cast(Any, latest.bcv_rate))
         except (SQLAlchemyError, ValueError, TypeError) as e:
             logger.warning(f"Error consultando última tasa BCV: {e}")
         finally:
@@ -1190,7 +1187,7 @@ class TelegramCommandPoller:
         )
 
         admin_chat = self.notifier.default_chat_id
-        if admin_chat and str(user_id) != str(admin_chat):
+        if admin_chat and str(user_id) != admin_chat:
             uname = from_user.get("username")
             username_str = f"@{uname}" if uname else "N/A"
             first = from_user.get("first_name", "")
@@ -1214,7 +1211,7 @@ class TelegramCommandPoller:
                 f"• *Usuario*: {username_str}\n"
                 f"• *Nombre*: {full_name}\n\n"
                 f"Seleccione el nivel de autorización:",
-                chat_id=str(admin_chat),
+                chat_id=admin_chat,
                 reply_markup=admin_markup,
             )
 

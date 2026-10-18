@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.data.database import Base
+from src.data.models import BankVoucher, IdentityCache, Order, User, WalletMovement  # noqa: F401
 from src.security.identity_service import IdentityService, extract_cedula_from_payment_details
 
 
@@ -20,8 +21,12 @@ def test_extract_cedula_from_various_formats():
     assert extract_cedula_from_payment_details("Pago Móvil V-18234567 04141234567") == ("V", "18234567")
     # Formato con puntos
     assert extract_cedula_from_payment_details("CI: 19.876.543 Banesco") == ("V", "19876543")
-    # Extranjero
-    assert extract_cedula_from_payment_details("Titular: E-82123456") == ("E", "82123456")
+    # Extranjero con espacio
+    assert extract_cedula_from_payment_details("Titular: E 82.123.456") == ("E", "82123456")
+    # Solo dígitos sin letra
+    assert extract_cedula_from_payment_details("9419106") == ("V", "9419106")
+    # Minúscula pegada
+    assert extract_cedula_from_payment_details("v9419106") == ("V", "9419106")
     # Diccionario con campos bancarios
     data_dict = {
         "bankName": "Banco de Venezuela",
@@ -48,7 +53,7 @@ def test_identity_service_cache_hit():
 
 def test_identity_service_verifik_success():
     db = setup_in_memory_db()
-    service = IdentityService(db=db, verifik_api_key="test_verifik_key")
+    service = IdentityService(db=db, verifik_api_key="test_verifik_key", metap2p_client=None)
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -73,7 +78,7 @@ def test_identity_service_verifik_success():
 
 def test_identity_service_didit_success():
     db = setup_in_memory_db()
-    service = IdentityService(db=db, didit_api_key="test_didit_key")
+    service = IdentityService(db=db, didit_api_key="test_didit_key", metap2p_client=None)
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -91,7 +96,7 @@ def test_identity_service_didit_success():
 
 def test_identity_service_seniat_success():
     db = setup_in_memory_db()
-    service = IdentityService(db=db)
+    service = IdentityService(db=db, metap2p_client=None)
 
     mock_xml = """<?xml version="1.0" encoding="ISO-8859-1"?>
     <rif:Rif xmlns:rif="http://seniat.gob.ve">
@@ -117,7 +122,7 @@ def test_identity_service_seniat_success():
 
 def test_identity_service_fallback_to_cne_when_seniat_fails():
     db = setup_in_memory_db()
-    service = IdentityService(db=db)
+    service = IdentityService(db=db, metap2p_client=None)
 
     mock_html = """
     <html>
@@ -153,7 +158,7 @@ def test_identity_service_fallback_to_cne_when_seniat_fails():
 
 def test_identity_service_fails_when_all_sources_fail():
     db = setup_in_memory_db()
-    service = IdentityService(db=db)
+    service = IdentityService(db=db, metap2p_client=None)
 
     mock_fail = MagicMock()
     mock_fail.status_code = 503
@@ -163,4 +168,4 @@ def test_identity_service_fails_when_all_sources_fail():
         result = service.lookup("V", "99999999")
         assert result.is_valid is False
         assert result.full_name == ""
-        assert "No se pudo verificar" in (result.error_message or "")
+        assert "no localizado" in (result.error_message or "").lower()

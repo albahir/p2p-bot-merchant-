@@ -71,6 +71,7 @@ class IdentityCache(Base):
     cedula = Column(String(20), unique=True, index=True, nullable=False)
     full_name = Column(String(255), nullable=False)
     source = Column(String(50), nullable=False)  # SENIAT, CNE, MANUAL
+    queried_by = Column(String(50), nullable=True)  # Username o Telegram ID que originó la consulta
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 
 

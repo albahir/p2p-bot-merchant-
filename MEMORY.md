@@ -336,11 +336,17 @@
     - **Arbitraje Interbancario Cruzado Garantizado (`SpreadMonitor`)**:
       - Se corrigió la discrepancia donde un mismo banco con precios extremos (como Banco Activo) se emparejaba consigo mismo ("Comprar en Banco Activo ➔ Vender en Banco Activo").
       - `find_best_cross_arbitrage` evalúa exhaustivamente todas las combinaciones `(q_buy, q_sell)` forzando la condición `q_buy.bank_name != q_sell.bank_name`.
-    - **Persistencia Permanente y Directorio de Cédulas en Base de Datos (`IdentityRepository`)**:
+    - **Persistencia Permanente y Directorio de Cédulas en Base de Datos con Trazabilidad (`IdentityRepository`)**:
       - Se implementó `IdentityRepository` para gestionar de forma centralizada, idempotente y permanente la tabla `identities` (`IdentityCache`).
       - Toda consulta a MetaP2P, comprobantes OCR o portales públicos queda resguardada de forma indefinida en la base de datos local para debida diligencia.
-      - En Telegram: Nuevo comando `/cedulas` para listar el directorio permanente (restringido a `TRADER` y `ADMIN`).
-      - En Streamlit: Nueva pestaña `"👤 Directorio Cédulas"` con buscador en tiempo real, resolución de identidades y visualización del directorio histórico con filtrado reactivo.
+      - **Atribución y Trazabilidad de Usuario (`queried_by`)**: Se añade el campo `queried_by` a cada registro para identificar qué usuario o Telegram ID realizó la consulta o registro de la cédula.
+      - **Notificación Proactiva al Autorizar/Promover**: Al aprobar o promover a un usuario (como `INVITADO` o `TRADER`) con `/autorizar`, el bot envía automáticamente un mensaje directo de bienvenida con sus opciones habilitadas y teclado interactivo.
+      - En Telegram: Nuevo comando `/cedulas` para listar el directorio permanente con indicación de qué usuario guardó cada registro (restringido a `TRADER` y `ADMIN`).
+      - En Streamlit: Nueva pestaña `"👤 Directorio Cédulas"` con columna *Consultado Por* y vinculación con la sesión activa del operador.
+      - **Navegación Lateral Limpia y Gestión de Perfil en Sidebar**:
+        - Se reubicó la lista horizontal de pestañas en un selector vertical limpio en la barra lateral izquierda, justo debajo del perfil activo y el botón de cerrar sesión.
+        - Se integró el formulario interactivo **"🔒 Cambiar mi Contraseña"** para cualquier operador autenticado.
+        - Se integró el formulario **"👤 Registrar Nuevo Trader"** (exclusivo para `ADMIN`) y la pestaña pública **"📝 Registro de Trader"** en la pantalla inicial de login.
     - **Calidad y Verificación Rigurosa**:
       - **123/123 pruebas unitarias y de integración pasando al 100%** (`pytest`).
       - Tipado estricto `mypy src/` limpio (**0 errores en 48 archivos fuente**).
