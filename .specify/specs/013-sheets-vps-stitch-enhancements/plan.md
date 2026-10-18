@@ -41,9 +41,27 @@ flowchart TD
 - Crear `scripts/deploy_vps.sh` con verificación de Docker, Docker Compose, variables de entorno y validación de IPv4 fija.
 - Añadir servicio de detección de IP pública saliente (`https://api.ipify.org`) al iniciar el motor para confirmar la coincidencia con la whitelist de Binance.
 
-### Fase 3: Integración de Google Stitch MCP
-- Configurar servidor MCP de Stitch en `C:\Users\jonan\.gemini\config\mcp_config.json`.
-- Enriquecer la interfaz de Streamlit (`src/reporting/dashboard/`) con estilos modernos, glassmorphism y métricas fintech inspiradas en Stitch.
+### Fase 3: Integración de Google Stitch MCP y Modernización de UI (Terminal P2P)
+- **Configuración MCP**:
+  - Registrar el servidor MCP de Google Stitch en `C:\Users\jonan\.gemini\config\mcp_config.json`.
+  - Crear guía de integración y sincronización de diseño en `docs/stitch_mcp_setup.md`.
+- **Motor de Temas y Tokens de Diseño Stitch (`src/reporting/dashboard/theme.py`)**:
+  - Paleta Obsidian Fintech: Fondo `#0B0E14`, superficie `rgba(22, 27, 34, 0.75)`, acentos `#10B981` (verde), `#F43F5E` (rojo), `#06B6D4` (cian), `#F59E0B` (ámbar).
+  - Estilos Glassmorphism: Tarjetas translúcidas con `backdrop-filter: blur(16px)`, bordes sutiles y números tabulares (`font-variant-numeric: tabular-nums`).
+  - Badges semánticos para estados: `MATCHED`, `UNMATCHED`, `BALANCED`, `DISCREPANCY`.
+- **Componentes Modulares (`src/reporting/dashboard/components/`)**:
+  - `terminal_header.py`: Barra superior de telemetría operativa en vivo (Modo Fail-closed, conexión Binance, IP pública y uso de cuota `x-mbx-used-weight`).
+  - `kpi_cards.py`: Tarjetas reactivas de resumen financiero y contable.
+  - `receipt_center.py`: Centro interactivo de comprobantes bancarios con tabla de conciliación, filtros y widget de carga directa (OCR Memory-only).
+  - `ai_telemetry.py`: Monitor interactivo del pool de claves de IA (Gemini Vision) con estado de cuota y tiempos de respuesta.
+- **Integración en Dashboard Maestro (`src/reporting/dashboard/app.py`)**:
+  - Inyección del tema Stitch e integración de componentes en las vistas principales.
+  - Apego estricto a estándares Streamlit 2026: sin `use_container_width`, uso de `width="stretch"`, `st.container(border=True)` e iconos Material Symbols.
+- **Auditoría de Seguridad y Pruebas**:
+  - Cero persistencia en disco de comprobantes cargados desde la UI.
+  - Sanitización estricta de HTML/CSS para prevenir XSS.
+  - Pruebas unitarias para `theme.py` y componentes.
+
 
 ### Fase 4: Monitores Proactivos (Spread BCV vs P2P y Reporte Mensual)
 - Implementar `SpreadMonitor` en `src/core/`.

@@ -57,7 +57,9 @@ class Order(Base):
     fee_crypto = Column(Float, default=0.0, nullable=False)
     bcv_rate = Column(Float, default=0.0, nullable=False)
     order_status = Column(String(30), nullable=False)  # COMPLETED, CANCELLED
+    counterparty_name = Column(String(100), nullable=True)  # Nombre o apodo de la contraparte en Binance
     created_at = Column(DateTime, nullable=False)
+
 
 
 class IdentityCache(Base):

@@ -1,5 +1,4 @@
-"""Conexión y sesión de base de datos SQLAlchemy."""
-
+import logging
 import os
 from pathlib import Path
 
@@ -37,6 +36,20 @@ def get_db():
 
 def init_db() -> None:
     """Crea todas las tablas definidas en los modelos si no existen en la base de datos."""
+    from sqlalchemy import text
+    from sqlalchemy.exc import SQLAlchemyError
+
     from src.data.models import Base as ModelsBase
 
     ModelsBase.metadata.create_all(bind=engine)
+
+
+    # Migración ligera para evolución de esquema en SQLite
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE orders ADD COLUMN counterparty_name VARCHAR(100)"))
+            conn.commit()
+    except SQLAlchemyError as err:
+        logging.getLogger("database").debug("Verificación de columna counterparty_name: %s", err)
+
+
