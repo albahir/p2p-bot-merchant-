@@ -1,4 +1,4 @@
-"""Tests unitarios para el servicio de verificación de identidad y extracción de cédula."""
+"""Tests unitarios para el servicio de verificación de identidad con Verifik, Didit, SENIAT y CNE."""
 
 from unittest.mock import MagicMock, patch
 
@@ -37,13 +37,56 @@ def test_identity_service_cache_hit():
     db = setup_in_memory_db()
     service = IdentityService(db=db)
 
-    # Pre-cargar en caché
+    # Pre-cargar en caché de contrapartes
     service.save_to_cache("V", "18234567", "CARLOS ALBERTO PEREZ", source="MANUAL")
 
     result = service.lookup("V", "18234567")
     assert result.is_valid is True
     assert result.full_name == "CARLOS ALBERTO PEREZ"
     assert result.source == "CACHE"
+
+
+def test_identity_service_verifik_success():
+    db = setup_in_memory_db()
+    service = IdentityService(db=db, verifik_api_key="test_verifik_key")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "data": {
+            "fullName": "ANDRES EDUARDO BELLO",
+            "documentNumber": "19555666",
+        }
+    }
+
+    with patch.object(service._client, "get", return_value=mock_resp):
+        result = service.lookup("V", "19555666")
+        assert result.is_valid is True
+        assert result.full_name == "ANDRES EDUARDO BELLO"
+        assert result.source == "VERIFIK"
+
+        # Verificar guardado en caché
+        cached = service.lookup_cache("V", "19555666")
+        assert cached is not None
+        assert cached.full_name == "ANDRES EDUARDO BELLO"
+
+
+def test_identity_service_didit_success():
+    db = setup_in_memory_db()
+    service = IdentityService(db=db, didit_api_key="test_didit_key")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "full_name": "GABRIELA SOFIA ROJAS",
+        "status": "verified",
+    }
+
+    with patch.object(service._client, "get", return_value=mock_resp):
+        result = service.lookup("V", "21444555")
+        assert result.is_valid is True
+        assert result.full_name == "GABRIELA SOFIA ROJAS"
+        assert result.source == "DIDIT"
 
 
 def test_identity_service_seniat_success():
@@ -67,7 +110,6 @@ def test_identity_service_seniat_success():
         assert result.full_name == "MARIA EUGENIA GONZALEZ"
         assert result.source == "SENIAT"
 
-        # Verificar que se guardó en la caché de BD
         cached = service.lookup_cache("V", "20333444")
         assert cached is not None
         assert cached.full_name == "MARIA EUGENIA GONZALEZ"
@@ -91,7 +133,6 @@ def test_identity_service_fallback_to_cne_when_seniat_fails():
     </html>
     """
 
-    # Simular fallo en SENIAT y éxito en CNE
     def side_effect(url, **kwargs):
         resp = MagicMock()
         if "seniat.gob.ve" in url:

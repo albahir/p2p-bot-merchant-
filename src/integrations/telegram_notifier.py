@@ -260,7 +260,8 @@ class TelegramNotifier:
                 f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`."
             )
 
-        cmd = command.strip().lower()
+        clean_cmd_str = command.strip()
+        cmd = clean_cmd_str.split()[0].lower() if clean_cmd_str else ""
         if cmd == "/status":
             state = "⏸️ PAUSADO" if self.is_paused else "🟢 ACTIVO"
             mode = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN (Binance Real)"
@@ -283,6 +284,10 @@ class TelegramNotifier:
             return self._handle_monthly_close(command)
         elif cmd in ("/cedula", "/identidad", "/consultar_cedula"):
             return self._handle_cedula_lookup(command)
+        elif cmd in ("/guardar_cedula", "/registrar_cedula", "/agregar_cedula"):
+            return self._handle_save_cedula(command)
+        elif cmd in ("/conciliacion", "/reconciliacion", "/reconstruccion"):
+            return self._handle_fiscal_reconciliation(command)
         elif cmd in ("/help", "/ayuda", "/start"):
             return (
                 "🤖 *Comandos Disponibles*:\n"
@@ -290,7 +295,9 @@ class TelegramNotifier:
                 "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
                 "- `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
                 "- `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
-                "- `/cedula V12345678`: Consultar titular oficial por cédula (SENIAT/CNE)\n"
+                "- `/conciliacion`: Resumen de 6 piezas fiscales y balance\n"
+                "- `/cedula V12345678`: Consultar titular oficial por cédula\n"
+                "- `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
                 "- `/pause`: Pausar operaciones comerciales\n"
                 "- `/resume`: Reanudar operaciones comerciales\n"
                 "- `/report`: Enlace a reportes fiscales\n"
@@ -442,6 +449,122 @@ class TelegramNotifier:
         finally:
             db.close()
 
+    def _handle_save_cedula(self, command: str) -> str:
+        """Procesa /guardar_cedula V12345678 NOMBRE COMPLETO y lo guarda en la base de datos local."""
+        from src.data.database import SessionLocal
+        from src.security.identity_service import (
+            IdentityService,
+            extract_cedula_from_payment_details,
+        )
+
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 3:
+            return "ℹ️ Uso: `/guardar_cedula V-18234567 NOMBRE COMPLETO`"
+
+        extracted = extract_cedula_from_payment_details(parts[1])
+        if not extracted:
+            return f"⚠️ Cédula inválida: '{parts[1]}'."
+
+        nat, num = extracted
+        nombre = parts[2].strip().upper()
+
+        db = SessionLocal()
+        try:
+            service = IdentityService(db=db)
+            service.save_to_cache(nationality=nat, cedula=num, full_name=nombre, source="MANUAL")
+            return f"✅ Identidad registrada con éxito:\n\n• Cédula: `{nat}-{num}`\n• Titular: *{nombre}*"
+        finally:
+            db.close()
+
+    def get_file_bytes(self, file_id: str) -> bytes | None:
+        """Descarga en memoria volátil los bytes de un archivo o foto de Telegram."""
+        try:
+            res = self._client.get(f"{self.base_url}/getFile", params={"file_id": file_id})
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("ok"):
+                    file_path = data.get("result", {}).get("file_path")
+                    if file_path:
+                        download_url = f"{self.api_base_url}/file/bot{self.bot_token}/{file_path}"
+                        img_res = self._client.get(download_url)
+                        if img_res.status_code == 200:
+                            return img_res.content
+        except (httpx.RequestError, ValueError, KeyError, OSError) as e:
+            logger.warning(f"Error descargando archivo {file_id} de Telegram: {e}")
+        return None
+
+    def process_receipt_photo(self, image_bytes: bytes) -> str:
+        """Procesa una foto de comprobante bancario con Gemini OCR y la concilia en la base de datos."""
+        from src.data.database import SessionLocal
+        from src.integrations.receipt_ocr import BankReceiptOCR, process_and_save_voucher
+
+        db = SessionLocal()
+        try:
+            ocr = BankReceiptOCR()
+            voucher, _matched_order = process_and_save_voucher(image_bytes, db, ocr_service=ocr)
+            if voucher:
+                status_emoji = "🟢 VINCULADO" if voucher.verification_status == "MATCHED" else "🟡 REGISTRADO (Sin orden coincidente)"
+                order_info = f"\n• Orden P2P: `{voucher.associated_order_number}`" if voucher.associated_order_number else ""
+                sender_info = f"\n• Titular: {voucher.sender_name or '-'} ({voucher.sender_id or '-'})"
+                return (
+                    f"🧾 *Comprobante Bancario Procesado (OCR)*\n\n"
+                    f"• Banco: *{voucher.bank_name}*\n"
+                    f"• Referencia: `{voucher.reference_number}`\n"
+                    f"• Monto: `{voucher.amount_ves:,.2f} VES`"
+                    f"{sender_info}"
+                    f"{order_info}\n"
+                    f"• Estado: {status_emoji}"
+                )
+            else:
+                return "⚠️ *No se pudo procesar el comprobante*: No se pudo extraer información clara del comprobante."
+        except (ValueError, KeyError, RuntimeError, OSError) as e:
+            logger.error(f"Error procesando foto de comprobante en Telegram: {e}")
+            return f"❌ Error interno procesando el comprobante: {e}"
+        finally:
+            db.close()
+
+    def _handle_fiscal_reconciliation(self, command: str) -> str:
+        """Procesa /conciliacion [YYYY-MM] y devuelve las 6 piezas contables."""
+        from src.data.database import SessionLocal
+        from src.reporting.fiscal_reconciler import FiscalReconciler
+
+        parts = command.strip().split()
+        now = datetime.now(UTC)
+        period = f"{now.year:04d}-{now.month:02d}"
+        if len(parts) > 1:
+            arg = parts[1].strip()
+            if len(arg) == 7 and "-" in arg:
+                period = arg
+
+        db = SessionLocal()
+        try:
+            reconciler = FiscalReconciler(db_session=db)
+            res = reconciler.reconcile_period(period=period)
+
+            status_icon = "🟢" if res.status == "BALANCED" else "🔴"
+            return (
+                f"📑 *Reconstrucción Fiscal P2P — Período `{res.period}`*\n\n"
+                f"1️⃣ *Saldo Inicial*: `{res.initial_balance:,.2f} USDT`\n"
+                f"2️⃣ *Entradas Cripto*: `{res.total_inflows:,.2f} USDT`\n"
+                f"   • Depósitos: `{res.inflows_deposits:,.2f}` | Compras P2P: `{res.inflows_p2p_buys:,.2f}`\n"
+                f"3️⃣ *Salidas Cripto*: `{res.total_outflows:,.2f} USDT`\n"
+                f"   • Retiros: `{res.outflows_withdrawals:,.2f}` | Ventas P2P: `{res.outflows_p2p_sells:,.2f}`\n"
+                f"4️⃣ *Volumen Operado*: `{res.volume_operated:,.2f} USDT`\n"
+                f"5️⃣ *Comisiones*: `{res.total_fees:,.4f} USDT`\n"
+                f"6️⃣ *Saldo Final*: Teórico `{res.calculated_final_balance:,.2f}` | Real `{res.actual_final_balance:,.2f}`\n"
+                f"   • Discrepancia: `{res.discrepancy:,.4f} USDT` ({status_icon} *{res.status}*)\n\n"
+                f"💰 *Liquidación ISLR (FIFO)*:\n"
+                f"• Ingresos Brutos: `{res.gross_revenue_ves:,.2f} VES`\n"
+                f"• Costo Adquisición: `{res.acquisition_cost_ves:,.2f} VES`\n"
+                f"• Ganancia Neta Fiscal: `{res.net_profit_ves:,.2f} VES` (`${res.net_profit_usd:,.2f} USD`)\n\n"
+                f"🏦 *Conciliación Bancaria*: `{res.matched_vouchers_count}/{res.vouchers_count}` comprobantes vinculados."
+            )
+        except (ValueError, KeyError, RuntimeError, OSError) as e:
+            logger.error(f"Error ejecutando /conciliacion: {e}")
+            return f"❌ Error ejecutando la reconciliación contable: {e}"
+        finally:
+            db.close()
+
 
 
 class TelegramQueueDispatcher:
@@ -576,6 +699,28 @@ class TelegramCommandPoller:
                 from_user = msg.get("from", {})
                 user_id = from_user.get("id")
                 chat_id = str(msg.get("chat", {}).get("id"))
+                photos = msg.get("photo")
+                if photos and isinstance(photos, list) and len(photos) > 0:
+                    if not self.notifier.is_user_authorized(user_id):
+                        logger.warning(f"Foto no autorizada enviada por user_id={user_id}")
+                        self.notifier.send_alert(
+                            f"⛔ *Acceso denegado*. Usuario no autorizado.\n"
+                            f"Tu ID de Telegram es: `{user_id}`.\n"
+                            f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`.",
+                            chat_id=chat_id,
+                        )
+                    else:
+                        file_id = str(photos[-1].get("file_id", ""))
+                        if file_id:
+                            img_bytes = self.notifier.get_file_bytes(file_id)
+                            if img_bytes:
+                                ocr_reply = self.notifier.process_receipt_photo(img_bytes)
+                                self.notifier.send_alert(ocr_reply, chat_id=chat_id)
+                            else:
+                                self.notifier.send_alert("⚠️ No se pudo descargar la imagen del comprobante.", chat_id=chat_id)
+                    processed += 1
+                    continue
+
                 text = str(msg.get("text", "")).strip()
 
                 if text.startswith("/"):

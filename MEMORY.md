@@ -52,6 +52,16 @@
   - Sanitización estricta anti-filtración de secretos en todas las salidas del modelo.
   - Suite completa de 31 tests pasando al 100%.
 
+- [x] **Paquete 014 (Reconstrucción Fiscal P2P de 6 Piezas, Parser Inteligente Binance y OCR Bancario Multimodal)**:
+  - Persistencia en SQLAlchemy con modelos `WalletMovement`, `BankVoucher` y `FiscalPeriodSnapshot` y repositorios con inserción idempotente.
+  - `BinanceFileParser`: procesa Órdenes C2C, Depósitos y Retiros (.csv y .xlsx), saltando automáticamente metadatos en Excel y reconociendo encabezados en español e inglés.
+  - `BankReceiptOCR`: Extracción inteligente multimodal con Gemini Vision aprovechando `AIKeyPool` (3 claves API con rotación round-robin) y auto-matching con órdenes P2P ($\pm 24\text{ h}$, tolerancia $\pm 0.05\text{ VES}$).
+  - `FiscalReconciler`: ejecuta la ecuación patrimonial de 6 piezas ($\text{Saldo Inicial} + \text{Entradas} - \text{Salidas} - \text{Comisiones} = \text{Saldo Final Teórico}$), detecta mermas/discrepancias e integra `FIFOCostMethod` extendido con inventario inicial valorado a tasa BCV.
+  - Exportación multi-pestaña auditada en `ExcelReporter` y `SheetsExporter`: genera las 4 pestañas *Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*.
+  - Panel interactivo en Streamlit (`fiscal_reconstruction_view.py`) con subida drag-and-drop de archivos de Binance y fotos de comprobantes bancarios, tarjetas de 6 piezas, liquidación ISLR y descarga directa.
+  - Integración con Telegram: comando `/conciliacion` y soporte para fotos de comprobantes bancarios vía OCR en tiempo real.
+  - Suite completa de 84 tests pasando al 100% (64 previos + 20 nuevos).
+
 ### ⏸️ Paquetes Pausados
 - ⏸️ **Paquete 003 (Motor de Estrategias)**: Pausado temporalmente por el usuario.
 - ⏸️ **Paquete 004 (Verificación Bancaria)**: Pausado temporalmente por el usuario.
@@ -175,6 +185,67 @@
       - Extracción de cédula desde métodos de pago P2P (`extract_cedula_from_payment_details`) con normalización de puntos.
       - Integrado en Telegram (`/cedula V12345678`) y en las herramientas del Asistente de IA de Google Gemini (`consultar_titular_cedula`).
     - Suite de Pruebas: Ampliada a **61/61 tests pasando al 100%**.
+28. **Endurecimiento de Pipelines CI/CD, Smoke Testing Operacional y Cumplimiento Legal KYC con Verifik y Didit (ADR 028)**:
+    - Rama de Trabajo Dedicada: Creada y conmutada la rama `feature/ci-security-hardening` para aislar los cambios de infraestructura y pipelines.
+    - Endurecimiento de `ci.yml`:
+      - Permisos de menor privilegio declarados (`permissions: contents: read`).
+      - Control de concurrencia (`concurrency: cancel-in-progress: true`) para ahorrar minutos de cómputo en pushes sucesivos.
+      - Caché de pip optimizada en todos los jobs (`cache: "pip"`).
+      - Exportación de reporte estructurado JUnit XML (`--junitxml=test-results/junit.xml`) y subida automática como artefacto.
+    - Endurecimiento Constitucional de `security.yml`:
+      - Principio Fail-Closed estricto: Eliminado `continue-on-error: true` de Gitleaks; cualquier secreto detectado bloquea inmediatamente el pipeline.
+      - Integrado escaneo SAST semántico oficial de GitHub (**CodeQL**) para Python.
+      - `pip-audit` configurado para exportar reporte JSON y fallar la integración si detecta vulnerabilidades con severidad `HIGH` o `CRITICAL`.
+      - Permiso explícito `security-events: write` para publicar alertas en la pestaña *Security* de GitHub.
+    - Endurecimiento de `cd.yml`:
+      - Erradicados los comandos falsos `echo`.
+      - Construcción de imágenes Docker con Buildx y escaneo de vulnerabilidades en contenedores con **Aquasecurity Trivy**.
+      - Ejecución de Smoke Tests reales mediante `scripts/smoke_test.py` en staging y producción.
+      - Reglas de protección de entorno (`environment: production`) con aprobación humana obligatoria (*Manual Approval Gate*).
+    - Script de Smoke Testing Autónomo (`scripts/smoke_test.py`):
+      - Valida en caliente las primitivas criptográficas (AES-256-GCM y Ed25519).
+      - Comprueba la importación limpia del grafo de módulos (`src.core`, `src.security`, `src.reporting`, `src.integrations`).
+      - Inicializa esquemas de Base de Datos.
+      - Verifica la sincronización horaria contra la API de Binance para prevenir el rechazo `-1021 INVALID_TIMESTAMP`.
+      - Verifica el endpoint de salud de Streamlit (`/_stcore/health`).
+    - Automatización Preventiva:
+      - Creado `.github/dependabot.yml` para actualizaciones semanales automáticas de `github-actions` y dependencias `pip`.
+      - Creado `.pre-commit-config.yaml` para validar formato y secretos localmente antes de hacer commit.
+    - Cumplimiento Legal y Regulación KYC/AML en `IdentityService`:
+      - Descartado y eliminado el enfoque de volcados de padrón electoral (`padron.db`, `scripts/import_padron.py`) por inviabilidad e infracción de leyes de protección de datos (Habeas Data).
+      - Integrados proveedores autorizados y regulados de verificación de identidad: **Verifik** (`api.verifik.co`) y **Didit** (`api.didit.me`).
+      - Arquitectura en cascada ética y legal: 1) Caché local de contrapartes legítimas, 2) Verifik KYC API, 3) Didit KYC API, 4) SENIAT Oficial RIF, 5) CNE Consulta Ciudadana.
+    - Suite de Pruebas: Ampliada y actualizada a **64/64 tests pasando al 100%**.
+29. **Reglas Contables y Fiscales para Declaración P2P en Venezuela y Mapeo API Oficial Binance (ADR 029)**:
+    - Formalización de Reglas Contables en [`.agents/rules/p2p-fiscal-rules.md`](file:///c:/p2p-bot-merchant/.agents/rules/p2p-fiscal-rules.md):
+      - Definidos los 3 reportes base requeridos por Binance My Tax Hub / SUMM: Transaction History, Deposit History y Withdrawal History.
+      - Definidas las 6 piezas clave de reconstrucción contable para comerciantes P2P: Saldo inicial, Entradas cripto, Salidas cripto, Volumen operado, Comisiones y Saldo final (verificado mediante la ecuación $\text{Saldo Inicial} + \text{Entradas} - \text{Salidas} = \text{Saldo Final Esperado}$).
+      - Definida la conciliación obligatoria con la capa bancaria externa en Venezuela (comprobantes de transferencias y Pago Móvil en VES, tasa oficial diaria del BCV y control de gastos operativos/IGTF).
+    - Mapeo oficial contra la Documentación de Desarrolladores de Binance ([developers.binance.com/en/docs/introduction](https://developers.binance.com/en/docs/introduction) y [developers.binance.com/en/docs/catalog](https://developers.binance.com/en/docs/catalog)):
+      - Historial de órdenes P2P/C2C: `GET /sapi/v1/c2c/orderMatch/listUserOrderHistory` (Signed `USER_DATA`, paginación en ventanas de 30 días).
+      - Historial de depósitos cripto: `GET /sapi/v1/capital/deposit/hisrec` (Signed `USER_DATA`, Weight: 1).
+      - Historial de retiros cripto: `GET /sapi/v1/capital/withdraw/history` (Signed `USER_DATA`, Weight: 1).
+      - Historial de conversiones spot directas: `GET /sapi/v1/convert/tradeFlow`.
+      - Historial de airdrops/recompensas: `GET /sapi/v1/asset/assetDividend`.
+      - Balance consolidado de billeteras: `GET /sapi/v1/asset/wallet/balance`.
+    - Actualización de reglas globales en [`.agents/rules/global-rules.md`](file:///c:/p2p-bot-merchant/.agents/rules/global-rules.md) y skill [`.agents/skills/binance-p2p/SKILL.md`](file:///c:/p2p-bot-merchant/.agents/skills/binance-p2p/SKILL.md).
+30. **Arquitectura de Reconstrucción Fiscal P2P de 6 Piezas, Parser Binance y OCR Bancario Multimodal con Gemini Vision (SPEC-014 / ADR 030)**:
+    - Formalización de SDD: Creados los artefactos de especificación [`.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/spec.md`](file:///c:/p2p-bot-merchant/.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/spec.md), [`plan.md`](file:///c:/p2p-bot-merchant/.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/plan.md) y [`tasks.md`](file:///c:/p2p-bot-merchant/.specify/specs/014-p2p-fiscal-reconstruction-and-ocr/tasks.md) estructurados en 6 fases y 18 tareas atómicas TDD.
+    - Consenso de Agentes del Sistema:
+      - **PM**: Resuelve la conciliación fiscal y la dificultad operativa de procesar comprobantes bancarios en bolívares.
+      - **Architect**: Diseña el aislamiento de la ingesta de archivos (`src/core/file_parser.py`), el servicio OCR (`src/integrations/receipt_ocr.py`) y el motor de 6 piezas (`src/reporting/fiscal_reconciler.py`).
+      - **Security**: Prohíbe almacenamiento inseguro de comprobantes bancarios y procesa Base64 exclusivamente en búfer de memoria volátil.
+      - **Backend**: Establece pruebas unitarias e idempotencia estricta en tablas `wallet_movements`, `bank_vouchers` y `fiscal_period_snapshots`.
+      - **Frontend**: Diseña el panel visual de 6 piezas con semáforo de balance y uploader drag-and-drop.
+      - **QA**: Valida fixtures basados en los archivos reales exportados de Binance en español.
+    - Evaluación de Capacidad de Gemini Vision: Las 3 API keys configuradas en `AIKeyPool` con balanceo round-robin proporcionan 45 peticiones/minuto y 4,500 peticiones/día, superando con creces la carga requerida para el volumen de comprobantes P2P.
+31. **Implementación y Cierre de Reconstrucción Fiscal P2P de 6 Piezas, Parser Binance y OCR Multimodal (ADR 031)**:
+    - **Ecuación de Consistencia Patrimonial**: Ejecutada en `FiscalReconciler` (`src/reporting/fiscal_reconciler.py`) bajo la fórmula contable estricta: $\text{Saldo Inicial} + \text{Depósitos} + \text{Compras P2P} - \text{Retiros} - \text{Ventas P2P} - \text{Comisiones Cripto} = \text{Saldo Final Esperado}$.
+    - **Apertura de Inventario FIFO**: Extensión de `FIFOCostMethod` (`src/reporting/tax_engine.py`) para admitir inventario inicial valorado al tipo de cambio oficial del BCV al primer día del mes, garantizando liquidaciones de costo de adquisición fidedignas ante el SENIAT.
+    - **OCR Resiliente con Gemini Vision**: `BankReceiptOCR` (`src/integrations/receipt_ocr.py`) rota automáticamente en fallback (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-flash-lite-latest`) y auto-vincula comprobantes de Pago Móvil / Transferencias bancarias con órdenes P2P dentro de una ventana de $\pm 24\text{ h}$ y tolerancia de $\pm 0.05\text{ VES}$.
+    - **Exportación Integral de 4 Pestañas**: `ExcelReporter` y `SheetsExporter` sincronizan las 4 hojas de auditoría fiscal (*Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*).
+    - **Control Visual y Conversacional**: Implementada pestaña interactiva en Streamlit (`fiscal_reconstruction_view.py`) y comando `/conciliacion` junto a procesamiento automático de fotos de comprobantes en Telegram (`TelegramCommandPoller`).
+    - **Modernización de Base Declarativa ORM**: Migrado `Base = declarative_base()` a `class Base(DeclarativeBase): pass` en `src/data/database.py`, eliminando falsos positivos en Mypy para todas las clases entidad.
 
 ---
 
@@ -182,7 +253,8 @@
 
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Suite de Pruebas**: Ejecutable directamente desde la pestaña "🧪 Suite de Tests" del Dashboard o con `pytest -v tests/` (61/61 tests pasando al 100%).
-4. **Comprobación de Calidad de Código**:
-   - `mypy src/` (0 errores en 33 archivos fuente).
+3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
+4. **Suite de Pruebas**: `pytest -v tests/` (**84/84 tests pasando al 100%**).
+5. **Comprobación de Calidad de Código**:
+   - `mypy src/ scripts/` (0 errores en 42 archivos fuente).
    - `ruff check .` (0 errores de linting).

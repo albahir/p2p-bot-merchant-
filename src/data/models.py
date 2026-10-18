@@ -71,3 +71,62 @@ class IdentityCache(Base):
     source = Column(String(50), nullable=False)  # SENIAT, CNE, MANUAL
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 
+
+class WalletMovement(Base):
+    """Movimientos de entrada y salida on-chain de criptoactivos (Depósitos y Retiros)."""
+    __tablename__ = "wallet_movements"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    movement_type = Column(String(20), nullable=False)  # DEPOSIT, WITHDRAWAL
+    asset = Column(String(20), nullable=False)          # USDT, BTC, ETH
+    amount = Column(Float, nullable=False)
+    fee = Column(Float, default=0.0, nullable=False)
+    network = Column(String(30), nullable=True)         # TRC20, BSC, MATIC
+    txid = Column(String(128), unique=True, index=True, nullable=True)
+    address = Column(String(128), nullable=True)
+    status = Column(String(30), nullable=False)         # Success, Completed
+    timestamp = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
+class BankVoucher(Base):
+    """Comprobantes de pago en bolívares (Pago Móvil / Transferencias) extraídos por OCR o registrados."""
+    __tablename__ = "bank_vouchers"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    bank_name = Column(String(100), nullable=False)     # Banco de Venezuela, Banesco, etc.
+    reference_number = Column(String(50), index=True, nullable=False)
+    amount_ves = Column(Float, nullable=False)
+    sender_id = Column(String(20), nullable=True)       # Cédula V-12345678
+    sender_name = Column(String(255), nullable=True)
+    payment_method = Column(String(30), default="PAGO_MOVIL", nullable=False)
+    associated_order_number = Column(String(50), nullable=True, index=True)
+    verification_status = Column(String(30), default="UNMATCHED", nullable=False)  # MATCHED, UNMATCHED, PENDING
+    voucher_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
+class FiscalPeriodSnapshot(Base):
+    """Snapshots mensuales de balance e inventario para la reconciliación de 6 piezas."""
+    __tablename__ = "fiscal_period_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    period = Column(String(7), unique=True, index=True, nullable=False)  # YYYY-MM
+    initial_balance = Column(Float, default=0.0, nullable=False)
+    inflows_deposits = Column(Float, default=0.0, nullable=False)
+    inflows_p2p_buys = Column(Float, default=0.0, nullable=False)
+    outflows_withdrawals = Column(Float, default=0.0, nullable=False)
+    outflows_p2p_sells = Column(Float, default=0.0, nullable=False)
+    volume_operated = Column(Float, default=0.0, nullable=False)
+    total_fees = Column(Float, default=0.0, nullable=False)
+    calculated_final_balance = Column(Float, nullable=False)
+    actual_final_balance = Column(Float, nullable=False)
+    discrepancy = Column(Float, default=0.0, nullable=False)
+    gross_revenue_ves = Column(Float, default=0.0, nullable=False)
+    acquisition_cost_ves = Column(Float, default=0.0, nullable=False)
+    net_profit_ves = Column(Float, default=0.0, nullable=False)
+    net_profit_usd = Column(Float, default=0.0, nullable=False)
+    status = Column(String(30), default="BALANCED", nullable=False)  # BALANCED, DISCREPANCY
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+

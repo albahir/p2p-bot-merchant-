@@ -6,9 +6,18 @@ on:
   pull_request:
     branches: [ main ]
 
+# Cancelar runs obsoletos si se hace un nuevo push a la misma rama
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Menor privilegio: sólo lectura de código
+permissions:
+  contents: read
+
 jobs:
   lint-and-typecheck:
-    name: Linting & Type Checking
+    name: Linting & Static Type Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,10 +28,10 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Linting Tools & Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy pytest
+          pip install ruff mypy types-requests
           pip install -r requirements.txt
           pip install -e .
 
@@ -30,7 +39,7 @@ jobs:
         run: ruff check .
 
       - name: Run Mypy Type Checker
-        run: mypy src/
+        run: mypy src/ scripts/
 
   tests:
     name: Unit & Integration Tests
@@ -43,12 +52,23 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install -e ".[dev]"
+          pip install -e .
 
-      - name: Run Pytest
-        run: pytest --maxfail=1 --disable-warnings -v tests/
+      - name: Run Pytest Suite with JUnit Report
+        run: |
+          mkdir -p test-results
+          pytest -v --maxfail=1 --junitxml=test-results/junit.xml tests/
+
+      - name: Upload Test Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: test-results/junit.xml
+          retention-days: 7
