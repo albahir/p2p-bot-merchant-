@@ -23,6 +23,7 @@ from src.core.binance_client import (
 )
 from src.core.binance_mock import MockBinanceP2PClient
 from src.core.history_ingestor import HistoryIngestor
+from src.core.rate_alert_service import RateAlertService
 from src.data.database import Base, SessionLocal, engine
 from src.integrations.ai_assistant import TelegramAIAgent
 from src.integrations.telegram_notifier import (
@@ -168,6 +169,10 @@ class P2PBotEngine:
         self.client: BinanceP2PClient | MockBinanceP2PClient | None = None
         self._setup_binance_client()
 
+        # 8. Servicio de monitoreo continuo de tasas BCV y alertas de arbitraje P2P
+        self.rate_alert_service = RateAlertService(cooldown_seconds=600)
+        self.notifier.set_bot_commands()
+
         # Registrar evento de inicio en auditoría append-only
         self.audit.log(
             event_type="ENGINE_START",
@@ -180,14 +185,15 @@ class P2PBotEngine:
         self.dispatcher.queue_alert(
             f"🟢 *Bot P2P Merchant iniciado exitosamente* {self.instance_tag}\n"
             f"Modo: {mode_label}\n"
-            f"Monitoreo y escucha de comandos activos."
+            f"Monitoreo y escucha de comandos activos.",
+            reply_markup=self.notifier.get_quick_actions_markup(),
         )
 
-        # 8. Iniciar servidores HTTP ligeros para probes de salud (Koyeb, Render, Docker)
+        # 9. Iniciar servidores HTTP ligeros para probes de salud (Koyeb, Render, Docker)
         self.httpd_servers: list[HTTPServer] = []
         self._start_healthcheck_server()
 
-        # 9. Iniciar KeepAlivePinger anti-suspensión en Nube (Render / Koyeb)
+        # 10. Iniciar KeepAlivePinger anti-suspensión en Nube (Render / Koyeb)
         self.pinger = KeepAlivePinger(target_url=self.settings.KEEP_ALIVE_URL)
         self.pinger.start()
 
@@ -246,6 +252,7 @@ class P2PBotEngine:
 
     def run_cycle(self):
         """Ejecuta una iteración de sincronización y monitoreo."""
+        # 1. Sincronización de órdenes Binance
         if self.client:
             try:
                 ingestor = HistoryIngestor(self.client, SessionLocal)
@@ -255,13 +262,25 @@ class P2PBotEngine:
                 if count > 0:
                     self.dispatcher.queue_alert(
                         f"📦 *{mode_str} Nuevas Órdenes P2P*\n"
-                        f"Se han registrado e ingestadas *{count}* órdenes en la base de datos."
+                        f"Se han registrado e ingestadas *{count}* órdenes en la base de datos.",
+                        reply_markup=self.notifier.get_quick_actions_markup(),
                     )
             except (RuntimeError, BinanceAuthError, BinanceWeightExceededError) as e:
                 logger.error(f"Error en ciclo de sincronización Binance: {e}")
                 self.dispatcher.queue_alert(f"⚠️ Error en sincronización Binance: {e}")
         else:
             logger.info("Ciclo inactivo: Cliente no inicializado.")
+
+        # 2. Monitoreo de fluctuaciones de tasa BCV y brechas de arbitraje P2P
+        try:
+            rate_alerts = self.rate_alert_service.poll_and_check()
+            for alert_text in rate_alerts:
+                self.dispatcher.queue_alert(
+                    alert_text,
+                    reply_markup=self.notifier.get_quick_actions_markup(),
+                )
+        except (RuntimeError, ValueError, KeyError, OSError) as e:
+            logger.warning(f"Error en monitoreo de tasas y spread: {e}")
 
     def start(self, poll_interval_seconds: int = 30):
         """Inicia el bucle principal de ejecución."""

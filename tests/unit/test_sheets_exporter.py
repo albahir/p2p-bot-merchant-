@@ -123,3 +123,52 @@ def test_sheets_exporter_handles_404_not_found():
         assert exporter.last_error is not None
         assert "Hoja no encontrada (HTTP 404)" in exporter.last_error
         assert "missing_sheet_999" in exporter.last_error
+
+
+def test_sheets_exporter_compliance_report():
+    from datetime import UTC, datetime
+
+    from src.data.models import BankVoucher, Order
+
+    mock_sh = MagicMock()
+    mock_ws_cert = MagicMock()
+    mock_ws_ventas = MagicMock()
+    mock_ws_compras = MagicMock()
+    mock_ws_traza = MagicMock()
+
+    mock_ws_cert.title = "Certificación Institucional"
+    mock_ws_ventas.title = "Entradas (Ventas P2P)"
+    mock_ws_compras.title = "Salidas (Compras P2P)"
+    mock_ws_traza.title = "Traza de Conciliación"
+    mock_sh.worksheets.return_value = [mock_ws_cert, mock_ws_ventas, mock_ws_compras, mock_ws_traza]
+
+    mock_client = MagicMock()
+    mock_client.open_by_key.return_value = mock_sh
+
+    with patch("gspread.service_account_from_dict", return_value=mock_client):
+        exporter = SheetsExporter(credentials_json={"type": "service_account"})
+        orders = [
+            Order(order_number="SELL-101", trade_type="SELL", asset="USDT", crypto_amount=100.0, fiat="VES", fiat_amount=85000.0, unit_price=850.0, fee_fiat=0.0, bcv_rate=820.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
+            Order(order_number="BUY-102", trade_type="BUY", asset="USDT", crypto_amount=100.0, fiat="VES", fiat_amount=84000.0, unit_price=840.0, fee_fiat=0.0, bcv_rate=820.0, order_status="COMPLETED", created_at=datetime.now(UTC)),
+        ]
+        vouchers = [
+            BankVoucher(bank_name="Banco de Venezuela", reference_number="12345", amount_ves=85000.0, sender_id="V-12345678", sender_name="PEDRO PEREZ", payment_method="PAGO_MOVIL", associated_order_number="SELL-101", verification_status="MATCHED", created_at=datetime.now(UTC)),
+        ]
+        success = exporter.export_compliance_report(
+            sheet_id="mock_compliance_sheet",
+            orders=orders,
+            vouchers=vouchers,
+            account_holder="INVERSIONES P2P C.A.",
+            rif="J-12345678-9",
+            period="Octubre 2026",
+        )
+        assert success is True
+        assert mock_ws_cert.clear.called
+        assert mock_ws_cert.append_rows.called
+        assert mock_ws_ventas.clear.called
+        assert mock_ws_ventas.append_rows.called
+        assert mock_ws_compras.clear.called
+        assert mock_ws_compras.append_rows.called
+        assert mock_ws_traza.clear.called
+        assert mock_ws_traza.append_rows.called
+

@@ -29,7 +29,7 @@ def test_authorized_user_can_pause_and_resume():
 
 def test_telegram_command_sheets_unconfigured(monkeypatch):
     notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
-    monkeypatch.delenv("GOOGLE_SHEET_ID", raising=False)
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
     res = notifier.handle_command(user_id=1001, command="/sheets")
     assert "Google Sheets no está configurado" in res
 
@@ -38,7 +38,7 @@ def test_telegram_command_sheets_settings_error_graceful_fallback(monkeypatch):
     from unittest.mock import patch
 
     notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
-    monkeypatch.delenv("GOOGLE_SHEET_ID", raising=False)
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
     with patch("config.settings.Settings", side_effect=ValueError("Invalid config")):
         res = notifier.handle_command(user_id=1001, command="/sheets")
         assert "Google Sheets no está configurado" in res

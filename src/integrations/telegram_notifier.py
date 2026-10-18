@@ -68,11 +68,78 @@ class TelegramNotifier:
 
         self._client = httpx.Client(**client_kwargs)
 
+    def get_quick_actions_markup(self) -> dict[str, Any]:
+        """Genera un teclado inline interactivo con las acciones principales del bot."""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "📈 Spreads P2P", "callback_data": "/spread"},
+                    {"text": "🏛️ Tasa BCV", "callback_data": "/bcv"},
+                ],
+                [
+                    {"text": "📊 Estado Bot", "callback_data": "/status"},
+                    {"text": "📑 Cierre Fiscal", "callback_data": "/cierre"},
+                ],
+                [
+                    {"text": "⚖️ Conciliación", "callback_data": "/conciliacion"},
+                    {"text": "🔄 Sincronizar Sheets", "callback_data": "/sheets"},
+                ],
+                [
+                    {"text": "⏸️ Pausar", "callback_data": "/pause"},
+                    {"text": "▶️ Reanudar", "callback_data": "/resume"},
+                ],
+            ]
+        }
+
+    def get_persistent_menu_markup(self) -> dict[str, Any]:
+        """Genera un teclado persistente de acceso rápido en la app móvil de Telegram."""
+        return {
+            "keyboard": [
+                [{"text": "📈 Spreads P2P"}, {"text": "🏛️ Tasa BCV"}],
+                [{"text": "📊 Estado Bot"}, {"text": "📑 Cierre Mes"}],
+                [{"text": "⚖️ Conciliación"}, {"text": "🔄 Sync Sheets"}],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+        }
+
+    def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> bool:
+        """Confirma la pulsación de un botón interactivo (InlineKeyboardButton)."""
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        try:
+            res = self._client.post(f"{self.base_url}/answerCallbackQuery", json=payload)
+            return res.status_code == 200
+        except (httpx.RequestError, OSError):
+            return False
+
+    def set_bot_commands(self) -> bool:
+        """Registra la lista oficial de comandos en Telegram para el menú nativo."""
+        commands = [
+            {"command": "spread", "description": "📈 Spreads por banco y arbitraje cruzado"},
+            {"command": "bcv", "description": "🏛️ Tasa oficial BCV y brecha cambiaria"},
+            {"command": "status", "description": "📊 Estado del bot y modo operativo"},
+            {"command": "cierre", "description": "📑 Cierre fiscal mensual en Excel"},
+            {"command": "conciliacion", "description": "⚖️ Reconstrucción 6 piezas y balance"},
+            {"command": "sheets", "description": "🔄 Sincronizar con Google Sheets"},
+            {"command": "cedula", "description": "👤 Consultar titularidad por cédula"},
+            {"command": "pause", "description": "⏸️ Pausar operaciones"},
+            {"command": "resume", "description": "▶️ Reanudar operaciones"},
+            {"command": "ayuda", "description": "❓ Menú de comandos y botones"},
+        ]
+        try:
+            res = self._client.post(f"{self.base_url}/setMyCommands", json={"commands": commands})
+            return res.status_code == 200
+        except (httpx.RequestError, OSError):
+            return False
+
     def send_alert(
         self,
         text: str,
         chat_id: str | None = None,
-        parse_mode: str | None = "Markdown"
+        parse_mode: str | None = "Markdown",
+        reply_markup: dict[str, Any] | None = None,
     ) -> bool:
         """Envía una alerta con formato seguro, fallback a texto plano ante error 400 y reintentos ante 429."""
         if not self.bot_token:
@@ -92,6 +159,8 @@ class TelegramNotifier:
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
 
         # Intentar hasta 3 veces con intervalos breves si hay problemas en la red
         for attempt in range(3):
@@ -260,7 +329,26 @@ class TelegramNotifier:
                 f"Añádelo a `TELEGRAM_ALLOWED_USER_IDS`."
             )
 
-        clean_cmd_str = command.strip()
+        # Mapeo de botones de texto (Persistent Reply Keyboard)
+        text_menu_map = {
+            "📈 spreads p2p": "/spread",
+            "📈 spreads & arbitraje": "/spread",
+            "🏛️ tasa bcv": "/bcv",
+            "📊 estado bot": "/status",
+            "📊 estado del sistema": "/status",
+            "📑 cierre mes": "/cierre",
+            "📑 cierre fiscal": "/cierre",
+            "⚖️ conciliación": "/conciliacion",
+            "🔄 sync sheets": "/sheets",
+            "🔄 sincronizar sheets": "/sheets",
+            "❓ ayuda": "/ayuda",
+        }
+        clean_text_lower = command.strip().lower()
+        if clean_text_lower in text_menu_map:
+            clean_cmd_str = text_menu_map[clean_text_lower]
+        else:
+            clean_cmd_str = command.strip()
+
         cmd = clean_cmd_str.split()[0].lower() if clean_cmd_str else ""
         if cmd == "/status":
             state = "⏸️ PAUSADO" if self.is_paused else "🟢 ACTIVO"
@@ -278,33 +366,37 @@ class TelegramNotifier:
             return "📊 Para generar el reporte detallado, ingrese al Dashboard Streamlit o ejecute el exportador fiscal."
         elif cmd in ("/keys", "/claves", "/ai_status"):
             return "🔑 Usa `/keys` o pregúntale al bot '¿cuál es el estado de las claves?' para ver la telemetría en vivo."
+        elif cmd in ("/bcv", "/tasa", "/dolar_bcv"):
+            return self._handle_bcv_query()
         elif cmd in ("/sheets", "/sync_sheets", "/hojas"):
             return self._handle_sheets_sync()
+        elif cmd in ("/sheets_compliance", "/compliance_sheets"):
+            return self._handle_compliance_sheets_sync()
         elif cmd in ("/cierre", "/cierre_mensual"):
-            return self._handle_monthly_close(command)
+            return self._handle_monthly_close(clean_cmd_str)
         elif cmd in ("/cedula", "/identidad", "/consultar_cedula"):
-            return self._handle_cedula_lookup(command)
+            return self._handle_cedula_lookup(clean_cmd_str)
         elif cmd in ("/guardar_cedula", "/registrar_cedula", "/agregar_cedula"):
-            return self._handle_save_cedula(command)
+            return self._handle_save_cedula(clean_cmd_str)
         elif cmd in ("/conciliacion", "/reconciliacion", "/reconstruccion"):
-            return self._handle_fiscal_reconciliation(command)
+            return self._handle_fiscal_reconciliation(clean_cmd_str)
         elif cmd in ("/spread", "/arbitraje", "/margen"):
-            return self._handle_spread_monitor(command)
-        elif cmd in ("/help", "/ayuda", "/start"):
+            return self._handle_spread_monitor(clean_cmd_str)
+        elif cmd in ("/help", "/ayuda", "/start", "/menu"):
             return (
-                "🤖 *Comandos Disponibles*:\n"
-                "- `/status`: Ver estado y modo operativo del bot\n"
-                "- `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
-                "- `/keys`: Ver estado y cuota del pool de claves de IA\n"
-                "- `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
-                "- `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
-                "- `/conciliacion`: Resumen de 6 piezas fiscales y balance\n"
-                "- `/cedula V12345678`: Consultar titular oficial por cédula\n"
-                "- `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
-                "- `/pause`: Pausar operaciones comerciales\n"
-                "- `/resume`: Reanudar operaciones comerciales\n"
-                "- `/report`: Enlace a reportes fiscales\n"
-                "- `/ayuda`: Mostrar este menú de ayuda"
+                "🤖 *P2P Merchant Bot — Menú de Comandos y Operaciones*:\n\n"
+                "• `/spread`: Monitor de spreads por banco y arbitraje cruzado\n"
+                "• `/bcv`: Consultar cotización oficial BCV y brecha cambiaria\n"
+                "• `/status`: Ver estado y modo operativo del bot\n"
+                "• `/cierre`: Generar y enviar cierre fiscal mensual en Excel\n"
+                "• `/conciliacion`: Resumen de 6 piezas fiscales y balance\n"
+                "• `/sheets`: Sincronizar y obtener enlace de Google Sheets\n"
+                "• `/sheets_compliance`: Expediente de Compliance en Google Sheets\n"
+                "• `/cedula V12345678`: Consultar titular oficial por cédula\n"
+                "• `/guardar_cedula V12345678 NOMBRE`: Registrar identidad local\n"
+                "• `/keys`: Ver estado y cuota del pool de claves de IA\n"
+                "• `/pause` / `/resume`: Control de actividad del bot\n\n"
+                "💡 *Tip*: Puedes tocar directamente los botones interactivos abajo para ejecutar acciones sin escribir."
             )
         else:
             return f"❓ Comando no reconocido: {command}. Usa /ayuda para ver los disponibles."
@@ -536,6 +628,83 @@ class TelegramNotifier:
         lines.append("\n💡 *Regla de Oro*: En VES se requiere un spread ≥ *0.80%* para amortizar comisiones de Binance (0.35%) y bancarias (0.30% Pago Móvil).")
         return "\n".join(lines)
 
+    def _handle_bcv_query(self) -> str:
+        """Procesa /bcv consultando la cotización oficial en vivo y comparando con P2P."""
+        from src.core.spread_monitor import SpreadMonitor
+        from src.reporting.bcv_service import BCVService
+
+        bcv = BCVService()
+        rates = bcv.fetch_full_rates()
+        usd = float(rates.get("usd", 0.0))
+        eur = float(rates.get("eur", 0.0))
+        fecha = str(rates.get("fecha_valor", "Oficial"))
+
+        monitor = SpreadMonitor()
+        quotes = monitor.get_market_quotes()
+        ref_p2p = quotes[0].buy_rate if quotes else usd
+        gap = monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=usd) if usd > 0 else 0.0
+
+        return (
+            f"🏛️ *Cotización Oficial Banco Central de Venezuela (BCV)*\n\n"
+            f"• *USD Oficial*: `{usd:,.2f} VES/USD`\n"
+            f"• *EUR Oficial*: `{eur:,.2f} VES/EUR`\n"
+            f"• *Fecha Valor*: {fecha}\n"
+            f"• *P2P USDT Referencial*: `{ref_p2p:,.2f} VES`\n"
+            f"• *Brecha Cambiaria*: `+{gap:+.2f}%`\n\n"
+            f"💡 La tasa oficial del BCV es la base legal para la valoración de inventario FIFO y cumplimiento tributario ante el SENIAT."
+        )
+
+    def _handle_compliance_sheets_sync(self) -> str:
+        """Sincroniza el expediente de Compliance Bancario (4 pestañas) con Google Sheets."""
+        import os
+        from datetime import UTC, datetime
+
+        from config.settings import Settings
+        from src.data.database import SessionLocal
+        from src.data.models import BankVoucher, Order
+        from src.reporting.sheets_exporter import SheetsExporter
+
+        sheet_id = os.getenv("GOOGLE_SHEET_ID")
+        try:
+            settings = Settings()
+            sheet_id = settings.GOOGLE_SHEET_ID or sheet_id
+        except (ValueError, KeyError, OSError, RuntimeError):
+            pass
+
+        if not sheet_id:
+            return "⚠️ *Google Sheets no está configurado*. Define `GOOGLE_SHEET_ID` en `config/.env`."
+
+        db = SessionLocal()
+        try:
+            orders = db.query(Order).order_by(Order.id.desc()).all()
+            vouchers = db.query(BankVoucher).all()
+            if not orders:
+                return "ℹ️ No hay órdenes registradas para generar el expediente de Compliance."
+
+            exporter = SheetsExporter(credentials_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+            now_str = datetime.now(UTC).strftime("%B %Y")
+            success = exporter.export_compliance_report(
+                sheet_id=sheet_id,
+                orders=orders,
+                vouchers=vouchers,
+                account_holder="COMERCIANTE P2P REGISTRADO",
+                rif="V-00000000-0",
+                period=now_str,
+            )
+            sheet_url = SheetsExporter.get_sheet_url(sheet_id)
+            if success:
+                return (
+                    f"🏛️ *Expediente de Compliance Bancario Sincronizado en Google Sheets*\n\n"
+                    f"• Órdenes auditadas: `{len(orders)}`\n"
+                    f"• Comprobantes vinculados: `{len(vouchers)}`\n"
+                    f"• Pestañas: Certificación, Entradas (Ventas), Salidas (Compras), Traza 1:1.\n\n"
+                    f"🔗 [Abrir en Google Sheets]({sheet_url})"
+                )
+            else:
+                return f"❌ Error exportando Compliance a Google Sheets: {exporter.last_error}"
+        finally:
+            db.close()
+
     def get_file_bytes(self, file_id: str) -> bytes | None:
         """Descarga en memoria volátil los bytes de un archivo o foto de Telegram."""
         try:
@@ -633,7 +802,7 @@ class TelegramQueueDispatcher:
     def __init__(self, notifier: TelegramNotifier, rate_limit_delay: float = 0.5):
         self.notifier = notifier
         self.rate_limit_delay = rate_limit_delay
-        self._queue: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=1000)
+        self._queue: queue.Queue[tuple[str, str | None, dict[str, Any] | None]] = queue.Queue(maxsize=1000)
         self._is_running = False
         self._worker_thread: threading.Thread | None = None
 
@@ -653,16 +822,21 @@ class TelegramQueueDispatcher:
         self._is_running = False
         if self._worker_thread and self._worker_thread.is_alive():
             try:
-                self._queue.put_nowait(("", "__STOP__"))
+                self._queue.put_nowait(("", "__STOP__", None))
             except queue.Full:
                 pass
             self._worker_thread.join(timeout=2.0)
         logger.info("TelegramQueueDispatcher detenido.")
 
-    def queue_alert(self, text: str, chat_id: str | None = None) -> bool:
+    def queue_alert(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
         """Encola un mensaje para ser enviado en segundo plano de forma no bloqueante."""
         try:
-            self._queue.put_nowait((text, chat_id))
+            self._queue.put_nowait((text, chat_id, reply_markup))
             return True
         except queue.Full:
             logger.error("TELEGRAM: Cola de mensajes llena (1000 mensajes). Descartando alerta.")
@@ -682,13 +856,13 @@ class TelegramQueueDispatcher:
             except queue.Empty:
                 continue
 
-            text, chat_id = item
+            text, chat_id, reply_markup = item
             if chat_id == "__STOP__":
                 self._queue.task_done()
                 break
 
             try:
-                self.notifier.send_alert(text, chat_id=chat_id)
+                self.notifier.send_alert(text, chat_id=chat_id, reply_markup=reply_markup)
             except (httpx.RequestError, ValueError, TypeError, OSError) as e:
                 logger.error(f"Error procesando mensaje en cola de Telegram: {e}")
             finally:
@@ -752,6 +926,32 @@ class TelegramCommandPoller:
                 update_id = int(update.get("update_id", 0))
                 self._last_offset = max(self._last_offset, update_id)
 
+                # 1. Manejo de Callback Queries (Botones Inline Interactivos)
+                cb = update.get("callback_query")
+                if cb:
+                    cb_id = str(cb.get("id", ""))
+                    from_user = cb.get("from", {})
+                    user_id = from_user.get("id")
+                    chat_id = str(cb.get("message", {}).get("chat", {}).get("id"))
+                    cb_data = str(cb.get("data", "")).strip()
+
+                    self.notifier.answer_callback_query(cb_id)
+
+                    if not self.notifier.is_user_authorized(user_id):
+                        self.notifier.send_alert(
+                            f"⛔ *Acceso denegado*. Usuario no autorizado.\nTu ID de Telegram es: `{user_id}`.",
+                            chat_id=chat_id,
+                        )
+                    else:
+                        response = self.notifier.handle_command(user_id=user_id, command=cb_data)
+                        self.notifier.send_alert(
+                            response,
+                            chat_id=chat_id,
+                            reply_markup=self.notifier.get_quick_actions_markup(),
+                        )
+                    processed += 1
+                    continue
+
                 msg = update.get("message") or update.get("channel_post")
                 if not msg:
                     continue
@@ -783,7 +983,7 @@ class TelegramCommandPoller:
 
                 text = str(msg.get("text", "")).strip()
 
-                if text.startswith("/"):
+                if text.startswith("/") or text.lower().startswith(("📈", "🏛️", "📊", "📑", "⚖️", "🔄", "❓")):
                     cmd = text.strip().lower()
                     if cmd in ("/keys", "/claves", "/ai_status") and self.ai_agent and hasattr(self.ai_agent, "key_pool"):
                         if not self.notifier.is_user_authorized(user_id):
@@ -800,7 +1000,12 @@ class TelegramCommandPoller:
                         continue
 
                     response = self.notifier.handle_command(user_id=user_id, command=text)
-                    self.notifier.send_alert(response, chat_id=chat_id)
+                    markup = (
+                        self.notifier.get_persistent_menu_markup()
+                        if text.lower().startswith(("/start", "/ayuda", "/menu", "/help"))
+                        else self.notifier.get_quick_actions_markup()
+                    )
+                    self.notifier.send_alert(response, chat_id=chat_id, reply_markup=markup)
                     processed += 1
                 elif text:
                     # Consulta en lenguaje natural

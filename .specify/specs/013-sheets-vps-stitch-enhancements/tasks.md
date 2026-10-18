@@ -39,4 +39,7 @@
 - [x] **T17**: Implementar `IdentityService` en `src/security/identity_service.py` con triple fallback en cascada (Caché local SQLite, SENIAT XML, CNE scraping) y extractor de cédula desde métodos de pago.
 - [x] **T18**: Escribir suite de pruebas unitarias en `tests/unit/test_spread_monitor.py` y `tests/unit/test_arbitrage_matrix.py`.
 - [x] **T19**: Ejecutar suite completa (`pytest`, `ruff`, `mypy`) y documentar en `memory.md`.
+- [x] **T20**: Sincronización del Expediente de Compliance Bancario (4 pestañas auditadas) en Google Sheets (`export_compliance_report`) y comando `/sheets_compliance`.
+- [x] **T21**: Interactividad enriquecida en Telegram Bot API: Inline Keyboards con botones táctiles y callbacks, teclado de respuesta persistente para móviles y registro de menú nativo con `setMyCommands`.
+- [x] **T22**: Servicio de Alertas Proactivas `RateAlertService` para detección inmediata de cambios en tasa oficial BCV y detección de oportunidades de arbitraje interbancario integrado en el motor de ejecución (`main.py`).
 

@@ -282,6 +282,23 @@
     - **Comando `/spread` en Telegram**:
       - Despacho inmediato del resumen de cotizaciones bancarias, arbitraje cruzado y brecha BCV con formato Markdown protegido contra filtraciones.
     - **Calidad y Verificación**: Suite expandida a **99/99 tests pasando al 100%**, Mypy limpio (0 errores en 43 archivos) y Ruff limpio.
+35. **Automatización Interactiva de Telegram, Alertas Proactivas BCV/Spread y Compliance en Google Sheets (ADR 035)**:
+    - **Google Sheets Compliance Exporter (`SheetsExporter.export_compliance_report`)**:
+      - Sincronización completa de las 4 pestañas de auditoría institucional: *Certificación Institucional*, *Entradas*, *Salidas* y *Traza de Conciliación*.
+      - Comando `/sheets_compliance` añadido en Telegram para sincronización bajo demanda y diagnóstico de permisos.
+    - **Interactividad Enriquecida en Telegram Bot API**:
+      - `InlineKeyboardMarkup` con callbacks táctiles en tiempo real para ejecución inmediata de acciones (`/spread`, `/bcv`, `/status`, `/cierre`, `/conciliacion`, `/sheets`, etc.).
+      - Manejo de `callback_query` en `TelegramCommandPoller.poll_once()` con llamada a `answerCallbackQuery` para detener el spinner en la app móvil.
+      - Teclado persistente `ReplyKeyboardMarkup` para accesibilidad rápida desde dispositivos móviles sin necesidad de escribir comandos de texto.
+      - Menú nativo de comandos registrado mediante `set_bot_commands()` (`/setMyCommands`) con descripciones claras.
+    - **Monitoreo Proactivo de Tasa BCV y Alertas de Arbitraje (`RateAlertService`)**:
+      - Detección inmediata de fluctuaciones en la tasa oficial del Banco Central de Venezuela (`check_bcv_rate_change`) con cálculo de variación absoluta y porcentual.
+      - Monitoreo continuo de oportunidades de arbitraje interbancario (`check_spread_opportunities`) con cooldown configurable para evitar spam.
+      - Integración directa en el ciclo de ejecución de `P2PBotEngine` (`src/main.py`), despachando alertas prioritarias en background a través de `TelegramQueueDispatcher`.
+    - **Calidad y Verificación**:
+      - Suite expandida y verificada con **105/105 tests pasando al 100%** (`pytest`).
+      - Tipado estricto `mypy src/` limpio (**0 errores en 44 archivos fuente**).
+      - Linter estático `ruff check .` (**0 errores de estilo e importaciones**).
 
 ---
 
@@ -290,7 +307,7 @@
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
 3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**99/99 tests pasando al 100%**).
+4. **Suite de Pruebas**: `pytest -v tests/` (**105/105 tests pasando al 100%**).
 5. **Comprobación de Calidad de Código**:
-   - `mypy src/ scripts/` (0 errores en 43 archivos fuente).
+   - `mypy src/ scripts/` (0 errores en 44 archivos fuente).
    - `ruff check .` (0 errores de linting).
