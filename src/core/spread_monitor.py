@@ -146,34 +146,41 @@ class SpreadMonitor:
         return sorted(matrix, key=lambda x: x["spread_pct"], reverse=True)
 
     def find_best_cross_arbitrage(self, quotes: list[BankRateQuote]) -> dict[str, Any] | None:
-        """Encuentra la mejor oportunidad de arbitraje interbancario (comprar en banco A y vender en banco B)."""
+        """Encuentra la mejor oportunidad de arbitraje interbancario (comprar en banco A y vender en banco B distinto)."""
         if not quotes or len(quotes) < 2:
             return None
 
-        # El mejor banco para comprar es el que tenga el buy_rate más bajo
-        cheapest_buy = min(quotes, key=lambda q: q.buy_rate)
-        # El mejor banco para vender es el que tenga el sell_rate más alto
-        highest_sell = max(quotes, key=lambda q: q.sell_rate)
+        best_cross: dict[str, Any] | None = None
+        best_spread_pct = -999.0
 
-        spread_ves = round(highest_sell.sell_rate - cheapest_buy.buy_rate, 4)
-        spread_pct = round((spread_ves / cheapest_buy.buy_rate) * 100, 2) if cheapest_buy.buy_rate > 0 else 0.0
+        for q_buy in quotes:
+            for q_sell in quotes:
+                # El arbitraje cruzado requiere entidades o métodos distintos
+                if q_buy.bank_name == q_sell.bank_name or q_buy.buy_rate <= 0:
+                    continue
 
-        calc = self.calculate_cycle_net_profit(
-            crypto_amount=100.0,
-            buy_price=cheapest_buy.buy_rate,
-            sell_price=highest_sell.sell_rate,
-        )
+                spread_ves = round(q_sell.sell_rate - q_buy.buy_rate, 4)
+                spread_pct = round((spread_ves / q_buy.buy_rate) * 100, 2)
 
-        return {
-            "buy_bank": cheapest_buy.bank_name,
-            "buy_rate": cheapest_buy.buy_rate,
-            "sell_bank": highest_sell.bank_name,
-            "sell_rate": highest_sell.sell_rate,
-            "spread_ves": spread_ves,
-            "spread_pct": spread_pct,
-            "net_profit_ves_100u": calc.net_profit_ves,
-            "is_viable": calc.is_viable,
-        }
+                if spread_pct > best_spread_pct:
+                    calc = self.calculate_cycle_net_profit(
+                        crypto_amount=100.0,
+                        buy_price=q_buy.buy_rate,
+                        sell_price=q_sell.sell_rate,
+                    )
+                    best_spread_pct = spread_pct
+                    best_cross = {
+                        "buy_bank": q_buy.bank_name,
+                        "buy_rate": q_buy.buy_rate,
+                        "sell_bank": q_sell.bank_name,
+                        "sell_rate": q_sell.sell_rate,
+                        "spread_ves": spread_ves,
+                        "spread_pct": spread_pct,
+                        "net_profit_ves_100u": calc.net_profit_ves,
+                        "is_viable": calc.is_viable,
+                    }
+
+        return best_cross
 
     def get_market_quotes(self) -> list[BankRateQuote]:
         """Obtiene cotizaciones de mercado en tiempo real o genera instantáneas calibradas."""

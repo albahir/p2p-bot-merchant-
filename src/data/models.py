@@ -4,7 +4,7 @@ Incluye modelos para eventos de seguridad (auditoría append-only), secretos cif
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
 
 from src.data.database import Base
 
@@ -130,5 +130,19 @@ class FiscalPeriodSnapshot(Base):
     net_profit_usd = Column(Float, default=0.0, nullable=False)
     status = Column(String(30), default="BALANCED", nullable=False)  # BALANCED, DISCREPANCY
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
+class User(Base):
+    """Usuario del sistema con control de acceso basado en roles (RBAC)."""
+    __tablename__ = "app_users"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    telegram_id = Column(String(50), unique=True, index=True, nullable=True)
+    role = Column(String(20), default="INVITADO", nullable=False)  # ADMIN, TRADER, INVITADO
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
 
 

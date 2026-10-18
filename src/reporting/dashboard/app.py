@@ -1,14 +1,16 @@
 """Dashboard y Panel de Control (Mission Control) para el Bot P2P Merchant.
-Opera en modo seguro, sin requerir comandos de terminal para tareas operativas comunes.
+Opera en modo seguro con autenticación RBAC y aislamiento estricto de roles.
 """
+
+from typing import Any, cast
 
 import pandas as pd
 import streamlit as st
 
 from src.core.spread_monitor import SpreadMonitor
 from src.data.database import SessionLocal
-from src.data.models import Order, SecurityEvent
-from src.data.repositories import OrderRepository
+from src.data.models import BankVoucher, Order, SecurityEvent
+from src.data.repositories import IdentityRepository, OrderRepository, UserRepository
 from src.reporting.dashboard.components.ai_telemetry import render_ai_telemetry
 from src.reporting.dashboard.components.arbitrage_matrix import (
     render_arbitrage_matrix,
@@ -24,53 +26,53 @@ from src.reporting.dashboard.components.receipt_center import render_receipt_cen
 from src.reporting.dashboard.components.terminal_header import render_terminal_header
 from src.reporting.dashboard.components.test_runner_view import render_test_runner
 from src.reporting.dashboard.theme import apply_stitch_theme
+from src.reporting.dashboard.views.login_view import render_login_view
 from src.reporting.excel_reporter import ExcelReporter
 from src.reporting.tax_engine import FIFOCostMethod, WeightedAverageCostMethod
-
-st.set_page_config(
-    page_title="P2P Merchant Bot — Terminal & Mission Control",
-    page_icon=":material/terminal:",
-    layout="wide",
-)
-
-# Inyectar estilos Stitch Glassmorphism
-apply_stitch_theme(st)
-
-st.title(":material/terminal: P2P Merchant Bot — Terminal Operativa")
-
-# Barra Superior de Telemetría
-render_terminal_header(
-    bot_mode="PRODUCTION",
-    ip_address="Auto-detect",
-    api_weight=120,
-    fail_closed=True,
-    st_module=st,
-)
-
-# Pestañas de navegación de la interfaz
-tab_overview, tab_spread, tab_receipts, tab_reconcile, tab_tax, tab_control, tab_ai, tab_credentials, tab_tests, tab_security = st.tabs([
-    "📊 Visión General",
-    "📈 Monitor & Arbitraje P2P",
-    "🧾 Comprobantes OCR",
-    "⚖️ Reconstrucción 6 Piezas",
-    "📑 Motor Fiscal (ISLR)",
-    "🕹️ Panel de Tareas",
-    "🤖 Telemetría IA",
-    "🔑 Credenciales",
-    "🧪 Suite de Tests",
-    "🛡️ Auditoría",
-])
+from src.security.identity_service import IdentityService
 
 
-# 1. Visión General de Órdenes y KPIs
-with tab_overview:
+def get_visible_tabs_for_role(role: str) -> list[str]:
+    """Retorna la lista de pestañas visibles en el Dashboard según el rol del usuario."""
+    r = str(role).strip().upper()
+    if r == "INVITADO":
+        return ["📈 Monitor & Arbitraje P2P"]
+    elif r == "TRADER":
+        return [
+            "📊 Visión General",
+            "📈 Monitor & Arbitraje P2P",
+            "👤 Directorio Cédulas",
+            "🧾 Comprobantes OCR",
+            "⚖️ Reconstrucción 6 Piezas",
+            "📑 Motor Fiscal (ISLR)",
+            "🤖 Telemetría IA",
+            "🧪 Suite de Tests",
+            "🛡️ Auditoría",
+        ]
+    else:  # ADMIN
+        return [
+            "📊 Visión General",
+            "📈 Monitor & Arbitraje P2P",
+            "👤 Directorio Cédulas",
+            "🧾 Comprobantes OCR",
+            "⚖️ Reconstrucción 6 Piezas",
+            "📑 Motor Fiscal (ISLR)",
+            "🕹️ Panel de Tareas",
+            "🤖 Telemetría IA",
+            "🔑 Credenciales",
+            "🧪 Suite de Tests",
+            "🛡️ Auditoría",
+        ]
+
+
+def render_overview_tab() -> None:
+    """1. Visión General de Órdenes y KPIs."""
     st.subheader(":material/monitoring: Métricas Operativas de la Terminal")
     db = SessionLocal()
     try:
         repo = OrderRepository(db)
         completed_orders = repo.list_completed()
         all_orders = db.query(Order).order_by(Order.id.desc()).limit(100).all()
-
 
         if not all_orders:
             st.info("No hay órdenes registradas en el sistema. Ejecuta una sincronización o simulación desde el Panel de Tareas.")
@@ -82,7 +84,6 @@ with tab_overview:
                 profit_ves = sum(r.net_profit_fiat for r in results)
                 profit_usd = sum(r.net_profit_usd for r in results)
 
-                from src.data.models import BankVoucher
                 vouchers = db.query(BankVoucher).all()
                 tot_v = len(vouchers)
                 mat_v = sum(1 for v in vouchers if v.verification_status == "MATCHED")
@@ -123,14 +124,14 @@ with tab_overview:
     finally:
         db.close()
 
-# 2. Monitor de Spreads Bancarios y Calculadora Maker
-with tab_spread:
+
+def render_spread_tab() -> None:
+    """2. Monitor de Spreads Bancarios y Calculadora Maker."""
     monitor = SpreadMonitor()
     market_quotes = monitor.get_market_quotes()
     bcv_rate = 820.0
     db = SessionLocal()
     try:
-        from typing import Any, cast
         latest_order = db.query(Order).filter(cast(Any, Order.bcv_rate > 0)).order_by(Order.id.desc()).first()
         if latest_order and latest_order.bcv_rate:
             bcv_rate = float(latest_order.bcv_rate)
@@ -144,8 +145,72 @@ with tab_spread:
     st.divider()
     render_maker_calculator(st_module=st)
 
-# 3. Centro de Comprobantes Bancarios OCR
-with tab_receipts:
+
+def render_identity_tab() -> None:
+    """Directorio y Verificación Oficial de Cédulas (MetaP2P + Base de Datos Permanente)."""
+    st.subheader(":material/badge: Directorio y Verificación de Cédulas")
+    st.caption("Verificación de identidades oficiales en MetaP2P y almacenamiento permanente para debida diligencia.")
+
+    db = SessionLocal()
+    try:
+        service = IdentityService(db=db)
+        repo = IdentityRepository(db)
+
+        st.markdown("##### 🔍 Consultar Titular Oficial")
+        col_in, col_btn = st.columns([3, 1])
+        with col_in:
+            query_cedula = st.text_input(
+                "Documento de Identidad (V / E / J):",
+                placeholder="Ej: V12345678, E-81234567 o 12345678",
+                key="id_lookup_input",
+                label_visibility="collapsed",
+            )
+        with col_btn:
+            search_btn = st.button("🔎 Consultar", type="primary", use_container_width=True)
+
+        if search_btn and query_cedula.strip():
+            with st.spinner("Consultando MetaP2P y Base de Datos..."):
+                res = service.resolve_identity(query_cedula.strip())
+                if res.get("full_name"):
+                    st.success(f"✅ Titular Oficial: **{res['full_name']}**")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Documento", f"{res.get('nationality', 'V')}-{res.get('cedula', '')}")
+                    m2.metric("Fuente", res.get("source", "MetaP2P"))
+                    m3.metric("Almacenamiento", "💾 Guardado Permanente")
+                else:
+                    st.error(f"❌ {res.get('error', 'Cédula no localizada en MetaP2P ni en base de datos local')}")
+
+        st.divider()
+        st.markdown("##### 📇 Directorio Permanente de Cédulas Registradas")
+
+        filtro = st.text_input("Filtrar por nombre o cédula:", placeholder="Escribe para buscar...", key="filter_cedulas_input")
+        if filtro.strip():
+            records = repo.search(filtro.strip())
+        else:
+            records = repo.list_all()
+
+        st.caption(f"Total registros permanentes en base de datos: **{len(records)}**")
+        if records:
+            data = [
+                {
+                    "ID": r.id,
+                    "Nacionalidad": r.nationality,
+                    "Cédula": r.cedula,
+                    "Nombre Completo": r.full_name,
+                    "Fuente": r.source,
+                    "Fecha Registro": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "-",
+                }
+                for r in records
+            ]
+            st.dataframe(pd.DataFrame(data), width="stretch")
+        else:
+            st.info("No hay identidades registradas en el directorio permanente.")
+    finally:
+        db.close()
+
+
+def render_receipts_tab() -> None:
+    """3. Centro de Comprobantes Bancarios OCR."""
     db = SessionLocal()
     try:
         render_receipt_center(db=db)
@@ -153,8 +218,13 @@ with tab_receipts:
         db.close()
 
 
-# 4. Motor Fiscal con Descarga Directa
-with tab_tax:
+def render_reconcile_tab() -> None:
+    """4. Reconstrucción Contable de 6 Piezas y Consistencia."""
+    render_fiscal_reconstruction()
+
+
+def render_tax_tab() -> None:
+    """5. Motor Fiscal con Descarga Directa."""
     st.subheader(":material/calculate: Cálculo y Declaración Fiscal")
     method_choice = st.segmented_control("Método Contable:", ["FIFO", "Costo Promedio Ponderado"], default="FIFO")
 
@@ -180,7 +250,7 @@ with tab_tax:
                         "Comisión (VES)": f"{r.fee_fiat:,.2f} Bs.",
                         "Ganancia Neta (VES)": f"{r.net_profit_fiat:,.2f} Bs.",
                         "Tasa BCV Oficial": f"{r.bcv_rate:,.2f}",
-                        "Ganancia Neta (USD)": f"${r.net_profit_usd:,.2f}"
+                        "Ganancia Neta (USD)": f"${r.net_profit_usd:,.2f}",
                     }
                     for r in tax_results
                 ]
@@ -197,11 +267,10 @@ with tab_tax:
                             data=f.read(),
                             file_name="reporte_fiscal_p2p.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            width="stretch"
+                            width="stretch",
                         )
 
                 with col_dl2:
-                    from src.data.models import BankVoucher
                     all_vouchers = db.query(BankVoucher).all()
                     compliance_file = "certificacion_origen_fondos.xlsx"
                     ExcelReporter.generate_compliance_report(
@@ -251,29 +320,53 @@ with tab_tax:
     finally:
         db.close()
 
-# 3. Reconstrucción Contable de 6 Piezas y Consistencia
-with tab_reconcile:
-    render_fiscal_reconstruction()
 
-# 5. Panel de Control de Tareas Operativas
-with tab_control:
+def render_control_tab() -> None:
+    """6. Panel de Control de Tareas Operativas."""
     render_control_actions()
 
-# 6. Telemetría del Pool de Claves de IA (Gemini Vision)
-with tab_ai:
+
+def render_ai_tab() -> None:
+    """7. Telemetría del Pool de Claves de IA (Gemini Vision)."""
     render_ai_telemetry()
 
-# 7. Gestor de Credenciales Cifradas
-with tab_credentials:
+
+def render_credentials_tab() -> None:
+    """8. Gestor de Credenciales Cifradas y Usuarios del Sistema."""
     render_credential_manager()
 
-# 8. Suite de Tests Automatizados
-with tab_tests:
+    st.write("---")
+    st.subheader(":material/group: Gestión de Usuarios y Roles (RBAC)")
+    db = SessionLocal()
+    try:
+        user_repo = UserRepository(db)
+        users = user_repo.list_all()
+        if not users:
+            st.info("No hay usuarios registrados en el sistema.")
+        else:
+            users_data = [
+                {
+                    "ID": u.id,
+                    "Usuario": u.username,
+                    "Rol": u.role,
+                    "Telegram ID": u.telegram_id or "-",
+                    "Estado": "🟢 Activo" if u.is_active else "🔴 Inactivo",
+                    "Fecha Creación": u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "-",
+                }
+                for u in users
+            ]
+            st.dataframe(pd.DataFrame(users_data), width="stretch")
+    finally:
+        db.close()
+
+
+def render_tests_tab() -> None:
+    """9. Suite de Tests Automatizados."""
     render_test_runner()
 
 
-# 6. Auditoría de Seguridad (SHA-256)
-with tab_security:
+def render_security_tab() -> None:
+    """10. Auditoría de Seguridad (SHA-256)."""
     st.subheader(":material/security: Eventos de Auditoría (Append-Only SHA-256)")
     db = SessionLocal()
     try:
@@ -289,10 +382,87 @@ with tab_security:
                     "Identificador": e.key_identifier,
                     "IP": e.ip_address,
                     "Estado": e.status,
-                    "Hash Evento": e.event_hash[:16] + "..."
+                    "Hash Evento": e.event_hash[:16] + "...",
                 }
                 for e in events
             ]
             st.dataframe(pd.DataFrame(events_data), width="stretch")
     finally:
         db.close()
+
+
+# =========================================================================
+# CONFIGURACIÓN Y PUNTO DE ENTRADA DEL DASHBOARD
+# =========================================================================
+
+st.set_page_config(
+    page_title="P2P Merchant Bot — Terminal & Mission Control",
+    page_icon=":material/terminal:",
+    layout="wide",
+)
+
+# Inyectar estilos Stitch Glassmorphism
+apply_stitch_theme(st)
+
+# Control de Autenticación Fail-Closed
+if not st.session_state.get("authenticated", False):
+    render_login_view()
+    st.stop()
+
+# Usuario autenticado
+active_role = str(st.session_state.get("role", "INVITADO")).upper()
+active_username = str(st.session_state.get("username", "Operador"))
+
+# Barra lateral de perfil y control de sesión
+with st.sidebar:
+    badge_class = "badge-matched" if active_role == "ADMIN" else "badge-unmatched" if active_role == "TRADER" else "badge-warning"
+    st.markdown(
+        f"""
+        <div class="fintech-card" style="padding: 0.85rem; margin-bottom: 1rem;">
+            <div style="font-size: 0.72rem; color: #8B949E; text-transform: uppercase; font-weight: 600;">Operador Activo</div>
+            <div style="font-size: 1.05rem; font-weight: 700; color: #F0F6FC; margin: 0.2rem 0;">👤 {active_username}</div>
+            <span class="badge-pill {badge_class}">{active_role}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("🚪 Cerrar Sesión", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+
+st.title(":material/terminal: P2P Merchant Bot — Terminal Operativa")
+
+# Barra Superior de Telemetría
+render_terminal_header(
+    bot_mode="PRODUCTION",
+    ip_address="Auto-detect",
+    api_weight=120,
+    fail_closed=True,
+    st_module=st,
+)
+
+# Mapeo de renderers por nombre de pestaña
+TAB_RENDERERS: dict[str, Any] = {
+    "📊 Visión General": render_overview_tab,
+    "📈 Monitor & Arbitraje P2P": render_spread_tab,
+    "👤 Directorio Cédulas": render_identity_tab,
+    "🧾 Comprobantes OCR": render_receipts_tab,
+    "⚖️ Reconstrucción 6 Piezas": render_reconcile_tab,
+    "📑 Motor Fiscal (ISLR)": render_tax_tab,
+    "🕹️ Panel de Tareas": render_control_tab,
+    "🤖 Telemetría IA": render_ai_tab,
+    "🔑 Credenciales": render_credentials_tab,
+    "🧪 Suite de Tests": render_tests_tab,
+    "🛡️ Auditoría": render_security_tab,
+}
+
+visible_tab_names = get_visible_tabs_for_role(active_role)
+tabs = st.tabs(visible_tab_names)
+
+for tab_name, tab_obj in zip(visible_tab_names, tabs):
+    with tab_obj:
+        if active_role == "INVITADO" and tab_name == "📈 Monitor & Arbitraje P2P":
+            st.info("👁️ **Modo Invitado**: Visualización exclusiva de monitoreo de spreads y cotizaciones de mercado en tiempo real. Los libros de órdenes y datos contables están protegidos.")
+        renderer = TAB_RENDERERS.get(tab_name)
+        if renderer:
+            renderer()

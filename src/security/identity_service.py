@@ -19,8 +19,6 @@ import httpx
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from src.data.models import IdentityCache
-
 logger = logging.getLogger("identity_service")
 
 # Expresiones regulares para extracción de cédulas venezolanas
@@ -90,10 +88,19 @@ class IdentityService:
         http_client: httpx.Client | None = None,
         verifik_api_key: str | None = None,
         didit_api_key: str | None = None,
+        metap2p_client: Any = None,
     ):
         self.db = db
         self.verifik_api_key = verifik_api_key or os.getenv("VERIFIK_API_KEY")
         self.didit_api_key = didit_api_key or os.getenv("DIDIT_API_KEY")
+        self.metap2p_client: Any = metap2p_client
+        if self.metap2p_client is None:
+            try:
+                from src.integrations.metap2p_client import MetaP2PClient
+                self.metap2p_client = MetaP2PClient()
+            except (ImportError, OSError, ValueError, KeyError):
+                self.metap2p_client = None
+
         self._client = http_client or httpx.Client(
             timeout=8.0,
             headers={
@@ -106,15 +113,13 @@ class IdentityService:
         )
 
     def lookup_cache(self, nationality: str, cedula: str) -> IdentityInfo | None:
-        """Método 1: Búsqueda en base de datos local / caché de contrapartes verificadas (0 ms)."""
+        """Método 1: Búsqueda en base de datos local permanente de identidades (0 ms)."""
         if not self.db:
             return None
         try:
-            cached = (
-                self.db.query(IdentityCache)
-                .filter(IdentityCache.nationality == nationality.upper(), IdentityCache.cedula == cedula)
-                .first()
-            )
+            from src.data.repositories import IdentityRepository
+            repo = IdentityRepository(self.db)
+            cached = repo.get_by_cedula(nationality, cedula)
             if cached:
                 return IdentityInfo(
                     nationality=str(cached.nationality),
@@ -124,7 +129,7 @@ class IdentityService:
                     is_valid=True,
                 )
         except SQLAlchemyError as e:
-            logger.warning(f"Error consultando caché de identidades: {e}")
+            logger.warning(f"Error consultando base de datos de identidades: {e}")
         return None
 
     def lookup_from_vouchers(self, nationality: str, cedula: str) -> IdentityInfo | None:
@@ -159,30 +164,20 @@ class IdentityService:
         return None
 
     def save_to_cache(self, nationality: str, cedula: str, full_name: str, source: str) -> None:
-
-        """Guarda una identidad legítimamente verificada en la caché local."""
+        """Guarda de forma permanente una identidad verificada en la base de datos."""
         if not self.db:
             return
         try:
-            record = (
-                self.db.query(IdentityCache)
-                .filter(IdentityCache.nationality == nationality.upper(), IdentityCache.cedula == cedula)
-                .first()
+            from src.data.repositories import IdentityRepository
+            repo = IdentityRepository(self.db)
+            repo.upsert(
+                nationality=nationality,
+                cedula=cedula,
+                full_name=full_name,
+                source=source,
             )
-            if not record:
-                record = IdentityCache(
-                    nationality=nationality.upper(),
-                    cedula=cedula,
-                    full_name=full_name.strip().upper(),
-                    source=source,
-                )
-                self.db.add(record)
-            else:
-                record.full_name = full_name.strip().upper()  # type: ignore[assignment]
-                record.source = source  # type: ignore[assignment]
-            self.db.commit()
         except SQLAlchemyError as e:
-            logger.warning(f"No se pudo persistir en caché de identidades: {e}")
+            logger.warning(f"No se pudo persistir en base de datos de identidades: {e}")
             self.db.rollback()
 
     def _lookup_verifik(self, nationality: str, cedula: str) -> str | None:
@@ -309,6 +304,17 @@ class IdentityService:
             logger.info(f"Identidad {clean_nat}-{clean_cedula} resuelta desde histórico de comprobantes bancarios.")
             return from_voucher
 
+        # 1c. MetaP2P API (Buscador C2C especializado)
+        if self.metap2p_client:
+            try:
+                meta_res = self.metap2p_client.search_dni(clean_cedula)
+                if meta_res and meta_res.is_valid and meta_res.full_name:
+                    logger.info(f"Identidad {clean_nat}-{clean_cedula} verificada exitosamente vía MetaP2P API.")
+                    self.save_to_cache(meta_res.nationality or clean_nat, clean_cedula, meta_res.full_name, source="METAP2P")
+                    return meta_res
+            except (ValueError, KeyError, OSError, RuntimeError) as e:
+                logger.warning(f"Error consultando MetaP2P API para {clean_cedula}: {e}")
+
         # 2. Verifik KYC API (Proveedor regulado LATAM)
         name_verifik = self._lookup_verifik(clean_nat, clean_cedula)
         if name_verifik:
@@ -374,5 +380,35 @@ class IdentityService:
                 "Puedes registrar la identidad localmente con `/guardar_cedula V12345678 NOMBRE` o subir una foto del comprobante bancario."
             ),
         )
+
+    def resolve_identity(self, raw_input: str) -> dict[str, Any]:
+        """Extrae la cédula desde cualquier formato de texto y resuelve la identidad con fallback."""
+        extracted = extract_cedula_from_payment_details(raw_input)
+        if not extracted:
+            clean_digits = re.sub(r"\D", "", raw_input)
+            if not clean_digits or len(clean_digits) < 5:
+                return {
+                    "nationality": "V",
+                    "cedula": raw_input,
+                    "full_name": "",
+                    "source": "NONE",
+                    "is_valid": False,
+                    "error": "No se pudo reconocer un número de cédula válido.",
+                }
+            nat = "E" if raw_input.strip().upper().startswith("E") else "V"
+            num = clean_digits
+        else:
+            nat, num = extracted
+
+        info = self.lookup(nationality=nat, cedula=num)
+        return {
+            "nationality": info.nationality,
+            "cedula": info.cedula,
+            "full_name": info.full_name,
+            "source": info.source,
+            "is_valid": info.is_valid,
+            "error": info.error_message or "",
+        }
+
 
 

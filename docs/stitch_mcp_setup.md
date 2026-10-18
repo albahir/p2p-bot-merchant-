@@ -5,33 +5,29 @@ Google Stitch (`stitch.withgoogle.com`) es la plataforma de diseño y prototipad
 
 ---
 
-## 2. Configuración del Servidor MCP de Stitch
+## 2. Servidor MCP y Arquitectura Autónoma
 
-El servidor MCP de Stitch se encuentra registrado en el archivo de configuración global de Gemini/Antigravity:
-`C:\Users\jonan\.gemini\config\mcp_config.json`
+Google Stitch (`stitch.withgoogle.com`) no cuenta con un paquete oficial de npm bajo el nombre `@google/stitch-mcp` (intentar invocarlo produce `HTTP 404 Not Found`). Los paquetes comunitarios existentes (como `stitch-mcp` o `@_davideast/stitch-mcp`) requieren credenciales de Google Cloud (`gcloud auth application-default login`) y un proyecto habilitado.
 
+### Arquitectura Autónoma y Resiliente (Constitución Fail-Closed):
+Para evitar depender de procesos Node.js externos o de servidores MCP de terceros que puedan fallar por falta de red o cambios de API, **el bot integra de forma nativa los tokens de diseño y componentes de Stitch en Python**:
+- Todos los estilos, variables CSS y paleta Obsidian Fintech están compilados localmente en [`src/reporting/dashboard/theme.py`](file:///c:/p2p-bot-merchant/src/reporting/dashboard/theme.py).
+- No es necesario mantener un servidor MCP de Stitch activo en `mcp_config.json` para ejecutar el Dashboard o el bot.
+
+Si en el futuro deseas conectar un servidor MCP comunitario de Stitch:
 ```json
 {
   "mcpServers": {
     "stitch": {
-      "command": "C:\\p2p-bot-merchant\\.bin\\nodejs\\npx.cmd",
-      "args": [
-        "-y",
-        "@google/stitch-mcp"
-      ],
+      "command": "npx",
+      "args": ["-y", "stitch-mcp"],
       "env": {
-        "STITCH_API_KEY": "TU_API_KEY_DE_STITCH"
+        "GOOGLE_CLOUD_PROJECT": "TU_PROJECT_ID"
       }
     }
   }
 }
 ```
-
-### Pasos para Configurar tu Clave de Stitch:
-1. Accede a [Google Stitch](https://stitch.withgoogle.com) con tu cuenta de Google Cloud / Workspace.
-2. Ve a **Settings / Integrations / Developer API**.
-3. Genera una **Stitch API Key**.
-4. Coloca la clave en la variable de entorno `STITCH_API_KEY` dentro de `mcp_config.json` o en tu entorno de sistema.
 
 ---
 
