@@ -29,7 +29,9 @@ CEDULA_PATTERNS = [
 
 
 def extract_cedula_from_payment_details(details: str | dict[str, Any]) -> tuple[str, str] | None:
-    """Extrae la nacionalidad (V o E) y el número de cédula desde un texto o estructura de datos bancarios."""
+    """Extrae y normaliza la nacionalidad (V, E o J) y el número de cédula desde cualquier formato.
+    Acepta: '12345678', 'v12345678', 'V-12.345.678', 'CI: 12345678', 'E 82.123.456', etc.
+    """
     if isinstance(details, dict):
         for key in ("identification", "idNumber", "cedula", "ci", "account", "memo", "fields"):
             val = details.get(key)
@@ -39,27 +41,33 @@ def extract_cedula_from_payment_details(details: str | dict[str, Any]) -> tuple[
                     return extracted
         return extract_cedula_from_payment_details(str(details))
 
-    text = str(details).strip()
-    # Eliminar puntos entre dígitos (ej. 19.876.543 -> 19876543)
-    normalized_text = re.sub(r"(?<=\d)\.(?=\d)", "", text)
-    for pattern in CEDULA_PATTERNS:
-        match = pattern.search(normalized_text)
-        if match:
-            groups = match.groups()
-            if len(groups) == 2 and groups[0] and groups[1]:
-                nat = groups[0].upper()
-                clean_num = re.sub(r"\D", "", groups[1])
-                if 6 <= len(clean_num) <= 9:
-                    return (nat, clean_num)
-            elif len(groups) == 2 and groups[1]:
-                nat = groups[0].upper() if groups[0] else "V"
-                clean_num = re.sub(r"\D", "", groups[1])
-                if 6 <= len(clean_num) <= 9:
-                    return (nat, clean_num)
-            elif len(groups) == 1 and groups[0]:
-                clean_num = re.sub(r"\D", "", groups[0])
-                if 6 <= len(clean_num) <= 9:
-                    return ("V", clean_num)
+    text = details.strip()
+    if not text:
+        return None
+
+    # Normalización: eliminar puntos entre dígitos (ej. 19.876.543 -> 19876543)
+    clean_text = re.sub(r"(?<=\d)\.(?=\d)", "", text)
+
+    # 1. Búsqueda con prefijos de nacionalidad explícitos (V, E o J)
+    prefix_match = re.search(r"(?i)\b([VEJ])[-.\s:]*([0-9]{5,10})\b", clean_text)
+    if prefix_match:
+        nat = prefix_match.group(1).upper()
+        num = prefix_match.group(2)
+        return (nat, num)
+
+    # 2. Búsqueda con etiquetas comunes (CI, CÉDULA, RIF, DNI)
+    label_match = re.search(r"(?i)(?:ci|c\.i|cedula|identificacion|rif|dni)[:\s-]*([VEJ])?[-.\s:]*([0-9]{5,10})\b", clean_text)
+    if label_match:
+        nat = label_match.group(1).upper() if label_match.group(1) else "V"
+        num = label_match.group(2)
+        return (nat, num)
+
+    # 3. Solo dígitos puros (5 a 9 dígitos) -> asume nacionalidad V por defecto
+    digits = re.sub(r"\D", "", clean_text)
+    if 5 <= len(digits) <= 10:
+        # Si el texto original contenía una 'E' o 'J' al inicio
+        nat = "E" if clean_text.upper().startswith("E") else ("J" if clean_text.upper().startswith("J") else "V")
+        return (nat, digits)
 
     return None
 
@@ -82,24 +90,28 @@ class IdentityService:
     SENIAT_URL = "http://contribuyente.seniat.gob.ve/getContribuyente/getrif"
     CNE_URL = "http://www.cne.gob.ve/web/registro_electoral/ce.php"
 
+    _DEFAULT: Any = object()
+
     def __init__(
         self,
         db: Session | None = None,
         http_client: httpx.Client | None = None,
         verifik_api_key: str | None = None,
         didit_api_key: str | None = None,
-        metap2p_client: Any = None,
+        metap2p_client: Any = _DEFAULT,
     ):
         self.db = db
         self.verifik_api_key = verifik_api_key or os.getenv("VERIFIK_API_KEY")
         self.didit_api_key = didit_api_key or os.getenv("DIDIT_API_KEY")
-        self.metap2p_client: Any = metap2p_client
-        if self.metap2p_client is None:
+        self.metap2p_client: Any = None
+        if metap2p_client is self._DEFAULT:
             try:
                 from src.integrations.metap2p_client import MetaP2PClient
                 self.metap2p_client = MetaP2PClient()
             except (ImportError, OSError, ValueError, KeyError):
                 self.metap2p_client = None
+        else:
+            self.metap2p_client = metap2p_client
 
         self._client = http_client or httpx.Client(
             timeout=8.0,
@@ -151,11 +163,12 @@ class IdentityService:
                 v_clean = re.sub(r"\D", "", v_sender_id)
                 if v_clean == clean_num and v.sender_name:
                     nat = "E" if "E" in v_sender_id.upper()[:2] else nationality.upper()
-                    self.save_to_cache(nat, clean_num, v.sender_name, source="BANK_VOUCHER")
+                    sender_name_str = str(v.sender_name).strip().upper()
+                    self.save_to_cache(nat, clean_num, sender_name_str, source="BANK_VOUCHER")
                     return IdentityInfo(
                         nationality=nat,
                         cedula=clean_num,
-                        full_name=str(v.sender_name).strip().upper(),
+                        full_name=sender_name_str,
                         source="BANK_VOUCHER",
                         is_valid=True,
                     )
@@ -163,7 +176,14 @@ class IdentityService:
             logger.warning(f"Error consultando comprobantes para identidad: {e}")
         return None
 
-    def save_to_cache(self, nationality: str, cedula: str, full_name: str, source: str) -> None:
+    def save_to_cache(
+        self,
+        nationality: str,
+        cedula: str,
+        full_name: str,
+        source: str,
+        queried_by: str | None = None,
+    ) -> None:
         """Guarda de forma permanente una identidad verificada en la base de datos."""
         if not self.db:
             return
@@ -175,6 +195,7 @@ class IdentityService:
                 cedula=cedula,
                 full_name=full_name,
                 source=source,
+                queried_by=queried_by,
             )
         except SQLAlchemyError as e:
             logger.warning(f"No se pudo persistir en base de datos de identidades: {e}")
@@ -275,7 +296,12 @@ class IdentityService:
             logger.warning(f"Fallo en consulta CNE para {nationality}-{cedula}: {e}")
         return None
 
-    def lookup(self, nationality: str = "V", cedula: str = "") -> IdentityInfo:
+    def lookup(
+        self,
+        nationality: str = "V",
+        cedula: str = "",
+        queried_by: str | None = None,
+    ) -> IdentityInfo:
         """Ejecuta la consulta con verificación legal y fallback en cascada.
         (Caché Local -> Verifik KYC -> Didit KYC -> SENIAT XML -> CNE Oficial)
         """
@@ -310,7 +336,7 @@ class IdentityService:
                 meta_res = self.metap2p_client.search_dni(clean_cedula)
                 if meta_res and meta_res.is_valid and meta_res.full_name:
                     logger.info(f"Identidad {clean_nat}-{clean_cedula} verificada exitosamente vía MetaP2P API.")
-                    self.save_to_cache(meta_res.nationality or clean_nat, clean_cedula, meta_res.full_name, source="METAP2P")
+                    self.save_to_cache(meta_res.nationality or clean_nat, clean_cedula, meta_res.full_name, source="METAP2P", queried_by=queried_by)
                     return meta_res
             except (ValueError, KeyError, OSError, RuntimeError) as e:
                 logger.warning(f"Error consultando MetaP2P API para {clean_cedula}: {e}")
@@ -319,7 +345,7 @@ class IdentityService:
         name_verifik = self._lookup_verifik(clean_nat, clean_cedula)
         if name_verifik:
             logger.info(f"Identidad {clean_nat}-{clean_cedula} verificada exitosamente vía Verifik KYC.")
-            self.save_to_cache(clean_nat, clean_cedula, name_verifik, source="VERIFIK")
+            self.save_to_cache(clean_nat, clean_cedula, name_verifik, source="VERIFIK", queried_by=queried_by)
             return IdentityInfo(
                 nationality=clean_nat,
                 cedula=clean_cedula,
@@ -332,7 +358,7 @@ class IdentityService:
         name_didit = self._lookup_didit(clean_nat, clean_cedula)
         if name_didit:
             logger.info(f"Identidad {clean_nat}-{clean_cedula} verificada exitosamente vía Didit KYC.")
-            self.save_to_cache(clean_nat, clean_cedula, name_didit, source="DIDIT")
+            self.save_to_cache(clean_nat, clean_cedula, name_didit, source="DIDIT", queried_by=queried_by)
             return IdentityInfo(
                 nationality=clean_nat,
                 cedula=clean_cedula,
@@ -345,7 +371,7 @@ class IdentityService:
         name_seniat = self._lookup_seniat(clean_nat, clean_cedula)
         if name_seniat:
             logger.info(f"Identidad {clean_nat}-{clean_cedula} resuelta vía portal fiscal SENIAT.")
-            self.save_to_cache(clean_nat, clean_cedula, name_seniat, source="SENIAT")
+            self.save_to_cache(clean_nat, clean_cedula, name_seniat, source="SENIAT", queried_by=queried_by)
             return IdentityInfo(
                 nationality=clean_nat,
                 cedula=clean_cedula,
@@ -358,7 +384,7 @@ class IdentityService:
         name_cne = self._lookup_cne(clean_nat, clean_cedula)
         if name_cne:
             logger.info(f"Identidad {clean_nat}-{clean_cedula} resuelta vía CNE.")
-            self.save_to_cache(clean_nat, clean_cedula, name_cne, source="CNE")
+            self.save_to_cache(clean_nat, clean_cedula, name_cne, source="CNE", queried_by=queried_by)
             return IdentityInfo(
                 nationality=clean_nat,
                 cedula=clean_cedula,
@@ -367,21 +393,18 @@ class IdentityService:
                 is_valid=True,
             )
 
-        # Si todos los métodos fallan (SENIAT/CNE caídos o inaccesibles)
-        logger.warning(f"Identidad {clean_nat}-{clean_cedula} no pudo resolverse en línea (portales públicos caídos o bloqueados).")
+        # Si todos los métodos fallan (identidad no localizada o portales no disponibles)
+        logger.warning(f"Identidad {clean_nat}-{clean_cedula} no pudo resolverse.")
         return IdentityInfo(
             nationality=clean_nat,
             cedula=clean_cedula,
             full_name="",
             source="NONE",
             is_valid=False,
-            error_message=(
-                "No se pudo verificar la identidad a través de portales en línea (SENIAT y CNE inactivos o bloqueando consultas). "
-                "Puedes registrar la identidad localmente con `/guardar_cedula V12345678 NOMBRE` o subir una foto del comprobante bancario."
-            ),
+            error_message="Documento de identidad no localizado o no registrado.",
         )
 
-    def resolve_identity(self, raw_input: str) -> dict[str, Any]:
+    def resolve_identity(self, raw_input: str, queried_by: str | None = None) -> dict[str, Any]:
         """Extrae la cédula desde cualquier formato de texto y resuelve la identidad con fallback."""
         extracted = extract_cedula_from_payment_details(raw_input)
         if not extracted:
@@ -400,7 +423,7 @@ class IdentityService:
         else:
             nat, num = extracted
 
-        info = self.lookup(nationality=nat, cedula=num)
+        info = self.lookup(nationality=nat, cedula=num, queried_by=queried_by)
         return {
             "nationality": info.nationality,
             "cedula": info.cedula,

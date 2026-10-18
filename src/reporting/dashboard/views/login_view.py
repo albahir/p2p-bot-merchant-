@@ -31,7 +31,9 @@ def render_login_view() -> None:
             unsafe_allow_html=True,
         )
 
-        with st.form("login_form", clear_on_submit=False):
+        login_tab, register_tab = st.tabs(["🔑 Iniciar Sesión", "📝 Registro de Trader"])
+
+        with login_tab, st.form("login_form", clear_on_submit=False):
             st.markdown(
                 f"<div style='color: {STITCH_TOKENS['text_secondary']}; font-size: 0.82rem; font-weight: 600; text-transform: uppercase; margin-bottom: 0.5rem;'>Autenticación de Operador</div>",
                 unsafe_allow_html=True,
@@ -65,11 +67,54 @@ def render_login_view() -> None:
                     finally:
                         db.close()
 
-        with st.expander("ℹ️ Primer acceso y registro"):
+        with register_tab:
+            st.markdown(
+                f"<div style='color: {STITCH_TOKENS['text_secondary']}; font-size: 0.82rem; font-weight: 600; text-transform: uppercase; margin-bottom: 0.5rem;'>Registro para Nuevos Traders</div>",
+                unsafe_allow_html=True,
+            )
+            with st.form("trader_register_form", clear_on_submit=True):
+                new_user = st.text_input("Nombre de Usuario deseado", placeholder="Ej: trader_p2p")
+                new_tg = st.text_input("ID o Usuario de Telegram (opcional)", placeholder="Ej: 6326947793 o @usuario")
+                new_pass = st.text_input("Contraseña", type="password", placeholder="Mínimo 6 caracteres")
+                confirm_pass = st.text_input("Confirmar Contraseña", type="password", placeholder="Repite la contraseña")
+                reg_submitted = st.form_submit_button("📝 Solicitar Registro como Trader", use_container_width=True)
+
+                if reg_submitted:
+                    if not new_user.strip() or not new_pass.strip():
+                        st.warning("Por favor completa el usuario y la contraseña.")
+                    elif len(new_pass.strip()) < 6:
+                        st.warning("La contraseña debe tener al menos 6 caracteres.")
+                    elif new_pass != confirm_pass:
+                        st.error("Las contraseñas no coinciden.")
+                    else:
+                        db = SessionLocal()
+                        try:
+                            from src.data.repositories import UserRepository
+                            repo = UserRepository(db)
+                            existing = repo.get_by_username(new_user.strip())
+                            if existing:
+                                st.error("⚠️ Este nombre de usuario ya está registrado.")
+                            else:
+                                pass_hash = AuthService.hash_password(new_pass.strip())
+                                # Por seguridad, los nuevos traders registrados vía web se crean activos con rol TRADER
+                                created = repo.create_user(
+                                    username=new_user.strip(),
+                                    password_hash=pass_hash,
+                                    role="TRADER",
+                                    telegram_id=new_tg.strip() if new_tg.strip() else None,
+                                    is_active=True,
+                                )
+                                st.success(f"✅ ¡Cuenta de Trader '{created.username}' creada exitosamente! Ahora puedes iniciar sesión en la pestaña '🔑 Iniciar Sesión'.")
+                        except (SQLAlchemyError, ValueError, OSError, RuntimeError) as e:
+                            st.error(f"Error registrando cuenta: {e}")
+                        finally:
+                            db.close()
+
+        with st.expander("ℹ️ Ayuda de acceso"):
             st.markdown(
                 """
-                - **Acceso Inicial**: Para la primera configuración se genera un usuario Administrador por defecto (`admin`).
-                - **Registro de Nuevos Usuarios**: Envía un mensaje directo al bot de Telegram del sistema para solicitar acceso como Trader o Invitado.
-                - **Cierre de Sesión**: Puedes cerrar sesión en cualquier momento desde la barra lateral.
+                - **Administrador**: Acceso maestro predeterminado (`admin`).
+                - **Registro de Traders**: Completa la pestaña *📝 Registro de Trader* para crear una cuenta operativa.
+                - **Invitados**: Puedes consultar spreads y tasa BCV directamente a través del bot en Telegram.
                 """
             )

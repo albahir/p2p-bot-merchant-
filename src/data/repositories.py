@@ -261,6 +261,15 @@ class UserRepository:
             return user
         return None
 
+    def update_password(self, user_id: int, new_password_hash: str) -> User | None:
+        user = self.get_by_id(user_id)
+        if user:
+            user.password_hash = new_password_hash  # type: ignore[assignment]
+            self.db.commit()
+            self.db.refresh(user)
+            return user
+        return None
+
     def list_all(self) -> list[User]:
         return self.db.query(User).order_by(User.id.asc()).all()
 
@@ -287,6 +296,7 @@ class IdentityRepository:
         cedula: str,
         full_name: str,
         source: str = "MANUAL",
+        queried_by: str | None = None,
     ) -> IdentityCache:
         """Guarda o actualiza de forma permanente la identidad consultada en la base de datos."""
         nat = nationality.strip().upper() or "V"
@@ -300,11 +310,14 @@ class IdentityRepository:
                 cedula=clean_num,
                 full_name=name,
                 source=source,
+                queried_by=queried_by,
             )
             self.db.add(record)
         else:
             record.full_name = name  # type: ignore[assignment]
             record.source = source  # type: ignore[assignment]
+            if queried_by and not record.queried_by:
+                record.queried_by = queried_by  # type: ignore[assignment]
 
         self.db.commit()
         self.db.refresh(record)

@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.core.spread_monitor import SpreadMonitor
 from src.data.database import SessionLocal
@@ -29,6 +30,7 @@ from src.reporting.dashboard.theme import apply_stitch_theme
 from src.reporting.dashboard.views.login_view import render_login_view
 from src.reporting.excel_reporter import ExcelReporter
 from src.reporting.tax_engine import FIFOCostMethod, WeightedAverageCostMethod
+from src.security.auth_service import AuthService
 from src.security.identity_service import IdentityService
 
 
@@ -168,15 +170,16 @@ def render_identity_tab() -> None:
         with col_btn:
             search_btn = st.button("🔎 Consultar", type="primary", use_container_width=True)
 
+        active_user = str(st.session_state.get("username", "Operador Web"))
         if search_btn and query_cedula.strip():
             with st.spinner("Consultando MetaP2P y Base de Datos..."):
-                res = service.resolve_identity(query_cedula.strip())
+                res = service.resolve_identity(query_cedula.strip(), queried_by=active_user)
                 if res.get("full_name"):
                     st.success(f"✅ Titular Oficial: **{res['full_name']}**")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Documento", f"{res.get('nationality', 'V')}-{res.get('cedula', '')}")
                     m2.metric("Fuente", res.get("source", "MetaP2P"))
-                    m3.metric("Almacenamiento", "💾 Guardado Permanente")
+                    m3.metric("Almacenamiento", f"💾 Guardado (por {active_user})")
                 else:
                     st.error(f"❌ {res.get('error', 'Cédula no localizada en MetaP2P ni en base de datos local')}")
 
@@ -198,6 +201,7 @@ def render_identity_tab() -> None:
                     "Cédula": r.cedula,
                     "Nombre Completo": r.full_name,
                     "Fuente": r.source,
+                    "Consultado Por": getattr(r, "queried_by", "-") or "Sistema",
                     "Fecha Registro": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "-",
                 }
                 for r in records
@@ -413,35 +417,7 @@ if not st.session_state.get("authenticated", False):
 active_role = str(st.session_state.get("role", "INVITADO")).upper()
 active_username = str(st.session_state.get("username", "Operador"))
 
-# Barra lateral de perfil y control de sesión
-with st.sidebar:
-    badge_class = "badge-matched" if active_role == "ADMIN" else "badge-unmatched" if active_role == "TRADER" else "badge-warning"
-    st.markdown(
-        f"""
-        <div class="fintech-card" style="padding: 0.85rem; margin-bottom: 1rem;">
-            <div style="font-size: 0.72rem; color: #8B949E; text-transform: uppercase; font-weight: 600;">Operador Activo</div>
-            <div style="font-size: 1.05rem; font-weight: 700; color: #F0F6FC; margin: 0.2rem 0;">👤 {active_username}</div>
-            <span class="badge-pill {badge_class}">{active_role}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.button("🚪 Cerrar Sesión", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
-
-st.title(":material/terminal: P2P Merchant Bot — Terminal Operativa")
-
-# Barra Superior de Telemetría
-render_terminal_header(
-    bot_mode="PRODUCTION",
-    ip_address="Auto-detect",
-    api_weight=120,
-    fail_closed=True,
-    st_module=st,
-)
-
-# Mapeo de renderers por nombre de pestaña
+# Mapeo de renderers por nombre de pestaña/panel
 TAB_RENDERERS: dict[str, Any] = {
     "📊 Visión General": render_overview_tab,
     "📈 Monitor & Arbitraje P2P": render_spread_tab,
@@ -457,12 +433,121 @@ TAB_RENDERERS: dict[str, Any] = {
 }
 
 visible_tab_names = get_visible_tabs_for_role(active_role)
-tabs = st.tabs(visible_tab_names)
 
-for tab_name, tab_obj in zip(visible_tab_names, tabs):
-    with tab_obj:
-        if active_role == "INVITADO" and tab_name == "📈 Monitor & Arbitraje P2P":
-            st.info("👁️ **Modo Invitado**: Visualización exclusiva de monitoreo de spreads y cotizaciones de mercado en tiempo real. Los libros de órdenes y datos contables están protegidos.")
-        renderer = TAB_RENDERERS.get(tab_name)
-        if renderer:
-            renderer()
+# Barra lateral de perfil, navegación y control de sesión
+with st.sidebar:
+    badge_class = "badge-matched" if active_role == "ADMIN" else "badge-unmatched" if active_role == "TRADER" else "badge-warning"
+    st.markdown(
+        f"""
+        <div class="fintech-card" style="padding: 0.85rem; margin-bottom: 0.75rem;">
+            <div style="font-size: 0.72rem; color: #8B949E; text-transform: uppercase; font-weight: 600;">Operador Activo</div>
+            <div style="font-size: 1.05rem; font-weight: 700; color: #F0F6FC; margin: 0.2rem 0;">👤 {active_username}</div>
+            <span class="badge-pill {badge_class}">{active_role}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button("🚪 Cerrar Sesión", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("<div style='font-size: 0.75rem; color: #8B949E; text-transform: uppercase; font-weight: 600; margin-bottom: 0.4rem;'>Paneles del Sistema</div>", unsafe_allow_html=True)
+
+    # Navegación lateral entre los paneles permitidos según rol
+    selected_panel = st.radio(
+        "Navegación de Paneles",
+        options=visible_tab_names,
+        index=0,
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
+
+    # Opción 1: Cambio de Contraseña de la cuenta activa
+    with st.expander("🔒 Cambiar mi Contraseña"), st.form("sidebar_change_password_form", clear_on_submit=True):
+        curr_pass = st.text_input("Contraseña Actual", type="password")
+        new_pass = st.text_input("Nueva Contraseña", type="password")
+        conf_pass = st.text_input("Confirmar Nueva Contraseña", type="password")
+        btn_ch_pass = st.form_submit_button("Actualizar Clave", use_container_width=True)
+
+        if btn_ch_pass:
+            if not curr_pass.strip() or not new_pass.strip():
+                st.warning("Completa todos los campos.")
+            elif len(new_pass.strip()) < 6:
+                st.warning("La nueva clave debe tener al menos 6 caracteres.")
+            elif new_pass != conf_pass:
+                st.error("Las contraseñas no coinciden.")
+            else:
+                db = SessionLocal()
+                try:
+                    auth = AuthService(db_session=db)
+                    user = auth.authenticate_user(active_username, curr_pass)
+                    if not user:
+                        st.error("La contraseña actual es incorrecta.")
+                    else:
+                        from src.data.repositories import UserRepository
+                        repo = UserRepository(db)
+                        new_hash = AuthService.hash_password(new_pass.strip())
+                        repo.update_password(int(user.id), new_hash)
+                        st.success("✅ Contraseña actualizada exitosamente.")
+                except (SQLAlchemyError, ValueError, OSError, RuntimeError) as e:
+                    st.error(f"Error al actualizar contraseña: {e}")
+                finally:
+                    db.close()
+
+    # Opción 2: Registro rápido de nuevos Traders (Exclusivo para ADMIN)
+    if active_role == "ADMIN":
+        with st.expander("👤 Registrar Nuevo Trader"), st.form("sidebar_create_trader_form", clear_on_submit=True):
+            trader_user = st.text_input("Usuario Trader", placeholder="Ej: trader_juan")
+            trader_tg = st.text_input("Telegram ID (opcional)", placeholder="Ej: 6326947793")
+            trader_pass = st.text_input("Contraseña Inicial", type="password", placeholder="Mínimo 6 caracteres")
+            trader_role = st.selectbox("Rol Asignado", ["TRADER", "INVITADO"], index=0)
+            btn_create_trader = st.form_submit_button("Crear Cuenta", use_container_width=True)
+
+            if btn_create_trader:
+                if not trader_user.strip() or not trader_pass.strip():
+                    st.warning("Completa usuario y contraseña.")
+                elif len(trader_pass.strip()) < 6:
+                    st.warning("La contraseña debe tener mínimo 6 caracteres.")
+                else:
+                    db = SessionLocal()
+                    try:
+                        from src.data.repositories import UserRepository
+                        repo = UserRepository(db)
+                        if repo.get_by_username(trader_user.strip()):
+                            st.error("Este usuario ya existe.")
+                        else:
+                            h = AuthService.hash_password(trader_pass.strip())
+                            u = repo.create_user(
+                                username=trader_user.strip(),
+                                password_hash=h,
+                                role=trader_role,
+                                telegram_id=trader_tg.strip() if trader_tg.strip() else None,
+                                is_active=True,
+                            )
+                            st.success(f"✅ ¡Usuario `{u.username}` creado como `{u.role}`!")
+                    except (SQLAlchemyError, ValueError, OSError, RuntimeError) as e:
+                        st.error(f"Error creando usuario: {e}")
+                    finally:
+                        db.close()
+
+st.title(":material/terminal: P2P Merchant Bot — Terminal Operativa")
+
+# Barra Superior de Telemetría
+render_terminal_header(
+    bot_mode="PRODUCTION",
+    ip_address="Auto-detect",
+    api_weight=120,
+    fail_closed=True,
+    st_module=st,
+)
+
+# Renderizado del panel seleccionado en la barra lateral
+if active_role == "INVITADO" and selected_panel == "📈 Monitor & Arbitraje P2P":
+    st.info("👁️ **Modo Invitado**: Visualización exclusiva de monitoreo de spreads y cotizaciones de mercado en tiempo real. Los libros de órdenes y datos contables están protegidos.")
+
+renderer = TAB_RENDERERS.get(selected_panel)
+if renderer:
+    renderer()
