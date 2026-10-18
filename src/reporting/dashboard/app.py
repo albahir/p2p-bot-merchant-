@@ -10,6 +10,9 @@ from src.data.models import Order, SecurityEvent
 from src.data.repositories import OrderRepository
 from src.reporting.dashboard.components.control_actions import render_control_actions
 from src.reporting.dashboard.components.credential_manager import render_credential_manager
+from src.reporting.dashboard.components.fiscal_reconstruction_view import (
+    render_fiscal_reconstruction,
+)
 from src.reporting.dashboard.components.kpi_cards import render_kpis
 from src.reporting.dashboard.components.test_runner_view import render_test_runner
 from src.reporting.excel_reporter import ExcelReporter
@@ -24,11 +27,12 @@ st.set_page_config(
 st.title(":material/smart_toy: P2P Merchant Bot — Panel de Control")
 
 # Pestañas de navegación de la interfaz
-tab_control, tab_credentials, tab_overview, tab_tax, tab_tests, tab_security = st.tabs([
+tab_control, tab_credentials, tab_overview, tab_tax, tab_reconcile, tab_tests, tab_security = st.tabs([
     "🕹️ Panel de Tareas",
     "🔑 Credenciales",
     "📊 Visión General",
     "📑 Motor Fiscal (ISLR)",
+    "⚖️ Reconstrucción 6 Piezas & OCR",
     "🧪 Suite de Tests",
     "🛡️ Auditoría"
 ])
@@ -143,7 +147,7 @@ with tab_tax:
                     if sheet_id:
                         sheet_url = SheetsExporter.get_sheet_url(sheet_id)
                         st.markdown(f"🔗 **Documento vinculado**: [{sheet_id}]({sheet_url})")
-                        if st.button("📊 Sincronizar Ahora con Google Sheets", use_container_width=True):
+                        if st.button("📊 Sincronizar Ahora con Google Sheets", width="stretch"):
                             exporter = SheetsExporter(
                                 credentials_path=dashboard_settings.GOOGLE_CREDENTIALS_FILE,
                                 credentials_json=dashboard_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
@@ -160,7 +164,11 @@ with tab_tax:
     finally:
         db.close()
 
-# 5. Suite de Tests Automatizados
+# 5. Reconstrucción Contable de 6 Piezas y OCR Bancario
+with tab_reconcile:
+    render_fiscal_reconstruction()
+
+# 6. Suite de Tests Automatizados
 with tab_tests:
     render_test_runner()
 

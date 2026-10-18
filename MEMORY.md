@@ -52,6 +52,16 @@
   - Sanitización estricta anti-filtración de secretos en todas las salidas del modelo.
   - Suite completa de 31 tests pasando al 100%.
 
+- [x] **Paquete 014 (Reconstrucción Fiscal P2P de 6 Piezas, Parser Inteligente Binance y OCR Bancario Multimodal)**:
+  - Persistencia en SQLAlchemy con modelos `WalletMovement`, `BankVoucher` y `FiscalPeriodSnapshot` y repositorios con inserción idempotente.
+  - `BinanceFileParser`: procesa Órdenes C2C, Depósitos y Retiros (.csv y .xlsx), saltando automáticamente metadatos en Excel y reconociendo encabezados en español e inglés.
+  - `BankReceiptOCR`: Extracción inteligente multimodal con Gemini Vision aprovechando `AIKeyPool` (3 claves API con rotación round-robin) y auto-matching con órdenes P2P ($\pm 24\text{ h}$, tolerancia $\pm 0.05\text{ VES}$).
+  - `FiscalReconciler`: ejecuta la ecuación patrimonial de 6 piezas ($\text{Saldo Inicial} + \text{Entradas} - \text{Salidas} - \text{Comisiones} = \text{Saldo Final Teórico}$), detecta mermas/discrepancias e integra `FIFOCostMethod` extendido con inventario inicial valorado a tasa BCV.
+  - Exportación multi-pestaña auditada en `ExcelReporter` y `SheetsExporter`: genera las 4 pestañas *Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*.
+  - Panel interactivo en Streamlit (`fiscal_reconstruction_view.py`) con subida drag-and-drop de archivos de Binance y fotos de comprobantes bancarios, tarjetas de 6 piezas, liquidación ISLR y descarga directa.
+  - Integración con Telegram: comando `/conciliacion` y soporte para fotos de comprobantes bancarios vía OCR en tiempo real.
+  - Suite completa de 84 tests pasando al 100% (64 previos + 20 nuevos).
+
 ### ⏸️ Paquetes Pausados
 - ⏸️ **Paquete 003 (Motor de Estrategias)**: Pausado temporalmente por el usuario.
 - ⏸️ **Paquete 004 (Verificación Bancaria)**: Pausado temporalmente por el usuario.
@@ -229,6 +239,13 @@
       - **Frontend**: Diseña el panel visual de 6 piezas con semáforo de balance y uploader drag-and-drop.
       - **QA**: Valida fixtures basados en los archivos reales exportados de Binance en español.
     - Evaluación de Capacidad de Gemini Vision: Las 3 API keys configuradas en `AIKeyPool` con balanceo round-robin proporcionan 45 peticiones/minuto y 4,500 peticiones/día, superando con creces la carga requerida para el volumen de comprobantes P2P.
+31. **Implementación y Cierre de Reconstrucción Fiscal P2P de 6 Piezas, Parser Binance y OCR Multimodal (ADR 031)**:
+    - **Ecuación de Consistencia Patrimonial**: Ejecutada en `FiscalReconciler` (`src/reporting/fiscal_reconciler.py`) bajo la fórmula contable estricta: $\text{Saldo Inicial} + \text{Depósitos} + \text{Compras P2P} - \text{Retiros} - \text{Ventas P2P} - \text{Comisiones Cripto} = \text{Saldo Final Esperado}$.
+    - **Apertura de Inventario FIFO**: Extensión de `FIFOCostMethod` (`src/reporting/tax_engine.py`) para admitir inventario inicial valorado al tipo de cambio oficial del BCV al primer día del mes, garantizando liquidaciones de costo de adquisición fidedignas ante el SENIAT.
+    - **OCR Resiliente con Gemini Vision**: `BankReceiptOCR` (`src/integrations/receipt_ocr.py`) rota automáticamente en fallback (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-flash-lite-latest`) y auto-vincula comprobantes de Pago Móvil / Transferencias bancarias con órdenes P2P dentro de una ventana de $\pm 24\text{ h}$ y tolerancia de $\pm 0.05\text{ VES}$.
+    - **Exportación Integral de 4 Pestañas**: `ExcelReporter` y `SheetsExporter` sincronizan las 4 hojas de auditoría fiscal (*Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*).
+    - **Control Visual y Conversacional**: Implementada pestaña interactiva en Streamlit (`fiscal_reconstruction_view.py`) y comando `/conciliacion` junto a procesamiento automático de fotos de comprobantes en Telegram (`TelegramCommandPoller`).
+    - **Modernización de Base Declarativa ORM**: Migrado `Base = declarative_base()` a `class Base(DeclarativeBase): pass` en `src/data/database.py`, eliminando falsos positivos en Mypy para todas las clases entidad.
 
 ---
 
@@ -237,7 +254,7 @@
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
 3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**64/64 tests pasando al 100%**).
+4. **Suite de Pruebas**: `pytest -v tests/` (**84/84 tests pasando al 100%**).
 5. **Comprobación de Calidad de Código**:
-   - `mypy src/ scripts/` (0 errores en 38 archivos fuente).
+   - `mypy src/ scripts/` (0 errores en 42 archivos fuente).
    - `ruff check .` (0 errores de linting).

@@ -183,6 +183,146 @@ class SheetsExporter:
             logger.error(self.last_error)
             return False
 
+    def export_fiscal_reconstruction(
+        self,
+        sheet_id: str,
+        reconciliation: Any,
+        p2p_orders: list[Any],
+        wallet_movements: list[Any],
+        vouchers: list[Any],
+    ) -> bool:
+        """Exporta el informe de reconstrucción fiscal de 4 pestañas a Google Sheets."""
+        if not sheet_id:
+            self.last_error = "No se configuró 'GOOGLE_SHEET_ID' para la exportación."
+            logger.warning(self.last_error)
+            return False
+
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            sh = client.open_by_key(sheet_id)
+
+            # 1. Resumen Fiscal
+            ws_resumen = self._get_or_create_worksheet(sh, "Resumen Fiscal", rows=35, cols=5)
+            summary_rows: list[list[Any]] = [
+                ["Sección", "Concepto / Métrica", "Valor"],
+                ["1. Reconstrucción de 6 Piezas", "Período Fiscal", str(reconciliation.period)],
+                ["1. Reconstrucción de 6 Piezas", "1. Saldo Inicial (USDT)", float(reconciliation.initial_balance)],
+                ["1. Reconstrucción de 6 Piezas", "2. Entradas - Depósitos On-chain (USDT)", float(reconciliation.inflows_deposits)],
+                ["1. Reconstrucción de 6 Piezas", "2. Entradas - Compras P2P (USDT)", float(reconciliation.inflows_p2p_buys)],
+                ["1. Reconstrucción de 6 Piezas", "Total Entradas Cripto (USDT)", float(reconciliation.total_inflows)],
+                ["1. Reconstrucción de 6 Piezas", "3. Salidas - Retiros On-chain (USDT)", float(reconciliation.outflows_withdrawals)],
+                ["1. Reconstrucción de 6 Piezas", "3. Salidas - Ventas P2P (USDT)", float(reconciliation.outflows_p2p_sells)],
+                ["1. Reconstrucción de 6 Piezas", "Total Salidas Cripto (USDT)", float(reconciliation.total_outflows)],
+                ["1. Reconstrucción de 6 Piezas", "4. Volumen Operado Total (USDT)", float(reconciliation.volume_operated)],
+                ["1. Reconstrucción de 6 Piezas", "5. Comisiones de Red / Costos (USDT)", float(reconciliation.total_fees)],
+                ["1. Reconstrucción de 6 Piezas", "6. Saldo Final Calculado Teórico (USDT)", float(reconciliation.calculated_final_balance)],
+                ["1. Reconstrucción de 6 Piezas", "6. Saldo Final Real / Snapshot (USDT)", float(reconciliation.actual_final_balance)],
+                ["1. Reconstrucción de 6 Piezas", "Discrepancia / Merma (USDT)", float(reconciliation.discrepancy)],
+                ["1. Reconstrucción de 6 Piezas", "Estatus Consistencia Patrimonial", str(reconciliation.status)],
+                ["2. Liquidación ISLR Estimada", "Ingresos Brutos por Ventas (VES)", float(reconciliation.gross_revenue_ves)],
+                ["2. Liquidación ISLR Estimada", "Costos de Adquisición FIFO (VES)", float(reconciliation.acquisition_cost_ves)],
+                ["2. Liquidación ISLR Estimada", "Ganancia Neta Gravable (VES)", float(reconciliation.net_profit_ves)],
+                ["2. Liquidación ISLR Estimada", "Ganancia Neta Estimada (USD)", float(reconciliation.net_profit_usd)],
+                ["3. Auditoría Bancaria", "Comprobantes Bancarios Procesados", int(reconciliation.vouchers_count)],
+                ["3. Auditoría Bancaria", "Comprobantes Auto-Conciliados", int(reconciliation.matched_vouchers_count)],
+            ]
+            ws_resumen.clear()
+            ws_resumen.append_rows(summary_rows)
+
+            # 2. Detalle P2P
+            ws_p2p = self._get_or_create_worksheet(sh, "Detalle P2P", rows=max(100, len(p2p_orders) + 10), cols=15)
+            p2p_headers: list[Any] = [
+                "Fecha (UTC)", "Número de Pedido", "Tipo", "Activo", "Cripto",
+                "Precio Unitario", "Moneda Fiat", "Monto Fiat", "Comisión", "Tasa BCV", "Estado",
+            ]
+            p2p_rows: list[list[Any]] = [p2p_headers]
+            for o in p2p_orders:
+                dt_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "-"
+                p2p_rows.append([
+                    dt_str,
+                    str(o.order_number),
+                    str(o.trade_type),
+                    str(o.asset),
+                    float(o.crypto_amount),
+                    float(o.unit_price),
+                    str(o.fiat),
+                    float(o.fiat_amount),
+                    float(o.fee_fiat),
+                    float(o.bcv_rate),
+                    str(o.order_status),
+                ])
+            ws_p2p.clear()
+            ws_p2p.append_rows(p2p_rows)
+
+            # 3. Depósitos y Retiros
+            ws_movs = self._get_or_create_worksheet(sh, "Depósitos y Retiros", rows=max(100, len(wallet_movements) + 10), cols=12)
+            movs_headers: list[Any] = [
+                "Fecha (UTC)", "Tipo Movimiento", "Activo", "Monto", "Comisión Red", "Red", "TXID", "Dirección", "Estado",
+            ]
+            movs_rows: list[list[Any]] = [movs_headers]
+            for m in wallet_movements:
+                dt_str = m.timestamp.strftime("%Y-%m-%d %H:%M:%S") if m.timestamp else "-"
+                movs_rows.append([
+                    dt_str,
+                    str(m.movement_type),
+                    str(m.asset),
+                    float(m.amount),
+                    float(m.fee),
+                    str(m.network or "-"),
+                    str(m.txid or "-"),
+                    str(m.address or "-"),
+                    str(m.status),
+                ])
+            ws_movs.clear()
+            ws_movs.append_rows(movs_rows)
+
+            # 4. Conciliación Bancaria
+            ws_vouchers = self._get_or_create_worksheet(sh, "Conciliación Bancaria", rows=max(100, len(vouchers) + 10), cols=12)
+            voucher_headers: list[Any] = [
+                "Fecha", "Banco", "Referencia", "Monto (VES)", "Cédula/RIF Emisor",
+                "Nombre Titular", "Método Pago", "Orden P2P Vinculada", "Estado Verificación",
+            ]
+            voucher_rows: list[list[Any]] = [voucher_headers]
+            for v in vouchers:
+                dt_str = v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "-"
+                voucher_rows.append([
+                    dt_str,
+                    str(v.bank_name),
+                    str(v.reference_number),
+                    float(v.amount_ves),
+                    str(v.sender_id or "-"),
+                    str(v.sender_name or "-"),
+                    str(v.payment_method),
+                    str(v.associated_order_number or "-"),
+                    str(v.verification_status),
+                ])
+            ws_vouchers.clear()
+            ws_vouchers.append_rows(voucher_rows)
+
+            logger.info(f"Google Sheets '{sheet_id}' sincronizado exitosamente con 4 pestañas.")
+            self.last_error = None
+            return True
+        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            err_str = str(e)
+            if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
+                email_hint = f" ({self.client_email})" if self.client_email else ""
+                self.last_error = (
+                    f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
+                    f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
+                )
+            elif "404" in err_str or "SpreadsheetNotFound" in err_str:
+                self.last_error = f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
+            elif "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
+                self.last_error = "Google Sheets API o Google Drive API no están habilitadas en tu Google Cloud Console."
+            else:
+                self.last_error = f"Error exportando a Google Sheets: {e}"
+
+            logger.error(self.last_error)
+            return False
+
     @staticmethod
     def get_sheet_url(sheet_id: str) -> str:
         """Devuelve el enlace directo al documento en Google Sheets."""

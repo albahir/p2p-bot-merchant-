@@ -41,8 +41,30 @@ class CostMethod(ABC):
 class FIFOCostMethod(CostMethod):
     """Método FIFO (First-In, First-Out): Las compras más antiguas se liquidan primero."""
 
-    def process_orders(self, orders: list[Order]) -> list[TradeResult]:
-        inventory: list[TaxLot] = []
+    def __init__(self, initial_inventory: list[TaxLot] | None = None):
+        self.initial_inventory: list[TaxLot] = [
+            TaxLot(
+                crypto_amount=lot.crypto_amount,
+                total_cost_fiat=lot.total_cost_fiat,
+                unit_cost_fiat=lot.unit_cost_fiat,
+            )
+            for lot in (initial_inventory or [])
+        ]
+
+    def process_orders(
+        self,
+        orders: list[Order],
+        initial_inventory: list[TaxLot] | None = None,
+    ) -> list[TradeResult]:
+        starting_lots = initial_inventory if initial_inventory is not None else self.initial_inventory
+        inventory: list[TaxLot] = [
+            TaxLot(
+                crypto_amount=lot.crypto_amount,
+                total_cost_fiat=lot.total_cost_fiat,
+                unit_cost_fiat=lot.unit_cost_fiat,
+            )
+            for lot in starting_lots
+        ]
         results: list[TradeResult] = []
 
         for order in orders:

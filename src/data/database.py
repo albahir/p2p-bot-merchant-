@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 try:
     from dotenv import load_dotenv
@@ -22,7 +22,8 @@ connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite")
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
 
 
 def get_db():
@@ -32,3 +33,10 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def init_db() -> None:
+    """Crea todas las tablas definidas en los modelos si no existen en la base de datos."""
+    from src.data.models import Base as ModelsBase
+
+    ModelsBase.metadata.create_all(bind=engine)
