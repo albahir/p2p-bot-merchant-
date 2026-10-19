@@ -352,6 +352,72 @@
       - Tipado estricto `mypy src/` limpio (**0 errores en 48 archivos fuente**).
       - Linter estático `ruff check .` (**0 errores de estilo e importaciones**).
 
+38. **Conexión de Precios en Vivo Binance P2P e Interfaz con Filtros Estilo Binance (ADR 038)**:
+    - **Esquemas Tipados Enriquecidos (`binance_schemas.py`)**:
+      - Incorporación de `BinanceTradeMethod` para tipar con Pydantic los métodos de pago bancarios (`payType`, `tradeMethodName`, `payId`).
+      - Actualización de `BinanceAdDetail` con la lista de `tradeMethods` y propiedad `bank_names` en `BinanceSearchOrderItem` para extracción limpia y sin duplicados de los bancos que acepta cada anuncio.
+    - **Conector Universal de Búsqueda P2P (`BinanceP2PClient` y `MockBinanceP2PClient`)**:
+      - Firma estandarizada de `search_p2p_ads(asset, fiat, trade_type, pay_types, trans_amount, merchant_check, use_public_bapi)`.
+      - Soporte para consulta pública BAPI (`https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search`) y SAPI privada sin consumir peso de API Key para visualización de orderbook.
+      - Enriquecimiento de `MockBinanceP2PClient` con bancos reales venezolanos (Banesco, BDV, Pago Móvil, Mercantil, Bancamiga, Provincial, BNC, Banco Activo) y filtrado dinámico por monto y comercios verificados.
+    - **Cotizaciones en Vivo en `SpreadMonitor` (`fetch_live_quotes`)**:
+      - `SpreadMonitor.fetch_live_quotes()` consulta simultáneamente anuncios BUY y SELL de Binance P2P, extrae la mejor cotización para cada entidad bancaria venezolana y actualiza los diferenciales en tiempo real.
+      - Resiliencia Fail-closed: Si la red hacia Binance falla o la conexión es inestable, conmuta de inmediato a las cotizaciones calibradas de respaldo sin detener el sistema.
+    - **Interfaz Binance P2P con Filtros en Streamlit (`binance_p2p_book.py`)**:
+      - Selector de operación nativo: `Comprar USDT` / `Vender USDT` con `st.segmented_control`.
+      - Barra de filtros idéntica a Binance P2P: Criptomoneda (`USDT`, `BTC`, `ETH`, etc.), Moneda Fíat (`VES`, `USD`, `EUR`, `COP`), Monto en Fíat con filtro de límites, Selector de Banco / Método de Pago, y Toggle para Comerciantes Verificados.
+      - Renderizado de anuncios estilo Binance con Nickname, % de finalización, precio en grande, límites mínimo/máximo, badges de bancos y simulador de operación integrado con cálculo de comisiones (Binance 0.35% + Bancaria 0.30% Pago Móvil).
+      - Integración armónica en la pestaña `📈 Monitor & Arbitraje P2P` mediante navegación interna con `st.segmented_control` entre el Libro de Órdenes, la Matriz de Spreads y la Calculadora Maker.
+    - **Calidad y Verificación Rigurosa**:
+      - **128/128 pruebas unitarias y de integración pasando al 100%** (`pytest`).
+      - Tipado estricto `mypy src/` limpio (**0 errores en 49 archivos fuente**).
+      - Linter estático `ruff check .` (**0 errores de estilo e importaciones**).
+
+39. **Resolución de Datos Reales en Vivo Binance P2P vs Simulación en Streamlit (ADR 039)**:
+    - **Diagnóstico del Estado Previo**:
+      - Al iniciar el Dashboard Streamlit, las cotizaciones y el libro de órdenes se mostraban en modo simulación/calibrado debido a que `USE_SANDBOX=True` estaba fijado en `config/.env` y existía una discrepancia en la importación de `ApiKeyManager` que provocaba un fallback silencioso hacia `MockBinanceP2PClient`.
+    - **Conexión Directa a la BAPI Pública Oficial de Binance P2P**:
+      - La visualización de anuncios y el análisis del libro de órdenes no requiere permisos privados de trading ni arriesga fondos. Se conectó la BAPI pública (`https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search`) mediante `BinanceP2PClient(..., use_public_bapi=True)`.
+      - Se hizo opcional la API Key en `BinanceP2PClient.__init__` para permitir consultas públicas directas.
+      - Se corrigió la importación canónica `from src.security.api_key_manager import ApiKeyManager`.
+    - **Selectores y Toggles Transparentes en la UI**:
+      - **En Libro de Órdenes**: Toggle interactivo `🟢 Mercado Real (Binance P2P)` con selector de anuncios, bancos y simulación. Si la conexión de red falla o se apaga el toggle, conmuta limpiamente a `🧪 Simulación (Sandbox)`.
+      - **En Matriz de Spreads & Arbitraje**: Toggle `🟢 Cotizaciones en Vivo (Binance P2P)` que ejecuta `SpreadMonitor.fetch_live_quotes(use_public_bapi=True)` para calcular los spreads, el retorno neto y la mejor oportunidad de arbitraje interbancario con los precios reales de los bancos en Venezuela en ese instante.
+    - **Modularización del Entrypoint de Streamlit**:
+      - Se aisló la ejecución principal de `src/reporting/dashboard/app.py` dentro de `run_dashboard()` protegido con `if __name__ == "__main__" or st.runtime.exists():`, permitiendo importar funciones de autenticación (`get_visible_tabs_for_role`) en tests sin disparar el runner de UI en modo bare.
+    - **Calidad y Verificación**:
+      - **128/128 pruebas pasando al 100%**.
+      - `mypy src/` limpio (0 errores en 49 archivos).
+      - `ruff check .` limpio (0 errores de linting).
+
+40. **Corrección de Método BCV y Conexión de la Matriz de Spreads con Telegram (ADR 040)**:
+    - **Corrección de `BCVService`**:
+      - Se añadió el método alias `get_official_rate()` en `BCVService` apuntando a `fetch_current_rate()`, erradicando el error `AttributeError` al consultar la tasa oficial en la Matriz de Spreads.
+    - **Conexión Directa de la Matriz con Telegram**:
+      - **Botón en Streamlit**: En la pestaña *Matriz de Spreads & Arbitraje*, se incorporó la acción interactiva **`📤 Enviar Matriz a Telegram`**, que formatea las cotizaciones actuales de los bancos venezolanos, la brecha cambiaria con el BCV y la mejor oportunidad de arbitraje interbancario, despachándola al instante al chat/canal de Telegram.
+      - **Comando `/matriz` en Telegram**: Se agregó el comando `/matriz` (y `/matriz_spreads`), permitiendo a usuarios autorizados (`INVITADO`, `TRADER` y `ADMIN`) recibir el reporte detallado de arbitraje en tiempo real desde Telegram.
+      - **Formateador Unificado**: Se implementó `TelegramNotifier.format_arbitrage_matrix_report()` como estándar centralizado de formato para notificaciones web y móviles.
+      - **Instanciación Resiliente**: `TelegramNotifier.__init__` ahora cuenta con parámetros por defecto y fallback automático a `Settings()`, facilitando su uso en cualquier componente.
+41. **Integración Multifuente de Spreads Bancarios P2P (PitbullChain, Yadio, CriptoYa, Binance P2P BAPI) (ADR 041)**:
+    - **Descubrimiento y Arquitectura Multinivel (Failover en Cascada)**:
+      - **Nivel 1 (PitbullChain Aggregator API)**: Se integró el consumo directo del endpoint público de PitbullChain (`https://pitbullchain.com/api/p2p/banks?exchange={exchange}`) que mapea en tiempo real los 21 métodos de pago oficiales de Binance P2P en Venezuela (`binanceMethods`), extrayendo cantidad de anuncios activos (`totalAds`), precios promedios de compra/venta, spreads, liquidez de mercado (`liquidityPct`) y puntuación de viabilidad (`score` 0-100).
+      - **Nivel 2 (Binance P2P BAPI / SAPI Directo)**: Fallback directo a la API de Binance P2P para consultas por banco individual (`payTypes: [...]`).
+      - **Nivel 3 (Ancla Macro Yadio / CriptoYa)**: Consumo de `https://api.yadio.io/rate/VES` y `https://criptoya.com/api/binancep2p/USDT/VES/1` para anclaje de precios de mercado libre y validación cruzada de spreads Maker/Taker.
+      - **Nivel 4 (Offline / Fail-closed)**: Cotizaciones calibradas de contingencia.
+    - **Enriquecimiento del Dominio de Spreads**:
+      - `BankRateQuote` extendido con `total_ads`, `score`, `liquidity_pct`, `binance_code`, `exchanges` y `source`.
+      - Mapeo institucional y normalización de nombres bancarios venezolanos (`Banco de Venezuela`, `BNC`, `Banesco`, `Pago Móvil`, `Provincial`, etc.).
+    - **Rediseño UI Estilo PitbullChain Pro en Streamlit**:
+      - Selector de Exchange (Binance P2P, Bybit P2P, Todos los Exchanges).
+      - Filtro interactivo por entidad bancaria.
+      - Tabla enriquecida con Ranking, Código Binance, Anuncios detectados, Precios Maker compra/venta, Spread en Bs y %, Score de rentabilidad (0-100), Liquidez (%) y Etiquetas de Exchanges.
+      - Indicador visual dinámico de la fuente de datos (`PitbullChain Live`, `Binance Direct`, `Yadio Macro`, `Calibrado`).
+    - **Verificación en Vivo y Calidad**:
+      - Se ejecutaron consultas en vivo a cada una de las 4 fuentes (PitbullChain, Yadio, CriptoYa, Binance P2P BAPI), verificando respuesta HTTP 200 y extracción de datos reales.
+      - **133/133 pruebas pasando al 100%** (`pytest`).
+      - `mypy src/` limpio (0 errores en 49 archivos fuente).
+      - `ruff check .` limpio (0 errores de linting).
+
 ---
 
 ## 🎯 Guía Operativa Actual
@@ -359,7 +425,7 @@
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
 3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**123/123 tests pasando al 100%**).
+4. **Suite de Pruebas**: `pytest -v tests/` (**133/133 tests pasando al 100%**).
 5. **Comprobación de Calidad de Código**:
-   - `mypy src/` (0 errores en 48 archivos fuente).
+   - `mypy src/` (0 errores en 49 archivos fuente).
    - `ruff check .` (0 errores de linting).

@@ -87,6 +87,16 @@ class BinanceAdvertiserInfo(BaseModel):
     monthFinishRate: float = 0.0
 
 
+class BinanceTradeMethod(BaseModel):
+    """Método de pago o banco asociado a un anuncio P2P."""
+    payId: str | None = None
+    payMethodId: str | None = None
+    payType: str | None = None
+    tradeMethodName: str | None = None
+    tradeMethodShortName: str | None = None
+    tradeMethodBgColor: str | None = None
+
+
 class BinanceAdDetail(BaseModel):
     """Detalle de un anuncio en el order book."""
     advNo: str
@@ -97,12 +107,23 @@ class BinanceAdDetail(BaseModel):
     surplusAmount: str
     minSingleTransAmount: str | None = "0"
     maxSingleTransAmount: str | None = "0"
+    tradeMethods: list[BinanceTradeMethod] = Field(default_factory=list)
 
 
 class BinanceSearchOrderItem(BaseModel):
     """Elemento individual de búsqueda en POST /sapi/v1/c2c/orderMatch/search."""
     adv: BinanceAdDetail
     advertiser: BinanceAdvertiserInfo
+
+    @property
+    def bank_names(self) -> list[str]:
+        """Extrae la lista de nombres legibles de bancos o métodos de pago."""
+        names: list[str] = []
+        for m in self.adv.tradeMethods:
+            name = m.tradeMethodName or m.tradeMethodShortName or m.payType or ""
+            if name and name not in names:
+                names.append(name)
+        return names
 
 
 class BinanceSearchResponse(BaseModel):

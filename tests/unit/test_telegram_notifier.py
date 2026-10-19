@@ -67,5 +67,14 @@ def test_telegram_command_spread():
     assert "0.80%" in res
 
 
+def test_telegram_command_matriz():
+    notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
+    res = notifier.handle_command(user_id=1001, command="/matriz")
+    assert "Matriz de Arbitraje" in res
+    assert "BCV" in res
+    assert "Arbitraje" in res
+    assert "0.80%" in res
+
+
 
 

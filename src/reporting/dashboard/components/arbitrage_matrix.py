@@ -60,10 +60,32 @@ def render_arbitrage_matrix(
         else:
             st.metric(label="Arbitraje Cruzado", value="N/D")
 
-    # 2. Tabla Interactiva de Bancos
+    # 2. Ranking y Filtro de Bancos (Estilo PitbullChain Pro)
     if quotes:
+        source_label = "🟠 Cotizaciones Calibradas (Offline)"
+        first_src = getattr(quotes[0], "source", "")
+        if first_src == "pitbullchain":
+            source_label = "🟢 PitbullChain P2P Aggregator (En Vivo • 21 métodos detectados)"
+        elif first_src == "binance":
+            source_label = "🟢 Binance P2P BAPI / SAPI Directo (En Vivo)"
+        elif first_src == "yadio_anchor":
+            source_label = "🟡 Yadio / CriptoYa (Tasa Macro Anclada)"
+
+        col_filter, col_src = st.columns([2, 2])
+        with col_filter:
+            bank_options = ["Todos"] + sorted({q.bank_name for q in quotes if q.bank_name})
+            selected_bank = st.selectbox(
+                "🔍 Filtrar por Banco o Método:",
+                bank_options,
+                key="arb_bank_filter_select",
+            )
+        with col_src:
+            st.markdown(f"<div style='padding-top: 28px; font-size: 13px; color: #a1a1aa;'>Fuente: <b>{source_label}</b></div>", unsafe_allow_html=True)
+
+        filtered_quotes = quotes if selected_bank == "Todos" else [q for q in quotes if q.bank_name == selected_bank]
+
         table_data = []
-        for q in quotes:
+        for idx, q in enumerate(filtered_quotes, 1):
             calc = monitor.calculate_cycle_net_profit(
                 crypto_amount=100.0,
                 buy_price=q.buy_rate,
@@ -76,13 +98,17 @@ def render_arbitrage_matrix(
             )
             table_data.append(
                 {
+                    "#": idx,
                     "Banco / Método": q.bank_name,
-                    "Compra Maker (Bs)": f"{q.buy_rate:,.2f}",
-                    "Venta Maker (Bs)": f"{q.sell_rate:,.2f}",
-                    "Spread Bruto (Bs)": f"{q.spread_ves:+,.2f}",
-                    "Spread (%)": f"{q.spread_pct:+.2f}%",
-                    "Ganancia Neta (100 USDT)": f"{calc.net_profit_ves:+,.2f} Bs",
-                    "Retorno USDT": f"{calc.net_profit_usdt:+,.4f} USDT",
+                    "Código Binance": getattr(q, "binance_code", "") or "—",
+                    "Anuncios": getattr(q, "total_ads", 0) if getattr(q, "total_ads", 0) > 0 else "—",
+                    "Comprar USDT": f"Bs. {q.buy_rate:,.2f}",
+                    "Vender USDT": f"Bs. {q.sell_rate:,.2f}",
+                    "Spread": f"{q.spread_ves:,.2f} Bs ({q.spread_pct:.2f}%)",
+                    "Score": f"{int(getattr(q, 'score', 0))}/100" if getattr(q, "score", 0) > 0 else "—",
+                    "Liquidez": f"{getattr(q, 'liquidity_pct', 0.0):.1f}%" if getattr(q, "liquidity_pct", 0.0) > 0 else "—",
+                    "Exchanges": ", ".join(getattr(q, "exchanges", ["binance"])),
+                    "Neto (100 USDT)": f"{calc.net_profit_ves:+,.2f} Bs",
                     "Estado": status_icon,
                 }
             )
@@ -91,6 +117,7 @@ def render_arbitrage_matrix(
         st.dataframe(df, width="stretch", hide_index=True)
     else:
         st.info("No hay cotizaciones de bancos cargadas en este momento.")
+
 
     # 3. Oportunidad de Arbitraje Cruzado Destacada
     if cross_opp and cross_opp["spread_pct"] > 0.80:
@@ -101,6 +128,33 @@ def render_arbitrage_matrix(
                 f"- **Paso 2 (Venta)**: Colocar anuncio Maker de venta en **{cross_opp['sell_bank']}** a **{cross_opp['sell_rate']:,.2f} VES/USDT**.\n"
                 f"- **Spread Bruto**: **{cross_opp['spread_pct']:+.2f}%** | **Retorno Neto Proyectado**: **+{cross_opp['net_profit_ves_100u']:,.2f} VES** (por ciclo de 100 USDT)."
             )
+
+    # 4. Difusión Directa a Telegram
+    st.write("---")
+    col_tg_info, col_tg_action = st.columns([2.5, 1.5])
+    with col_tg_info:
+        st.markdown(
+            "##### 📲 Conexión con Telegram\n"
+            "Despacha esta matriz de spreads y arbitraje interbancario calculada en tiempo real hacia tu canal o chat privado de Telegram."
+        )
+    with col_tg_action:
+        if st.button("📤 Enviar Matriz a Telegram", width="stretch", type="primary"):
+            from src.integrations.telegram_notifier import TelegramNotifier
+
+            notifier = TelegramNotifier()
+            if not notifier.bot_token or not notifier.default_chat_id:
+                st.warning("⚠️ Configura `TELEGRAM_BOT_TOKEN` y `TELEGRAM_DEFAULT_CHAT_ID` en `config/.env` o en la pestaña Credenciales para enviar alertas.")
+            else:
+                report_msg = TelegramNotifier.format_arbitrage_matrix_report(
+                    quotes=quotes,
+                    bcv_rate=bcv_rate,
+                    bcv_gap=bcv_gap_pct,
+                )
+                sent = notifier.send_message(report_msg)
+                if sent:
+                    st.success("✅ ¡Matriz de arbitraje enviada exitosamente a Telegram!")
+                else:
+                    st.error("❌ No se pudo enviar el mensaje a Telegram. Verifica la conexión o permisos del bot.")
 
 
 def render_maker_calculator(st_module: Any = None) -> None:

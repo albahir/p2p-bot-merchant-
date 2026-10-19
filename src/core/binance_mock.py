@@ -15,6 +15,7 @@ from src.core.binance_schemas import (
     BinanceOrderMatchItem,
     BinanceSearchOrderItem,
     BinanceSearchResponse,
+    BinanceTradeMethod,
     TradeTypeEnum,
 )
 
@@ -180,27 +181,67 @@ class MockBinanceP2PClient:
         """Simula monitoreo de peso de API."""
         logger.debug(f"MOCK API Used Weight: {self.last_used_weight}")
 
-    def get_order_book(
+    def search_p2p_ads(
         self,
         asset: str = "USDT",
         fiat: str = "VES",
         trade_type: str = "BUY",
         page: int = 1,
-        rows: int = 10
+        rows: int = 10,
+        pay_types: list[str] | None = None,
+        trans_amount: float | None = None,
+        merchant_check: bool = False,
+        use_public_bapi: bool = False,
     ) -> BinanceSearchResponse:
-        """Devuelve un order book simulado realista con anunciantes activos en Venezuela."""
-        base_price = 36.65 if trade_type == "BUY" else 37.60
-        merchant_names = [
-            "Merchant_Caracas_P2P", "Cambios_Express_VE", "PagoMovil_Seguro",
-            "Crypto_Vzla_OFICIAL", "Finanzas_Rapidas_VE", "Banesco_PagoMovil_P2P",
-            "Provincial_Instant", "Mercantil_Directo", "Bolivares_Crypto_Fast", "TuCambio_P2P"
+        """Devuelve un order book simulado realista con anunciantes activos y bancos en Venezuela."""
+        # Precios calibrados según el mercado VES (~1001 a 1018 VES)
+        base_price = 1002.50 if trade_type == "BUY" else 1012.80
+
+        merchant_data = [
+            ("Merchant_Caracas_P2P", 1450, 0.995, ["Banco de Venezuela", "Pago Móvil"], ["SpecificBank", "PagoMovil"]),
+            ("Cambios_Express_VE", 980, 0.991, ["Banesco", "Pago Móvil"], ["Banesco", "PagoMovil"]),
+            ("PagoMovil_Seguro", 1200, 0.989, ["Pago Móvil"], ["PagoMovil"]),
+            ("Crypto_Vzla_OFICIAL", 3200, 0.998, ["Mercantil", "Banesco"], ["Mercantil", "Banesco"]),
+            ("Finanzas_Rapidas_VE", 640, 0.985, ["Bancamiga", "Banco de Venezuela"], ["Bancamiga", "SpecificBank"]),
+            ("Banesco_PagoMovil_P2P", 890, 0.992, ["Banesco"], ["Banesco"]),
+            ("Provincial_Instant", 430, 0.981, ["BBVA Banco Provincial"], ["BBVABancoProvincial"]),
+            ("Mercantil_Directo", 1100, 0.994, ["Mercantil"], ["Mercantil"]),
+            ("BNC_Crypto_Fast", 520, 0.987, ["BNC", "Pago Móvil"], ["BancoNacionaldeCredito", "PagoMovil"]),
+            ("Activo_Cambios", 310, 0.982, ["Banco Activo"], ["BancoActivo"]),
         ]
 
         items = []
-        for i in range(rows):
-            name = merchant_names[i % len(merchant_names)]
-            price_offset = round(i * 0.05, 2)
+        for i, (name, orders_count, finish_rate, bank_labels, pay_type_codes) in enumerate(merchant_data):
+            if merchant_check and orders_count < 500:
+                continue
+
+            # Si se especificó pay_types, comprobar coincidencia
+            if pay_types:
+                matched = False
+                for pt in pay_types:
+                    pt_clean = pt.strip().lower()
+                    if any(pt_clean in code.lower() or pt_clean in label.lower() for code in pay_type_codes for label in bank_labels):
+                        matched = True
+                        break
+                if not matched:
+                    continue
+
+            price_offset = round(i * 0.40, 2)
             calculated_price = round(base_price - price_offset if trade_type == "BUY" else base_price + price_offset, 2)
+
+            min_amt = 500.0 + (i * 200.0)
+            max_amt = 50000.0 + (i * 5000.0)
+            if trans_amount is not None and (trans_amount < min_amt or trans_amount > max_amt):
+                continue
+
+            methods = [
+                BinanceTradeMethod(
+                    tradeMethodName=label,
+                    payType=code,
+                    tradeMethodShortName=label,
+                )
+                for label, code in zip(bank_labels, pay_type_codes)
+            ]
 
             item = BinanceSearchOrderItem(
                 adv=BinanceAdDetail(
@@ -210,23 +251,49 @@ class MockBinanceP2PClient:
                     fiatUnit=fiat,
                     price=str(calculated_price),
                     surplusAmount=str(1000.0 + (i * 250.0)),
-                    minSingleTransAmount="500.00",
-                    maxSingleTransAmount="50000.00"
+                    minSingleTransAmount=f"{min_amt:.2f}",
+                    maxSingleTransAmount=f"{max_amt:.2f}",
+                    tradeMethods=methods,
                 ),
                 advertiser=BinanceAdvertiserInfo(
                     nickName=name,
-                    monthOrderCount=250 + (i * 45),
-                    monthFinishRate=round(0.985 + (i * 0.001), 3)
-                )
+                    monthOrderCount=orders_count,
+                    monthFinishRate=finish_rate,
+                ),
             )
             items.append(item)
+            if len(items) >= rows:
+                break
 
         return BinanceSearchResponse(
             code="000000",
             message="SUCCESS",
             success=True,
             total=len(items),
-            data=items
+            data=items,
+        )
+
+    def get_order_book(
+        self,
+        asset: str = "USDT",
+        fiat: str = "VES",
+        trade_type: str = "BUY",
+        page: int = 1,
+        rows: int = 10,
+        pay_types: list[str] | None = None,
+        trans_amount: float | None = None,
+        merchant_check: bool = False,
+    ) -> BinanceSearchResponse:
+        """Alias retrocompatible para search_p2p_ads."""
+        return self.search_p2p_ads(
+            asset=asset,
+            fiat=fiat,
+            trade_type=trade_type,
+            page=page,
+            rows=rows,
+            pay_types=pay_types,
+            trans_amount=trans_amount,
+            merchant_check=merchant_check,
         )
 
     def get_order_history(

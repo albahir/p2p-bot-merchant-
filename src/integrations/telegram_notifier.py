@@ -42,14 +42,27 @@ class TelegramNotifier:
 
     def __init__(
         self,
-        bot_token: str,
-        default_chat_id: str,
+        bot_token: str = "",
+        default_chat_id: str = "",
         allowed_user_ids: list[int] | None = None,
         proxy_url: str | None = None,
         api_base_url: str = "https://api.telegram.org",
         use_sandbox: bool = True,
         session_factory: Any = None,
     ):
+        if not bot_token or not default_chat_id:
+            try:
+                from config.settings import Settings
+                settings = Settings()
+                bot_token = bot_token or settings.TELEGRAM_BOT_TOKEN
+                default_chat_id = default_chat_id or settings.TELEGRAM_ALERT_CHAT_ID
+                if allowed_user_ids is None:
+                    allowed_user_ids = settings.telegram_allowed_users
+                proxy_url = proxy_url or settings.TELEGRAM_PROXY_URL
+                api_base_url = api_base_url or settings.TELEGRAM_API_BASE_URL
+            except (ValueError, KeyError, OSError, RuntimeError, TypeError) as e:
+                logger.debug(f"Ajuste automático de configuración Telegram omitido: {e}")
+
         self.bot_token = bot_token
         self.default_chat_id = default_chat_id
         self.allowed_user_ids = allowed_user_ids or []
@@ -180,6 +193,7 @@ class TelegramNotifier:
         """Registra la lista oficial de comandos en Telegram para el menú nativo."""
         commands = [
             {"command": "spread", "description": "📈 Spreads por banco y arbitraje cruzado"},
+            {"command": "matriz", "description": "📊 Matriz de spreads y arbitraje en vivo"},
             {"command": "bcv", "description": "🏛️ Tasa oficial BCV y brecha cambiaria"},
             {"command": "status", "description": "📊 Estado del bot y modo operativo"},
             {"command": "cierre", "description": "📑 Cierre fiscal mensual en Excel"},
@@ -278,8 +292,17 @@ class TelegramNotifier:
                 err_msg = str(e)
                 logger.error(f"TELEGRAM: Excepción inesperada: {err_msg}")
                 self.last_error = err_msg
-                return False
         return False
+
+    def send_message(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        parse_mode: str | None = "Markdown",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        """Alias para send_alert."""
+        return self.send_alert(text=text, chat_id=chat_id, parse_mode=parse_mode, reply_markup=reply_markup)
 
     def send_document(
         self,
@@ -388,6 +411,10 @@ class TelegramNotifier:
         text_menu_map = {
             "📈 spreads p2p": "/spread",
             "📈 spreads & arbitraje": "/spread",
+            "📊 matriz spreads": "/matriz",
+            "📊 matriz arbitraje": "/matriz",
+            "📊 matriz": "/matriz",
+            "📈 matriz de spreads": "/matriz",
             "🏛️ tasa bcv": "/bcv",
             "📊 estado": "/status",
             "📊 estado bot": "/status",
@@ -410,7 +437,7 @@ class TelegramNotifier:
 
         # --- Aislamiento estricto para INVITADO ---
         if role == "INVITADO":
-            if cmd in ("/spread", "/arbitraje", "/margen"):
+            if cmd in ("/spread", "/arbitraje", "/margen", "/matriz", "/matriz_spreads"):
                 return self._handle_spread_monitor(clean_cmd_str)
             elif cmd in ("/bcv", "/tasa", "/dolar_bcv"):
                 return self._handle_bcv_query()
@@ -483,7 +510,7 @@ class TelegramNotifier:
             return self._handle_save_cedula(clean_cmd_str)
         elif cmd in ("/conciliacion", "/reconciliacion", "/reconstruccion"):
             return self._handle_fiscal_reconciliation(clean_cmd_str)
-        elif cmd in ("/spread", "/arbitraje", "/margen"):
+        elif cmd in ("/spread", "/arbitraje", "/margen", "/matriz", "/matriz_spreads"):
             return self._handle_spread_monitor(clean_cmd_str)
         elif cmd in ("/help", "/ayuda", "/start", "/menu"):
             if role == "ADMIN":
@@ -843,39 +870,26 @@ class TelegramNotifier:
         finally:
             db.close()
 
-    def _handle_spread_monitor(self, command: str) -> str:
-        """Procesa /spread y reporta cotizaciones bancarias, arbitraje y brecha BCV."""
+    @classmethod
+    def format_arbitrage_matrix_report(
+        cls,
+        quotes: list[Any],
+        bcv_rate: float,
+        bcv_gap: float,
+    ) -> str:
+        """Formatea un reporte enriquecido de la Matriz de Spreads y Arbitraje para Telegram."""
         from src.core.spread_monitor import SpreadMonitor
-        from src.data.database import SessionLocal
-        from src.data.models import Order
 
         monitor = SpreadMonitor()
-        quotes = monitor.get_market_quotes()
-        if not quotes:
-            return "ℹ️ No hay cotizaciones disponibles en este momento."
-
-        bcv_rate = 820.0
-        db = SessionLocal()
-        try:
-            latest = db.query(Order).filter(cast(Any, Order.bcv_rate > 0)).order_by(Order.id.desc()).first()
-            if latest and latest.bcv_rate:
-                bcv_rate = float(cast(Any, latest.bcv_rate))
-        except (SQLAlchemyError, ValueError, TypeError) as e:
-            logger.warning(f"Error consultando última tasa BCV: {e}")
-        finally:
-            db.close()
-
-        ref_price = quotes[0].buy_rate
-        bcv_gap = monitor.calculate_bcv_gap(p2p_price=ref_price, bcv_rate=bcv_rate)
-
         lines = [
-            "📈 *Monitor de Spreads P2P (Binance VES / USDT)*\n",
+            "📈 *Monitor de Spreads P2P & Matriz de Arbitraje (Binance VES / USDT)*\n",
             f"🏛️ *BCV Oficial*: `{bcv_rate:,.2f} Bs` (Brecha: `{bcv_gap:+.2f}%`)",
             "━━━━━━━━━━━━━━━━━━━━",
+            "*Cotizaciones y Rentabilidad Bancaria (100 USDT):*",
         ]
 
-        # Bancos principales
-        for q in quotes[:5]:
+        # Bancos evaluados
+        for q in quotes:
             calc = monitor.calculate_cycle_net_profit(crypto_amount=100.0, buy_price=q.buy_rate, sell_price=q.sell_rate)
             icon = "🟢" if calc.warning_level == "OK" else ("🟡" if calc.warning_level == "CRITICAL_MARGIN" else "🔴")
             lines.append(
@@ -888,14 +902,49 @@ class TelegramNotifier:
         if cross:
             lines.append("━━━━━━━━━━━━━━━━━━━━")
             lines.append(
-                f"⚡ *Mejor Arbitraje Cruzado*:\n"
-                f"Comprar en *{cross['buy_bank']}* (`{cross['buy_rate']:,.2f}`)\n"
-                f"➔ Vender en *{cross['sell_bank']}* (`{cross['sell_rate']:,.2f}`)\n"
-                f"Spread Cruzado: `{cross['spread_pct']:+.2f}%` | Retorno: `+{cross['net_profit_ves_100u']:,.2f} Bs/100u`"
+                f"⚡ *Mejor Arbitraje Cruzado Interbancario*:\n"
+                f"• Comprar en *{cross['buy_bank']}* (`{cross['buy_rate']:,.2f}`)\n"
+                f"• Vender en *{cross['sell_bank']}* (`{cross['sell_rate']:,.2f}`)\n"
+                f"• Spread Cruzado: `{cross['spread_pct']:+.2f}%` (`{cross['spread_ves']:+.2f} Bs`)\n"
+                f"• Retorno Neto Proyectado: `+{cross['net_profit_ves_100u']:,.2f} Bs` / 100 USDT"
             )
 
         lines.append("\n💡 *Regla de Oro*: En VES se requiere un spread ≥ *0.80%* para amortizar comisiones de Binance (0.35%) y bancarias (0.30% Pago Móvil).")
         return "\n".join(lines)
+
+    def _handle_spread_monitor(self, command: str) -> str:
+        """Procesa /spread y /matriz reportando cotizaciones bancarias en vivo, arbitraje y brecha BCV."""
+        from src.core.spread_monitor import SpreadMonitor
+        from src.data.database import SessionLocal
+        from src.data.models import Order
+
+        monitor = SpreadMonitor()
+        try:
+            quotes = monitor.fetch_live_quotes(use_public_bapi=True)
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
+            logger.debug(f"Fallback a cotizaciones simuladas tras error de red: {e}")
+            quotes = monitor.get_market_quotes(use_sandbox=True)
+
+        if not quotes:
+            return "ℹ️ No hay cotizaciones disponibles en este momento."
+
+        bcv_rate = 820.0
+        db = SessionLocal()
+        try:
+            latest = db.query(Order).filter(cast(Any, Order.bcv_rate > 0)).order_by(Order.id.desc()).first()
+            if latest and latest.bcv_rate:
+                bcv_rate = float(cast(Any, latest.bcv_rate))
+            else:
+                from src.reporting.bcv_service import BCVService
+                bcv_rate = BCVService().fetch_current_rate()
+        except (SQLAlchemyError, ValueError, TypeError, OSError, RuntimeError, httpx.HTTPError) as e:
+            logger.warning(f"Error consultando última tasa BCV: {e}")
+        finally:
+            db.close()
+
+        ref_price = quotes[0].buy_rate if quotes else 0.0
+        bcv_gap = monitor.calculate_bcv_gap(p2p_price=ref_price, bcv_rate=bcv_rate)
+        return self.format_arbitrage_matrix_report(quotes=quotes, bcv_rate=bcv_rate, bcv_gap=bcv_gap)
 
     def _handle_bcv_query(self) -> str:
         """Procesa /bcv consultando la cotización oficial en vivo y comparando con P2P."""
