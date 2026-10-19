@@ -9,7 +9,7 @@ from src.reporting.dashboard.components.arbitrage_matrix import (
 )
 
 
-def _mock_columns(n_or_spec):
+def _mock_columns(n_or_spec, *args, **kwargs):
     count = n_or_spec if isinstance(n_or_spec, int) else len(n_or_spec)
     return [MagicMock() for _ in range(count)]
 

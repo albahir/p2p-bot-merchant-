@@ -1,10 +1,11 @@
-"""Monitor de Brecha Cambiaria, Matriz de Arbitraje Bancario y Rentabilidad Real P2P.
-Implementa el cálculo con comisiones bancarias ocultas (0.3% Pago Móvil) y regla del 0.80%.
-"""
-
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
+
+import httpx
+
+logger = logging.getLogger("spread_monitor")
 
 
 @dataclass
@@ -14,6 +15,13 @@ class BankRateQuote:
     buy_rate: float       # Tasa a la que compras USDT (entregas Bs)
     sell_rate: float      # Tasa a la que vendes USDT (recibes Bs)
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    total_ads: int = 0
+    score: float = 0.0
+    liquidity_pct: float = 0.0
+    binance_code: str = ""
+    exchanges: list[str] = field(default_factory=lambda: ["binance"])
+    source: str = "binance"
+
 
     @property
     def spread_ves(self) -> float:
@@ -182,16 +190,308 @@ class SpreadMonitor:
 
         return best_cross
 
-    def get_market_quotes(self) -> list[BankRateQuote]:
+    BANK_PAY_TYPE_MAP: ClassVar[dict[str, str]] = {
+        "Banco de Venezuela": "SpecificBank",
+        "Banesco": "Banesco",
+        "Pago Móvil": "PagoMovil",
+        "Mercantil": "Mercantil",
+        "Bancamiga": "Bancamiga",
+        "BBVA Banco Provincial": "BBVABancoProvincial",
+        "BNC Banco Nacional de Crédito": "BancoNacionaldeCredito",
+        "Banco Activo": "BancoActivo",
+    }
+
+    # Mapa de los 21 métodos de pago oficiales de Binance P2P detectados en Venezuela
+    BINANCE_METHODS_MAP: ClassVar[dict[str, str]] = {
+        "Pago Móvil": "PagoMovil",
+        "Banesco": "Banesco",
+        "Banco de Venezuela": "BancoDeVenezuela",
+        "Mercantil": "Mercantil",
+        "Transferencia Bancaria (BANK)": "BANK",
+        "BBVA Provincial": "Provincial",
+        "BNC Banco Nacional de Crédito": "BNCBancoNacional",
+        "Bancamiga": "Bancamiga",
+        "BBVA Bank": "BBVABank",
+        "Bancaribe": "Bancaribe",
+        "Banco del Tesoro": "BancoDelTesoro",
+        "Banco Venezolano de Crédito": "BancoVeneCredit",
+        "BDDT Banco Digital": "BDDT",
+        "Banplus": "Banplus",
+        "Specific Bank": "SpecificBank",
+        "Banco Plaza": "BancoPlaza",
+        "BFC Banco Fondo Común": "BFC",
+        "Banco Activo": "BancoActivo",
+        "Recarga Pines": "RecargaPines",
+        "R4 Banco Microfinanciero": "R4",
+        "N58 Banco Digital": "N58",
+    }
+
+    @staticmethod
+    def _normalize_bank_name(raw_name: str) -> str:
+        """Normaliza nombres crudos devueltos por APIs externas al nombre institucional estándar."""
+        mapping = {
+            "BancoDeVenezuela": "Banco de Venezuela",
+            "BNCBancoNacional": "BNC Banco Nacional de Crédito",
+            "Provincial": "BBVA Provincial",
+            "BBVABank": "BBVA Provincial",
+            "BANK": "Transferencia Bancaria",
+            "BancoDelTesoro": "Banco del Tesoro",
+            "BancoVeneCredit": "Banco Venezolano de Crédito",
+            "BDDT": "Banco Digital de los Trabajadores",
+            "BFC": "BFC Banco Fondo Común",
+            "BancoActivo": "Banco Activo",
+            "BancoPlaza": "Banco Plaza",
+            "R4": "R4 Banco Microfinanciero",
+            "N58": "N58 Banco Digital",
+            "SpecificBank": "Banco de Venezuela (Transfers)",
+        }
+        return mapping.get(raw_name, raw_name)
+
+    def fetch_pitbullchain_quotes(
+        self,
+        exchange: str = "binance",
+        timeout: float = 6.0,
+    ) -> list[BankRateQuote]:
+        """Obtiene el ranking y cotizaciones agregadas de bancos P2P desde la API de PitbullChain."""
+        url = f"https://pitbullchain.com/api/p2p/banks?exchange={exchange}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+            "Accept": "application/json",
+        }
+        quotes: list[BankRateQuote] = []
+        now = datetime.now(UTC)
+
+        try:
+            with httpx.Client(timeout=timeout, headers=headers) as client:
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    logger.debug(f"PitbullChain API returned status {resp.status_code}")
+                    return []
+
+                payload = resp.json()
+                data = payload.get("data", {})
+                banks_list = data.get("banks", [])
+
+                for b in banks_list:
+                    raw_bank = str(b.get("bank", "")).strip()
+                    if not raw_bank:
+                        continue
+
+                    norm_bank = self._normalize_bank_name(raw_bank)
+                    avg_buy = float(b.get("avgBuyPrice", 0.0) or 0.0)
+                    avg_sell = float(b.get("avgSellPrice", 0.0) or 0.0)
+
+                    # Si solo hay precio en un sentido, estimar margen conservador
+                    if avg_buy > 0 and avg_sell <= 0:
+                        avg_sell = round(avg_buy * 0.995, 2)
+                    elif avg_sell > 0 and avg_buy <= 0:
+                        avg_buy = round(avg_sell * 1.005, 2)
+                    elif avg_buy <= 0 and avg_sell <= 0:
+                        continue
+
+                    total_ads = int(b.get("totalAds", 0) or 0)
+                    score = float(b.get("score", 0.0) or 0.0)
+                    liquidity_pct = float(b.get("liquidityPct", 0.0) or 0.0)
+                    binance_code = str(b.get("binanceId", "") or b.get("bankCode", "") or "")
+                    exchanges = list(b.get("exchanges", ["binance"]))
+
+                    quotes.append(
+                        BankRateQuote(
+                            bank_name=norm_bank,
+                            buy_rate=avg_buy,
+                            sell_rate=avg_sell,
+                            updated_at=now,
+                            total_ads=total_ads,
+                            score=score,
+                            liquidity_pct=liquidity_pct,
+                            binance_code=binance_code,
+                            exchanges=exchanges,
+                            source="pitbullchain",
+                        )
+                    )
+
+            return quotes
+        except (httpx.RequestError, ValueError, KeyError, OSError, RuntimeError) as e:
+            logger.debug(f"No se pudo consultar PitbullChain API ({e})")
+            return []
+
+    def fetch_yadio_rate(self, fiat: str = "VES", timeout: float = 5.0) -> float | None:
+        """Consulta la tasa P2P consolidada de mercado libre en Yadio API."""
+        url = f"https://api.yadio.io/rate/{fiat}"
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    val = data.get("usd")
+                    return float(val) if val is not None else None
+        except (httpx.RequestError, ValueError, KeyError, OSError, RuntimeError) as e:
+            logger.debug(f"Error consultando Yadio API: {e}")
+        return None
+
+    def fetch_criptoya_rate(
+        self,
+        asset: str = "USDT",
+        fiat: str = "VES",
+        volume: float = 1.0,
+        timeout: float = 5.0,
+    ) -> dict[str, float] | None:
+        """Consulta el spread consolidado Ask/Bid de Binance P2P en CriptoYa API."""
+        url = f"https://criptoya.com/api/binancep2p/{asset}/{fiat}/{volume}"
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ask = float(data.get("ask", 0.0) or 0.0)
+                    bid = float(data.get("bid", 0.0) or 0.0)
+                    if ask > 0 and bid > 0:
+                        return {"ask": ask, "bid": bid}
+        except (httpx.RequestError, ValueError, KeyError, OSError, RuntimeError) as e:
+            logger.debug(f"Error consultando CriptoYa API: {e}")
+        return None
+
+    def fetch_live_quotes(
+        self,
+        client: Any | None = None,
+        asset: str = "USDT",
+        fiat: str = "VES",
+        banks: list[str] | None = None,
+        use_public_bapi: bool = False,
+        exchange: str = "binance",
+    ) -> list[BankRateQuote]:
+        """Obtiene las mejores cotizaciones de compra y venta por banco con arquitectura Failover Multinivel.
+
+        Nivel 1: PitbullChain Aggregated API (Bancos, Spreads, Liquidez, Scores y Anuncios).
+        Nivel 2: Binance P2P Client (SAPI / BAPI).
+        Nivel 3: CriptoYa / Yadio API (Ancla macro de mercado).
+        Nivel 4: Cotizaciones calibradas en memoria (Fail-closed / offline).
+        """
+        # Si se suministró un cliente explícito (ej. en tests automatizados), usarlo directamente
+        if client is not None:
+            target_banks = banks or list(self.BANK_PAY_TYPE_MAP.keys())
+            quotes: list[BankRateQuote] = []
+            now = datetime.now(UTC)
+
+            try:
+                buy_resp = client.search_p2p_ads(
+                    asset=asset,
+                    fiat=fiat,
+                    trade_type="BUY",
+                    rows=20,
+                    use_public_bapi=use_public_bapi,
+                )
+                sell_resp = client.search_p2p_ads(
+                    asset=asset,
+                    fiat=fiat,
+                    trade_type="SELL",
+                    rows=20,
+                    use_public_bapi=use_public_bapi,
+                )
+
+                for bank in target_banks:
+                    pay_code = self.BANK_PAY_TYPE_MAP.get(bank, "").lower()
+                    bank_lower = bank.lower()
+
+                    best_buy: float | None = None
+                    for item in buy_resp.data:
+                        names_lower = [b.lower() for b in item.bank_names]
+                        if any(bank_lower in n or (pay_code and pay_code in n) for n in names_lower):
+                            p = float(item.adv.price)
+                            if best_buy is None or p < best_buy:
+                                best_buy = p
+
+                    best_sell: float | None = None
+                    for item in sell_resp.data:
+                        names_lower = [b.lower() for b in item.bank_names]
+                        if any(bank_lower in n or (pay_code and pay_code in n) for n in names_lower):
+                            p = float(item.adv.price)
+                            if best_sell is None or p > best_sell:
+                                best_sell = p
+
+                    if best_buy is not None and best_sell is not None:
+                        quotes.append(BankRateQuote(bank_name=bank, buy_rate=best_buy, sell_rate=best_sell, updated_at=now, source="binance"))
+                    elif best_buy is not None:
+                        quotes.append(BankRateQuote(bank_name=bank, buy_rate=best_buy, sell_rate=round(best_buy * 1.01, 2), updated_at=now, source="binance"))
+
+                if quotes:
+                    return quotes
+                return self.get_market_quotes()
+            except (httpx.RequestError, RuntimeError, ValueError, KeyError, OSError, TypeError) as e:
+                logger.warning(f"Fallo consultando cliente Binance P2P ({e}). Usando cotizaciones calibradas.")
+                return self.get_market_quotes()
+
+        # Nivel 1: PitbullChain Aggregated API
+        pitbull_quotes = self.fetch_pitbullchain_quotes(exchange=exchange)
+        if pitbull_quotes:
+            return pitbull_quotes
+
+        # Nivel 2: Binance P2P BAPI / SAPI con credenciales si están disponibles
+        try:
+            from config.settings import Settings
+            from src.core.binance_client import BinanceP2PClient
+            from src.security.api_key_manager import ApiKeyManager
+
+            settings = Settings()
+            api_key = ""
+            private_key = ""
+            try:
+                km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY)
+                api_key = km.get_secret("binance_api_key") or ""
+                private_key = km.get_secret("binance_private_key") or ""
+            except (ValueError, KeyError, OSError, RuntimeError, TypeError):
+                api_key = ""
+                private_key = ""
+
+            client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
+            binance_quotes = self.fetch_live_quotes(
+                client=client,
+                asset=asset,
+                fiat=fiat,
+                banks=banks,
+                use_public_bapi=True,
+            )
+            if binance_quotes:
+                return binance_quotes
+        except (ImportError, ValueError, KeyError, OSError, RuntimeError) as e:
+            logger.debug(f"Fallo Nivel 2 Binance Client: {e}")
+
+        # Nivel 3: Anclaje de precio mediante CriptoYa / Yadio
+        yadio_usd = self.fetch_yadio_rate(fiat=fiat)
+        cripto_data = self.fetch_criptoya_rate(asset=asset, fiat=fiat)
+
+        anchor_price: float | None = None
+        if yadio_usd and yadio_usd > 0:
+            anchor_price = yadio_usd
+        elif cripto_data and cripto_data.get("ask", 0) > 0:
+            anchor_price = cripto_data["ask"]
+
+        if anchor_price and anchor_price > 0:
+            now = datetime.now(UTC)
+            return [
+                BankRateQuote("Pago Móvil", buy_rate=round(anchor_price * 1.003, 2), sell_rate=round(anchor_price * 0.996, 2), updated_at=now, total_ads=20, score=85, liquidity_pct=25.0, binance_code="PagoMovil", source="yadio_anchor"),
+                BankRateQuote("Banesco", buy_rate=round(anchor_price * 1.002, 2), sell_rate=round(anchor_price * 0.997, 2), updated_at=now, total_ads=18, score=88, liquidity_pct=22.0, binance_code="Banesco", source="yadio_anchor"),
+                BankRateQuote("Banco de Venezuela", buy_rate=round(anchor_price * 1.0025, 2), sell_rate=round(anchor_price * 0.998, 2), updated_at=now, total_ads=15, score=80, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="yadio_anchor"),
+                BankRateQuote("Mercantil", buy_rate=round(anchor_price * 1.0035, 2), sell_rate=round(anchor_price * 0.9975, 2), updated_at=now, total_ads=8, score=60, liquidity_pct=10.0, binance_code="Mercantil", source="yadio_anchor"),
+                BankRateQuote("Bancamiga", buy_rate=round(anchor_price * 1.001, 2), sell_rate=round(anchor_price * 1.015, 2), updated_at=now, total_ads=4, score=50, liquidity_pct=5.0, binance_code="Bancamiga", source="yadio_anchor"),
+            ]
+
+        # Nivel 4: Fallback de seguridad (Cotizaciones calibradas offline)
+        return self.get_market_quotes()
+
+    def get_market_quotes(self, client: Any | None = None, use_sandbox: bool = True) -> list[BankRateQuote]:
         """Obtiene cotizaciones de mercado en tiempo real o genera instantáneas calibradas."""
-        # Cotizaciones base calibradas con el mercado real de Binance P2P VES
+        if not use_sandbox:
+            return self.fetch_live_quotes(client=client, use_public_bapi=True)
+
         now = datetime.now(UTC)
         return [
-            BankRateQuote("Banco de Venezuela", buy_rate=1001.20, sell_rate=1008.50, updated_at=now),
-            BankRateQuote("Banesco", buy_rate=1002.50, sell_rate=1012.80, updated_at=now),
-            BankRateQuote("Pago Móvil", buy_rate=1001.80, sell_rate=1011.00, updated_at=now),
-            BankRateQuote("Mercantil", buy_rate=1002.00, sell_rate=1010.50, updated_at=now),
-            BankRateQuote("Bancamiga", buy_rate=1000.80, sell_rate=1016.50, updated_at=now),
-            BankRateQuote("BNC Banco Nacional de Crédito", buy_rate=1001.00, sell_rate=1014.20, updated_at=now),
-            BankRateQuote("Banco Activo", buy_rate=998.50, sell_rate=1021.00, updated_at=now),
+            BankRateQuote("Banco de Venezuela", buy_rate=1001.20, sell_rate=1008.50, updated_at=now, total_ads=15, score=82.0, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="calibrated"),
+            BankRateQuote("Banesco", buy_rate=1002.50, sell_rate=1012.80, updated_at=now, total_ads=18, score=89.0, liquidity_pct=22.0, binance_code="Banesco", source="calibrated"),
+            BankRateQuote("Pago Móvil", buy_rate=1001.80, sell_rate=1011.00, updated_at=now, total_ads=22, score=88.0, liquidity_pct=25.0, binance_code="PagoMovil", source="calibrated"),
+            BankRateQuote("Mercantil", buy_rate=1002.00, sell_rate=1010.50, updated_at=now, total_ads=7, score=55.0, liquidity_pct=9.0, binance_code="Mercantil", source="calibrated"),
+            BankRateQuote("Bancamiga", buy_rate=1000.80, sell_rate=1016.50, updated_at=now, total_ads=3, score=45.0, liquidity_pct=4.0, binance_code="Bancamiga", source="calibrated"),
+            BankRateQuote("BNC Banco Nacional de Crédito", buy_rate=1001.00, sell_rate=1014.20, updated_at=now, total_ads=2, score=43.0, liquidity_pct=3.0, binance_code="BNCBancoNacional", source="calibrated"),
+            BankRateQuote("Banco Activo", buy_rate=998.50, sell_rate=1021.00, updated_at=now, total_ads=1, score=42.0, liquidity_pct=1.0, binance_code="BancoActivo", source="calibrated"),
         ]
+

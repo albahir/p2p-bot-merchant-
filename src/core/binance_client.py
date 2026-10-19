@@ -47,8 +47,8 @@ class BinanceP2PClient:
 
     def __init__(
         self,
-        api_key: str,
-        private_key_pem: str,
+        api_key: str = "",
+        private_key_pem: str = "",
         base_url: str = "https://api.binance.com",
         recv_window: int = 5000
     ):
@@ -157,29 +157,71 @@ class BinanceP2PClient:
         retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
         reraise=True
     )
+    def search_p2p_ads(
+        self,
+        asset: str = "USDT",
+        fiat: str = "VES",
+        trade_type: str = "BUY",
+        page: int = 1,
+        rows: int = 10,
+        pay_types: list[str] | None = None,
+        trans_amount: float | None = None,
+        merchant_check: bool = False,
+        use_public_bapi: bool = False,
+    ) -> BinanceSearchResponse:
+        """Consulta y valida el order book de Binance P2P con filtros bancarios y esquemas tipados."""
+        if use_public_bapi:
+            url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+        else:
+            url = f"{self.base_url}/sapi/v1/c2c/orderMatch/search"
+
+        payload: dict[str, Any] = {
+            "asset": asset,
+            "fiat": fiat,
+            "tradeType": trade_type,
+            "page": page,
+            "rows": rows,
+            "payTypes": pay_types or [],
+            "transAmount": str(trans_amount) if trans_amount is not None else "",
+            "merchantCheck": merchant_check,
+            "publisherType": "merchant" if merchant_check else None,
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["X-MBX-APIKEY"] = self.api_key
+
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(url, json=payload, headers=headers)
+            self.check_weight(response.headers)
+            raw_data = self._handle_response_errors(response)
+            validated = BinanceSearchResponse.model_validate(raw_data)
+            return cast(BinanceSearchResponse, validated)
+
     def get_order_book(
         self,
         asset: str = "USDT",
         fiat: str = "VES",
         trade_type: str = "BUY",
         page: int = 1,
-        rows: int = 10
+        rows: int = 10,
+        pay_types: list[str] | None = None,
+        trans_amount: float | None = None,
+        merchant_check: bool = False,
     ) -> BinanceSearchResponse:
-        """Consulta y valida el order book público de Binance P2P con esquemas tipados."""
-        url = f"{self.base_url}/sapi/v1/c2c/orderMatch/search"
-        payload = {
-            "asset": asset,
-            "fiat": fiat,
-            "tradeType": trade_type,
-            "page": page,
-            "rows": rows
-        }
-        with httpx.Client(timeout=10.0) as client:
-            response = client.post(url, json=payload)
-            self.check_weight(response.headers)
-            raw_data = self._handle_response_errors(response)
-            validated = BinanceSearchResponse.model_validate(raw_data)
-            return cast(BinanceSearchResponse, validated)
+        """Alias retrocompatible para search_p2p_ads."""
+        return self.search_p2p_ads(
+            asset=asset,
+            fiat=fiat,
+            trade_type=trade_type,
+            page=page,
+            rows=rows,
+            pay_types=pay_types,
+            trans_amount=trans_amount,
+            merchant_check=merchant_check,
+        )
 
     def get_order_history(
         self,

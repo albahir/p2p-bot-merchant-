@@ -78,3 +78,97 @@ def test_binance_client_get_order_history_sends_signature(monkeypatch):
     assert "signature" in captured_request["params"]
     assert captured_request["headers"]["X-MBX-APIKEY"] == "test_api_key_123"
 
+
+def test_binance_client_search_p2p_ads_filters_and_trade_methods(monkeypatch):
+    """get_order_book / search_p2p_ads debe enviar filtros bancarios y parsear tradeMethods."""
+    client = BinanceP2PClient(api_key="test_api_key", private_key_pem="test_pem")
+
+    captured_payload = {}
+
+    def mock_post(self, url, json=None, headers=None):
+        captured_payload["url"] = str(url)
+        captured_payload["json"] = json
+        mock_data = {
+            "code": "000000",
+            "message": "success",
+            "total": 1,
+            "success": True,
+            "data": [
+                {
+                    "adv": {
+                        "advNo": "ADV_123",
+                        "tradeType": "BUY",
+                        "asset": "USDT",
+                        "fiatUnit": "VES",
+                        "price": "1005.50",
+                        "surplusAmount": "2500.00",
+                        "minSingleTransAmount": "500.00",
+                        "maxSingleTransAmount": "50000.00",
+                        "tradeMethods": [
+                            {"tradeMethodName": "Banco de Venezuela", "payType": "SpecificBank"},
+                            {"tradeMethodName": "Pago Móvil", "payType": "PagoMovil"},
+                        ],
+                    },
+                    "advertiser": {
+                        "nickName": "MerchantPro",
+                        "monthOrderCount": 850,
+                        "monthFinishRate": 0.995,
+                    },
+                }
+            ],
+        }
+        return httpx.Response(
+            status_code=200,
+            json=mock_data,
+            headers={"x-mbx-used-weight": "1"},
+            request=httpx.Request("POST", str(url)),
+        )
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    res = client.search_p2p_ads(
+        asset="USDT",
+        fiat="VES",
+        trade_type="BUY",
+        pay_types=["SpecificBank", "PagoMovil"],
+        trans_amount=1000.0,
+        merchant_check=True,
+    )
+
+    assert res.code == "000000"
+    assert len(res.data) == 1
+    item = res.data[0]
+    assert item.adv.price == "1005.50"
+    assert "Banco de Venezuela" in item.bank_names
+    assert "Pago Móvil" in item.bank_names
+    assert captured_payload["json"]["payTypes"] == ["SpecificBank", "PagoMovil"]
+    assert captured_payload["json"]["transAmount"] == "1000.0"
+    assert captured_payload["json"]["merchantCheck"] is True
+
+
+def test_mock_binance_search_p2p_ads_banks():
+    """MockBinanceP2PClient debe devolver anuncios con métodos bancarios y respetar pay_types."""
+    from src.core.binance_mock import MockBinanceP2PClient
+
+    mock = MockBinanceP2PClient()
+    # 1. Búsqueda general
+    res_all = mock.search_p2p_ads(asset="USDT", fiat="VES", trade_type="BUY", rows=10)
+    assert res_all.code == "000000"
+    assert len(res_all.data) > 0
+    first_ad = res_all.data[0]
+    assert len(first_ad.bank_names) > 0
+
+    # 2. Filtrado por Banesco
+    res_banesco = mock.search_p2p_ads(asset="USDT", fiat="VES", trade_type="BUY", pay_types=["Banesco"])
+    for ad in res_banesco.data:
+        assert any("Banesco" in b for b in ad.bank_names)
+
+    # 3. Filtrado por monto
+    res_amount = mock.search_p2p_ads(asset="USDT", fiat="VES", trade_type="BUY", trans_amount=2000.0)
+    for ad in res_amount.data:
+        min_amt = float(ad.adv.minSingleTransAmount or "0")
+        max_amt = float(ad.adv.maxSingleTransAmount or "99999999")
+        assert min_amt <= 2000.0 <= max_amt
+
+
+

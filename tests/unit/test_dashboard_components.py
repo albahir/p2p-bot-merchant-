@@ -64,3 +64,25 @@ def test_render_receipt_center_mock():
     assert mock_st.subheader.called or mock_st.markdown.called
 
 
+def test_render_binance_p2p_book_mock():
+    """Valida la ejecución de render_binance_p2p_book con cliente simulado y filtros."""
+    from src.core.binance_mock import MockBinanceP2PClient
+    from src.reporting.dashboard.components.binance_p2p_book import render_binance_p2p_book
+
+    mock_st = MagicMock()
+    mock_st.segmented_control.return_value = "Comprar USDT"
+    mock_st.selectbox.side_effect = ["VES", "USDT", "Banco de Venezuela"]
+    mock_st.number_input.return_value = 1000.0
+    mock_st.toggle.return_value = False
+    mock_st.button.return_value = False
+    mock_st.columns.side_effect = lambda spec, **kwargs: [MagicMock() for _ in (spec if isinstance(spec, list) else range(spec))]
+
+    mock_client = MockBinanceP2PClient()
+    render_binance_p2p_book(st_module=mock_st, client=mock_client, use_sandbox=True)
+
+    assert mock_st.subheader.called
+    assert mock_st.segmented_control.called
+    assert mock_st.selectbox.called
+
+
+

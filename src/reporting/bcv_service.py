@@ -43,6 +43,10 @@ class BCVService:
         logger.warning(f"No se pudo consultar el BCV, usando valor seguro de referencia: {DEFAULT_FALLBACK_RATE}")
         return DEFAULT_FALLBACK_RATE
 
+    def get_official_rate(self) -> float:
+        """Alias para fetch_current_rate que retorna la tasa oficial vigente."""
+        return self.fetch_current_rate()
+
     def fetch_full_rates(self) -> dict[str, Any]:
         """Extrae todas las tasas publicadas por el BCV (USD, EUR, CNY, TRY, RUB y Fecha Valor)."""
         headers = {
