@@ -20,6 +20,7 @@ class BCVService:
         self.bcv_url = bcv_url
         self.fallback_api_url = fallback_api_url
         self._cached_rate: float | None = None
+        self._cached_rates_dict: dict[str, Any] = {}
 
     def fetch_current_rate(self) -> float:
         """Obtiene la tasa oficial actual de USD/VES."""
@@ -57,9 +58,15 @@ class BCVService:
                 res = client.get(self.bcv_url, headers=headers)
                 if res.status_code == 200:
                     html = res.text
-                    return self._parse_bcv_html(html)
+                    parsed = self._parse_bcv_html(html)
+                    if parsed.get("usd"):
+                        self._cached_rates_dict = parsed
+                        self._cached_rate = float(parsed["usd"])
+                    return parsed
         except (httpx.RequestError, ValueError) as e:
             logger.debug(f"Error consultando tasas completas del BCV: {e}")
+        if self._cached_rates_dict:
+            return self._cached_rates_dict
         return {"usd": self.fetch_current_rate()}
 
     def _scrape_bcv_official(self) -> float | None:

@@ -889,16 +889,24 @@ class TelegramNotifier:
         ]
 
         # Bancos evaluados
+        # Deduplicar bancos por nombre para evitar entradas repetidas
+        seen_banks: dict[str, Any] = {}
         for q in quotes:
+            key = q.bank_name.strip().lower()
+            if key not in seen_banks or getattr(q, "total_ads", 0) > getattr(seen_banks[key], "total_ads", 0):
+                seen_banks[key] = q
+        unique_quotes = list(seen_banks.values())
+
+        for q in unique_quotes[:10]:
             calc = monitor.calculate_cycle_net_profit(crypto_amount=100.0, buy_price=q.buy_rate, sell_price=q.sell_rate)
             icon = "🟢" if calc.warning_level == "OK" else ("🟡" if calc.warning_level == "CRITICAL_MARGIN" else "🔴")
             lines.append(
                 f"{icon} *{q.bank_name}*:\n"
                 f"   Compra: `{q.buy_rate:,.2f}` | Venta: `{q.sell_rate:,.2f}`\n"
-                f"   Spread: `{q.spread_pct:+.2f}%` (`{q.spread_ves:+.2f} Bs`) | Retorno: `+{calc.net_profit_ves:,.2f} Bs`"
+                f"   Spread: `{q.spread_pct:+.2f}%` (`{q.spread_ves:+.2f} Bs`) | Retorno: `{calc.net_profit_ves:+,.2f} Bs`"
             )
 
-        cross = monitor.find_best_cross_arbitrage(quotes)
+        cross = monitor.find_best_cross_arbitrage(unique_quotes)
         if cross:
             lines.append("━━━━━━━━━━━━━━━━━━━━")
             lines.append(
@@ -906,7 +914,7 @@ class TelegramNotifier:
                 f"• Comprar en *{cross['buy_bank']}* (`{cross['buy_rate']:,.2f}`)\n"
                 f"• Vender en *{cross['sell_bank']}* (`{cross['sell_rate']:,.2f}`)\n"
                 f"• Spread Cruzado: `{cross['spread_pct']:+.2f}%` (`{cross['spread_ves']:+.2f} Bs`)\n"
-                f"• Retorno Neto Proyectado: `+{cross['net_profit_ves_100u']:,.2f} Bs` / 100 USDT"
+                f"• Retorno Neto Proyectado: `{cross['net_profit_ves_100u']:+,.2f} Bs` / 100 USDT"
             )
 
         lines.append("\n💡 *Regla de Oro*: En VES se requiere un spread ≥ *0.80%* para amortizar comisiones de Binance (0.35%) y bancarias (0.30% Pago Móvil).")
@@ -968,7 +976,7 @@ class TelegramNotifier:
             f"• *EUR Oficial*: `{eur:,.2f} VES/EUR`\n"
             f"• *Fecha Valor*: {fecha}\n"
             f"• *P2P USDT Referencial*: `{ref_p2p:,.2f} VES`\n"
-            f"• *Brecha Cambiaria*: `+{gap:+.2f}%`\n\n"
+            f"• *Brecha Cambiaria*: `{gap:+.2f}%`\n\n"
             f"💡 La tasa oficial del BCV es la base legal para la valoración de inventario FIFO y cumplimiento tributario ante el SENIAT."
         )
 
