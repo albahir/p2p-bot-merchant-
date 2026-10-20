@@ -162,3 +162,66 @@ def test_rate_alert_service_fires_on_significant_price_movement():
     assert major_alert is not None
     assert "1,026.00" in major_alert
 
+
+def test_rate_alert_service_anti_flapping_regression_prevention():
+    """Valida que una tasa con fecha anterior (Lunes 19) sea descartada si ya se conoce la del Martes 20."""
+    service = RateAlertService(cooldown_seconds=0)
+
+    # 1. Registrar tasa de Martes 20 de Octubre
+    alert_tue = service.check_bcv_rate_change(current_rate=881.88, fecha_valor="Martes, 20 Octubre 2026")
+    # Primera tasa registrada como base
+    assert alert_tue is None
+    assert service.last_known_bcv_rate == 881.88
+
+    # 2. Llega respuesta rezagada de CDN con Lunes 19 de Octubre
+    alert_mon = service.check_bcv_rate_change(current_rate=881.07, fecha_valor="Lunes, 19 Octubre 2026")
+    # Debe ser filtrada por fecha anterior
+    assert alert_mon is None, "No debe degradar a una fecha anterior ya superada"
+    assert service.last_known_bcv_rate == 881.88
+
+
+def test_rate_alert_service_anti_oscillation_debounce():
+    """Valida que la oscilación entre dos tasas dentro de la ventana de 30 minutos no dispare spam."""
+    service = RateAlertService(cooldown_seconds=0)
+    service.last_known_bcv_rate = 880.0
+
+    # Primer cambio genuino a 881.88
+    alert1 = service.check_bcv_rate_change(current_rate=881.88, fecha_valor="Martes, 20 Octubre 2026")
+    assert alert1 is not None
+
+    # Supongamos que la fecha es idéntica pero la tasa oscila hacia 881.07
+    alert2 = service.check_bcv_rate_change(current_rate=881.07, fecha_valor="Martes, 20 Octubre 2026")
+    assert alert2 is not None
+
+    # La tasa vuelve a oscilar inmediatamente a 881.88 (ya vista en los últimos 30 min)
+    alert3 = service.check_bcv_rate_change(current_rate=881.88, fecha_valor="Martes, 20 Octubre 2026")
+    assert alert3 is None, "Debe suprimir la oscilación repetitiva de CDN"
+
+
+def test_telegram_matrix_formatting_deduplication():
+    """Valida que el reporte de matriz en Telegram deduplique bancos y no muestre '+-'."""
+    from src.core.spread_monitor import BankRateQuote
+    from src.integrations.telegram_notifier import TelegramNotifier
+
+    quotes = [
+        BankRateQuote(bank_name="BBVA Provincial", buy_rate=1010.0, sell_rate=1009.0, total_ads=50),
+        BankRateQuote(bank_name="BBVA Provincial", buy_rate=1014.0, sell_rate=1009.0, total_ads=10),
+        BankRateQuote(bank_name="Banesco", buy_rate=1012.0, sell_rate=1006.0, total_ads=100),
+    ]
+
+    report = TelegramNotifier.format_arbitrage_matrix_report(
+        quotes=quotes,
+        bcv_rate=881.88,
+        bcv_gap=14.50,
+    )
+
+    # No debe tener '+-' en ningún punto
+    assert "+-" not in report
+    assert "++" not in report
+
+    # BBVA Provincial solo debe aparecer una vez en el encabezado de cotizaciones
+    lines = report.splitlines()
+    provincial_headers = [l for l in lines if "*BBVA Provincial*:" in l]
+    assert len(provincial_headers) == 1
+
+

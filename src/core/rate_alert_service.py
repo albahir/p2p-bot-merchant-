@@ -3,66 +3,157 @@ Emite alertas proactivas ante fluctuaciones cambiarias o spreads interbancarios 
 """
 
 import logging
+import re
 import time
+from datetime import date
 
 from src.core.spread_monitor import BankRateQuote, SpreadMonitor
 from src.reporting.bcv_service import BCVService
 
 logger = logging.getLogger("rate_alert_service")
 
+SPANISH_MONTHS = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12
+}
+
+
+def parse_fecha_valor(fecha_str: str) -> date | None:
+    """Extrae y normaliza una fecha calendario a partir de cadenas de Fecha Valor del BCV."""
+    if not fecha_str:
+        return None
+    cleaned = fecha_str.strip().lower()
+
+    # Formato común: 'Lunes, 19 Octubre 2026' o 'Martes, 20 Octubre  2026' o '19 de Octubre de 2026'
+    m = re.search(r'(\d{1,2})\s+(?:de\s+)?([a-záéíóú]+)\s+(?:de\s+)?(\d{4})', cleaned)
+    if m:
+        try:
+            day = int(m.group(1))
+            month_str = m.group(2)
+            year = int(m.group(3))
+            month = SPANISH_MONTHS.get(month_str)
+            if month and 1 <= day <= 31:
+                return date(year, month, day)
+        except ValueError:
+            pass
+
+    # Formato numérico DD/MM/YYYY o DD-MM-YYYY
+    m_num = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', cleaned)
+    if m_num:
+        try:
+            day = int(m_num.group(1))
+            month = int(m_num.group(2))
+            year = int(m_num.group(3))
+            return date(year, month, day)
+        except ValueError:
+            pass
+
+    return None
+
 
 class RateAlertService:
     """Monitor proactivo de cambios en la tasa oficial del BCV y spreads de mercado."""
 
-    def __init__(self, cooldown_seconds: int = 600):
+    def __init__(self, cooldown_seconds: int = 600, bcv_cooldown_seconds: int | None = None):
         self.cooldown_seconds = cooldown_seconds
+        self.bcv_cooldown_seconds = bcv_cooldown_seconds if bcv_cooldown_seconds is not None else cooldown_seconds
         self.last_known_bcv_rate: float | None = None
+        self.last_known_fecha_valor: str | None = None
+        self.last_known_fecha_date: date | None = None
         self.last_bcv_alert_time: float = 0.0
         self.last_arbitrage_alert_time: float = 0.0
         self.last_arbitrage_key: str | None = None
         self.last_arbitrage_buy_rate: float | None = None
         self.last_arbitrage_sell_rate: float | None = None
         self.last_arbitrage_spread_pct: float | None = None
+        self._recent_bcv_alerts: list[tuple[float, float]] = []  # (timestamp, rate)
         self.monitor = SpreadMonitor()
         self.bcv_service = BCVService()
 
     def check_bcv_rate_change(self, current_rate: float, fecha_valor: str = "") -> str | None:
-        """Detecta si la tasa oficial del BCV ha cambiado respecto al último valor conocido."""
+        """Detecta si la tasa oficial del BCV ha cambiado respecto al último valor conocido.
+
+        Implementa protección estricta anti-flapping (oscilación de balanceadores de carga / CDN)
+        y filtro cronológico de Fecha Valor.
+        """
         if current_rate <= 0:
             return None
 
+        now = time.time()
+        parsed_incoming_date = parse_fecha_valor(fecha_valor)
+
+        # Si es la primera tasa vista, registrarla sin emitir alerta
         if self.last_known_bcv_rate is None:
             self.last_known_bcv_rate = current_rate
-            logger.info(f"Tasa BCV base registrada: {current_rate:,.2f} VES/USD")
+            self.last_known_fecha_valor = fecha_valor
+            self.last_known_fecha_date = parsed_incoming_date
+            logger.info(f"Tasa BCV base registrada: {current_rate:,.2f} VES/USD (Fecha: {fecha_valor})")
             return None
 
-        # Comparar con tolerancia mínima de 0.01 VES
+        # 1. Filtro Cronológico de Fecha Valor:
+        # Si ya registramos una tasa con Fecha Valor más reciente (ej. Martes 20),
+        # jamás retroceder a una fecha anterior (ej. Lunes 19) causada por servidores desincronizados de CANTV/BCV.
+        if parsed_incoming_date and self.last_known_fecha_date and parsed_incoming_date < self.last_known_fecha_date:
+            logger.debug(
+                f"BCV Flapping filtrado: Se descartó respuesta desactualizada con fecha anterior "
+                f"({parsed_incoming_date} < {self.last_known_fecha_date})"
+            )
+            return None
+
+        # 2. Tolerancia mínima de variación (>= 0.01 VES)
         diff = round(current_rate - self.last_known_bcv_rate, 4)
-        if abs(diff) >= 0.01:
-            previous = self.last_known_bcv_rate
-            self.last_known_bcv_rate = current_rate
-            diff_pct = (diff / previous) * 100.0 if previous > 0 else 0.0
-            direction = "🔺 Subió" if diff > 0 else "🔻 Bajó"
+        if abs(diff) < 0.01:
+            return None
 
-            lines = [
-                "🔔 *¡CAMBIO EN TASA OFICIAL BCV DETECTADO!*\n",
-                f"• Tasa Anterior: `{previous:,.2f} VES/USD`",
-                f"• Nueva Tasa BCV: `{current_rate:,.2f} VES/USD` ({direction} `{diff_pct:+.2f}%`)",
-            ]
-            if fecha_valor:
-                lines.append(f"• Fecha Valor Oficial: *{fecha_valor}*")
+        # 3. Limpieza de ventana anti-flapping (últimos 30 minutos)
+        self._recent_bcv_alerts = [
+            (ts, r) for (ts, r) in self._recent_bcv_alerts if (now - ts) < 1800.0
+        ]
 
-            ref_p2p = 1000.0
-            quotes = self.monitor.get_market_quotes()
-            if quotes:
-                ref_p2p = quotes[0].buy_rate
-            gap = self.monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=current_rate)
-            lines.append(f"• Brecha P2P vs BCV: `{gap:+.2f}%`")
-            lines.append("\n💡 *Acción recomendada*: Revisa y ajusta los precios de tus anuncios Maker en Binance P2P.")
+        # Si esta tasa exacta ya fue alertada en los últimos 30 minutos, se trata de oscilación de CDN
+        if any(abs(current_rate - past_rate) < 0.005 for _, past_rate in self._recent_bcv_alerts):
+            logger.debug(f"BCV Flapping filtrado: Tasa {current_rate} ya fue alertada recientemente.")
+            return None
 
-            return "\n".join(lines)
+        # 4. Respeto al Cooldown de Alertas BCV
+        if (
+            self.bcv_cooldown_seconds > 0
+            and (now - self.last_bcv_alert_time) < self.bcv_cooldown_seconds
+            and abs(diff / self.last_known_bcv_rate) < 0.05
+        ):
+            logger.debug(f"BCV Cooldown activo: Alerta suprimida ({now - self.last_bcv_alert_time:.1f}s < {self.bcv_cooldown_seconds}s)")
+            return None
 
-        return None
+        previous = self.last_known_bcv_rate
+        self.last_known_bcv_rate = current_rate
+        if fecha_valor:
+            self.last_known_fecha_valor = fecha_valor
+        if parsed_incoming_date:
+            self.last_known_fecha_date = parsed_incoming_date
+
+        self.last_bcv_alert_time = now
+        self._recent_bcv_alerts.append((now, current_rate))
+
+        diff_pct = (diff / previous) * 100.0 if previous > 0 else 0.0
+        direction = "🔺 Subió" if diff > 0 else "🔻 Bajó"
+
+        lines = [
+            "🔔 *¡CAMBIO EN TASA OFICIAL BCV DETECTADO!*\n",
+            f"• Tasa Anterior: `{previous:,.2f} VES/USD`",
+            f"• Nueva Tasa BCV: `{current_rate:,.2f} VES/USD` ({direction} `{diff_pct:+.2f}%`)",
+        ]
+        if fecha_valor:
+            lines.append(f"• Fecha Valor Oficial: *{fecha_valor}*")
+
+        ref_p2p = 1000.0
+        quotes = self.monitor.get_market_quotes()
+        if quotes:
+            ref_p2p = quotes[0].buy_rate
+        gap = self.monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=current_rate)
+        lines.append(f"• Brecha P2P vs BCV: `{gap:+.2f}%`")
+        lines.append("\n💡 *Acción recomendada*: Revisa y ajusta los precios de tus anuncios Maker en Binance P2P.")
+
+        return "\n".join(lines)
 
     def check_spread_opportunities(self, quotes: list[BankRateQuote]) -> str | None:
         """Identifica oportunidades destacadas de arbitraje interbancario (> 1.50% spread).

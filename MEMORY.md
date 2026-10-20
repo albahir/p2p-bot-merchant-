@@ -418,6 +418,22 @@
       - `mypy src/` limpio (0 errores en 49 archivos fuente).
       - `ruff check .` limpio (0 errores de linting).
 
+42. **Protección Anti-Flapping en Tasa BCV, Filtro Cronológico y Sanitización de Telegram (ADR 042)**:
+    - **Diagnóstico del Comportamiento Anómalo (Efecto Péndulo BCV)**:
+      - Entre las 4:48 PM y 4:57 PM VET, el BCV comienza la publicación de la tasa del día hábil siguiente (Martes 20 a 881.88 Bs vs Lunes 19 a 881.07 Bs).
+      - Debido a que la infraestructura de CANTV/BCV utiliza balanceo de carga round-robin y cachés CDN desincronizadas, peticiones consecutivas alternaban entre servidores con la tasa del martes y servidores rezagados con la tasa del lunes (o la API de fallback).
+      - `RateAlertService` carecía de cooldown y filtro cronológico, disparando alertas repetitivas de subida y bajada cada minuto.
+    - **Solución Implementada**:
+      - **Filtro Cronológico de Fecha Valor (`parse_fecha_valor`)**: Una vez detectada y registrada una tasa para una fecha calendario superior (ej. Martes 20 Octubre), cualquier respuesta con fecha anterior (ej. Lunes 19 Octubre) es automáticamente descartada como residuo de caché desactualizada.
+      - **Ventana Anti-Flapping de 30 Minutos**: Se registra el historial de tasas alertadas. Si la tasa oscila hacia un valor ya alertado en los últimos 30 minutos, se suprime la alerta.
+      - **Cooldown Respetado (`bcv_cooldown_seconds`)**: Se impone un intervalo mínimo de 5 minutos entre alertas consecutivas de BCV (salvo variaciones bruscas > 5%).
+      - **Caché en `BCVService`**: Si una consulta previa obtuvo las tasas oficiales completas con fecha valor futura, un fallo o timeout temporal mantiene la última tasa oficial válida en lugar de degradar a APIs secundarias rezagadas.
+      - **Sanitización de Formato en Telegram**: Se eliminó el prefijo redundante `+` en valores negativos (`+-1,521.15 Bs` -> `-1,521.15 Bs`), se deduplicaron entidades bancarias homónimas en el reporte (`unique_quotes`) y se acotó a las 10 entidades principales.
+    - **Calidad y Verificación**:
+      - **136/136 pruebas pasando al 100%** (`pytest`).
+      - `mypy src/` limpio (0 errores en 49 archivos).
+      - `ruff check .` limpio (0 errores de linting).
+
 ---
 
 ## 🎯 Guía Operativa Actual
@@ -425,7 +441,7 @@
 1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
 3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**133/133 tests pasando al 100%**).
+4. **Suite de Pruebas**: `pytest -v tests/` (**136/136 tests pasando al 100%**).
 5. **Comprobación de Calidad de Código**:
    - `mypy src/` (0 errores en 49 archivos fuente).
    - `ruff check .` (0 errores de linting).
