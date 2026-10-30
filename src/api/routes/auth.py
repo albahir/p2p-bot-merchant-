@@ -218,7 +218,7 @@ def reset_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
 
     new_hash = AuthService.hash_password(req.new_password)
-    user.password_hash = new_hash
+    user.password_hash = new_hash  # type: ignore[assignment]
     db.commit()
 
     # Consumir el código para evitar reuso

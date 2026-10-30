@@ -7,9 +7,10 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import Settings
-from src.api.deps import get_settings, require_admin, require_authenticated
+from src.api.deps import get_db, get_settings, require_admin, require_authenticated
 from src.api.schemas.settings import (
     BinanceStatusResponse,
     SaveBinanceKeysRequest,
@@ -34,9 +35,11 @@ def _mask_key(key: str) -> str:
 def get_binance_status(
     _current_user: Annotated[User, Depends(require_authenticated)],
     settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> BinanceStatusResponse:
     """Consulta el estado de las credenciales de Binance API sin exponer texto plano."""
-    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY)
+    factory = sessionmaker(bind=db.get_bind())
+    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
     try:
         api_key = km.get_secret("binance_api_key")
         key_type = km.get_secret("binance_key_type")
@@ -71,10 +74,13 @@ def save_binance_keys(
     request: Request,
     _current_user: Annotated[User, Depends(require_admin)],
     settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> BinanceStatusResponse:
     """Almacena de forma cifrada (AES-256-GCM) las credenciales de la API de Binance."""
+    operator_username = str(_current_user.username)
     client_ip = request.client.host if request.client else "127.0.0.1"
-    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY)
+    factory = sessionmaker(bind=db.get_bind())
+    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
 
     try:
         km.store_secret("binance_api_key", req.api_key.strip(), ip_address=client_ip)
@@ -88,7 +94,7 @@ def save_binance_keys(
         ) from err
 
     masked = _mask_key(req.api_key.strip())
-    logger.info("Credenciales de Binance actualizadas de forma segura por usuario '%s'", _current_user.username)
+    logger.info("Credenciales de Binance actualizadas de forma segura por usuario '%s'", operator_username)
 
     return BinanceStatusResponse(
         is_configured=True,
@@ -108,9 +114,11 @@ def save_binance_keys(
 def verify_binance_connection(
     _current_user: Annotated[User, Depends(require_authenticated)],
     settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> VerifyBinanceResponse:
     """Realiza un diagnóstico en caliente: ping, deriva horaria (clock drift) y límite de API weight."""
-    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY)
+    factory = sessionmaker(bind=db.get_bind())
+    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
     try:
         api_key = km.get_secret("binance_api_key")
     except (KeyError, RuntimeError):

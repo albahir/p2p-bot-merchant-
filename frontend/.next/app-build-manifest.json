@@ -16,15 +16,15 @@
       "static/chunks/main-app.js",
       "static/chunks/app/orders/page.js"
     ],
-    "/fiscal/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/fiscal/page.js"
-    ],
     "/login/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
       "static/chunks/app/login/page.js"
+    ],
+    "/fiscal/page": [
+      "static/chunks/webpack.js",
+      "static/chunks/main-app.js",
+      "static/chunks/app/fiscal/page.js"
     ]
   }
 }

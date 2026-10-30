@@ -43,6 +43,7 @@ import {
   User
 } from "@/lib/api";
 import { useWebSocket } from "@/lib/useWebSocket";
+import BinanceSettingsCard from "@/components/binance-settings-card";
 
 export default function CryptoAppDashboard() {
   // Pestaña activa para la vista móvil
@@ -534,6 +535,9 @@ export default function CryptoAppDashboard() {
                 </a>
               )}
             </div>
+
+            {/* Módulo de Configuración de Claves Binance y Diagnóstico en Vivo */}
+            <BinanceSettingsCard />
           </div>
         </div>
 
@@ -682,22 +686,26 @@ export default function CryptoAppDashboard() {
 
           {/* PESTAÑA MÓVIL: AJUSTES */}
           {activeTab === "ajustes" && (
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 space-y-3">
-              <h3 className="font-bold text-xs text-slate-300 uppercase">Ajustes del Sistema</h3>
-              <div className="flex justify-between items-center p-3 rounded-2xl bg-[#162032] text-xs">
-                <span>Auto-Rebalanceo</span>
-                <input type="checkbox" checked={autoRebalance} onChange={(e) => setAutoRebalance(e.target.checked)} className="accent-rose-600" />
+            <div className="space-y-4">
+              <BinanceSettingsCard />
+
+              <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 space-y-3">
+                <h3 className="font-bold text-xs text-slate-300 uppercase">Ajustes del Sistema</h3>
+                <div className="flex justify-between items-center p-3 rounded-2xl bg-[#162032] text-xs">
+                  <span>Auto-Rebalanceo</span>
+                  <input type="checkbox" checked={autoRebalance} onChange={(e) => setAutoRebalance(e.target.checked)} className="accent-rose-600" />
+                </div>
+                <div className="flex justify-between items-center p-3 rounded-2xl bg-[#162032] text-xs">
+                  <span>Auto-Liberación Binance</span>
+                  <input type="checkbox" checked={autoLiberar} onChange={(e) => setAutoLiberar(e.target.checked)} className="accent-rose-600" />
+                </div>
+                <button
+                  onClick={alternarPausaBot}
+                  className="w-full py-2.5 rounded-2xl bg-rose-600 text-white font-bold text-xs"
+                >
+                  {botStatus?.is_paused ? "REANUDAR MOTOR" : "PARADA DE EMERGENCIA"}
+                </button>
               </div>
-              <div className="flex justify-between items-center p-3 rounded-2xl bg-[#162032] text-xs">
-                <span>Auto-Liberación Binance</span>
-                <input type="checkbox" checked={autoLiberar} onChange={(e) => setAutoLiberar(e.target.checked)} className="accent-rose-600" />
-              </div>
-              <button
-                onClick={alternarPausaBot}
-                className="w-full py-2.5 rounded-2xl bg-rose-600 text-white font-bold text-xs"
-              >
-                {botStatus?.is_paused ? "REANUDAR MOTOR" : "PARADA DE EMERGENCIA"}
-              </button>
             </div>
           )}
 

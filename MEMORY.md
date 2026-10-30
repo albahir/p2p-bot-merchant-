@@ -555,18 +555,39 @@
       - `ruff check .` limpio (**All checks passed!**).
       - `npm run build` en Next.js genera las **8 rutas estáticas sin errores**.
 
+50. **Gestión Cifrada de API Keys de Binance, Diagnóstico en Caliente y Módulo de Autenticación Completo (Login, Registro y OTP) (ADR 050)**:
+    - **Módulo de Autenticación y Registro Multi-Usuario**:
+      - `POST /api/auth/register`: Registro de nuevas cuentas con hash PBKDF2-HMAC-SHA256 (100k iteraciones), asignación automática de rol `INVITADO` (o `ADMIN` si el Telegram ID figura en la whitelist de administradores) y despacho de alerta automática al bot de Telegram.
+      - `POST /api/auth/recover-password`: Generación de código OTP numérico de 6 dígitos con expiración de 15 minutos, enviado de forma privada al chat del usuario en Telegram.
+      - `POST /api/auth/reset-password`: Validación en tiempo constante del OTP y actualización segura de contraseña.
+      - Interfaz de Login renovada en `frontend/src/app/login/page.tsx`: Selector de pestañas reactivas `[Iniciar Sesión]` y `[Crear Cuenta]` alineado con las maquetas del diseño Stitch, modal interactivo de recuperación de contraseña con Telegram OTP, y soporte transparente para Telegram SSO y Telegram Mini Apps (`initData`).
+    - **Gestión Segura de API Keys de Binance & Diagnóstico en Caliente**:
+      - Rutas REST en `src/api/routes/settings.py` (`/api/settings/binance`):
+        - `GET /api/settings/binance`: Consulta enmascarada del estado de credenciales (`vm4P••••Xk9b`) sin exponer secretos.
+        - `POST /api/settings/binance`: Almacenamiento cifrado con `AES-256-GCM` en reposo a través de `ApiKeyManager`. Soporte para firmas HMAC-SHA256 y Ed25519/RSA PEM.
+        - `POST /api/settings/binance/verify`: Diagnóstico en caliente contra el servidor oficial de Binance (`/api/v3/time`). Mide latencia de red (Ping en ms), deriva horaria (Clock Drift) para prevenir el error -1021, y monitoreo del consumo de cuota API (`x-mbx-used-weight-1m` < 5000) bajo el principio constitucional Fail-Closed.
+      - Componente Frontend React `frontend/src/components/binance-settings-card.tsx`:
+        - Integrado tanto en la vista amplia de PC (columna derecha de escritorio) como en la app móvil (pestaña *Ajustes*).
+        - Botón "Verificar en Vivo" que consulta el estado real en tiempo real con tarjetas de telemetría y alertas reactivas.
+        - Formulario desplegable para ingresar o actualizar llaves con encriptación inmediata.
+    - **Garantía de Calidad y Verificación Integral**:
+      - **167/167 pruebas automatizadas pasando al 100%** en `pytest` (incluyendo `test_api_auth_routes.py`, `test_api_settings.py` y `test_api_fiscal.py`).
+      - `mypy src/` limpio (**0 errores en 69 archivos fuente analizados**).
+      - `ruff check .` limpio (**All checks passed!**).
+      - `npm run build` en Next.js genera las **8 rutas estáticas sin errores ni advertencias de tipo**.
+
 ---
 
 ## 🎯 Guía Operativa Actual
 
 1. **Frontend Moderno (Next.js 14)**:
    - Desarrollo: `cd frontend && npm run dev` (abre en `http://localhost:3000`).
-   - Compilación: `cd frontend && npm run build` (8 rutas compiladas).
+   - Compilación: `cd frontend && npm run build` (8 rutas compiladas con 0 errores).
 2. **API REST y WebSockets (FastAPI)**:
    - Iniciar API: `uvicorn src.api.main:app --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
 3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 4. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
-5. **Suite de Pruebas Automatizadas**: `pytest` (**163/163 tests pasando al 100%**).
+5. **Suite de Pruebas Automatizadas**: `pytest` (**167/167 tests pasando al 100%**).
 6. **Calidad y Verificación**:
-   - `mypy src/` (0 errores en 67 archivos fuente).
+   - `mypy src/` (0 errores en 69 archivos fuente).
    - `ruff check .` (0 errores de linting).

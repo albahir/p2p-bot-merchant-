@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import time
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,12 @@ from src.security.auth_service import AuthService
 
 TEST_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 TEST_BOT_TOKEN = "987654321:AAFakeBotToken_123456789ABC"
+
+
+@pytest.fixture(autouse=True)
+def mock_telegram():
+    with patch("src.integrations.telegram_notifier.TelegramNotifier.send_alert", return_value=True):
+        yield
 
 
 @pytest.fixture

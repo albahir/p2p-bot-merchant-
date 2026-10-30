@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from config.settings import Settings
-from src.api.routes import auth, bot, fiscal, orders, settings as settings_route, spreads, users, websockets
+from src.api.routes import auth, bot, fiscal, orders, spreads, users, websockets
+from src.api.routes import settings as settings_route
 from src.data.database import SessionLocal, init_db
 from src.security.auth_service import AuthService
 

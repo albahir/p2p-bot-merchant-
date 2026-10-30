@@ -48,7 +48,7 @@ def client_and_token(test_db):
 
     # Crear admin y obtener token
     auth_svc = AuthService(db_session=test_db)
-    auth_svc.ensure_default_admin("admin_test", "AdminPass123!")
+    auth_svc.ensure_default_admin(default_username="admin_test", default_password="AdminPass123!")
 
     client = TestClient(app, base_url="http://127.0.0.1")
     login_res = client.post("/api/auth/login", json={"username": "admin_test", "password": "AdminPass123!"})
