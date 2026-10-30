@@ -193,7 +193,6 @@ class TelegramNotifier:
         """Registra la lista oficial de comandos en Telegram para el menú nativo."""
         commands = [
             {"command": "spread", "description": "📈 Spreads por banco y arbitraje cruzado"},
-            {"command": "matriz", "description": "📊 Matriz de spreads y arbitraje en vivo"},
             {"command": "bcv", "description": "🏛️ Tasa oficial BCV y brecha cambiaria"},
             {"command": "status", "description": "📊 Estado del bot y modo operativo"},
             {"command": "cierre", "description": "📑 Cierre fiscal mensual en Excel"},
@@ -460,7 +459,10 @@ class TelegramNotifier:
                 return "⛔ *Acceso Restringido*: Esta opción está reservada para Traders y Administradores."
 
         # --- Restricciones para TRADER ---
-        if role == "TRADER" and cmd in ("/pause", "/resume", "/usuarios", "/users", "/autorizar", "/aprobar", "/revocar", "/bloquear"):
+        if role == "TRADER" and cmd in (
+            "/pause", "/resume", "/usuarios", "/users", "/autorizar", "/aprobar",
+            "/promover", "/promote", "/rol", "/role", "/revocar", "/bloquear"
+        ):
             return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
 
         # --- Comandos Administrativos (ADMIN únicamente) ---
@@ -468,7 +470,7 @@ class TelegramNotifier:
             if role != "ADMIN":
                 return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
             return self._handle_admin_list_users()
-        elif cmd in ("/autorizar", "/aprobar"):
+        elif cmd in ("/autorizar", "/aprobar", "/promover", "/promote", "/rol", "/role"):
             if role != "ADMIN":
                 return "⛔ *Acceso Restringido*: Esta opción está reservada únicamente para el Administrador del sistema."
             return self._handle_admin_authorize_user(clean_cmd_str)
@@ -615,6 +617,22 @@ class TelegramNotifier:
                 repo.update_role(cast(int, user.id), target_role)
                 repo.set_active_status(cast(int, user.id), True)
                 db.commit()
+
+                # Notificar directamente al usuario sobre la asignación/promoción de su nuevo rol
+                target_tg = user.telegram_id or (target_id if target_id.isdigit() else None)
+                if target_tg:
+                    try:
+                        self.send_alert(
+                            f"🎉 *¡Tu rol en P2P Merchant Bot ha sido actualizado!*\n\n"
+                            f"Un Administrador ha asignado tu cuenta al rol: `{target_role}`.\n"
+                            f"Estado: 🟢 Activo.\n\n"
+                            f"Envía `/ayuda` para conocer tus comandos disponibles o utiliza los botones interactivos.",
+                            chat_id=str(target_tg),
+                            reply_markup=self.get_persistent_menu_markup(role=target_role),
+                        )
+                    except (httpx.RequestError, OSError, ValueError, RuntimeError, KeyError) as ex_notify:
+                        logger.warning(f"No se pudo enviar notificación de promoción a {target_tg}: {ex_notify}")
+
                 return f"✅ Usuario `{user.username}` (`{target_id}`) actualizado exitosamente al rol `{target_role}`."
             else:
                 username = f"tg_{target_id}"
@@ -627,6 +645,22 @@ class TelegramNotifier:
                     is_active=True
                 )
                 db.commit()
+
+                # Notificar directamente al usuario recién creado y autorizado
+                target_tg = target_id if target_id.isdigit() else None
+                if target_tg:
+                    try:
+                        self.send_alert(
+                            f"🎉 *¡Acceso Aprobado en P2P Merchant Bot!*\n\n"
+                            f"Tu solicitud de acceso ha sido aceptada por un Administrador con el rol: `{target_role}`.\n"
+                            f"Estado: 🟢 Activo.\n\n"
+                            f"Envía `/ayuda` o pulsa uno de los botones abajo para comenzar a operar.",
+                            chat_id=str(target_tg),
+                            reply_markup=self.get_persistent_menu_markup(role=target_role),
+                        )
+                    except (httpx.RequestError, OSError, ValueError, RuntimeError, KeyError) as ex_notify:
+                        logger.warning(f"No se pudo enviar notificación de bienvenida a {target_tg}: {ex_notify}")
+
                 return f"✅ Usuario `{new_user.username}` (`{target_id}`) autorizado exitosamente con rol `{target_role}`."
         except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
             db.rollback()
@@ -667,6 +701,18 @@ class TelegramNotifier:
 
             repo.set_active_status(cast(int, user.id), False)
             db.commit()
+
+            # Notificar al usuario sobre la revocación de su acceso
+            target_tg = user.telegram_id or (target_id if target_id.isdigit() else None)
+            if target_tg:
+                try:
+                    self.send_alert(
+                        "🛑 *Notificación de Seguridad*: Tu acceso al P2P Merchant Bot ha sido suspendido o revocado por un Administrador.",
+                        chat_id=str(target_tg),
+                    )
+                except (httpx.RequestError, OSError, ValueError, RuntimeError, KeyError) as ex_notify:
+                    logger.warning(f"No se pudo enviar notificación de revocación a {target_tg}: {ex_notify}")
+
             return f"🛑 Acceso del usuario `{user.username}` (`{target_id}`) revocado exitosamente (desactivado)."
         except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
             db.rollback()

@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #090d16;
+  --surface: #0e1524;
+  --surface-card: #131c2e;
+  --surface-elevated: #1a253c;
+  --border: #1e293b;
+  --border-bright: #2d3d59;
+  --emerald-main: #10b981;
+  --emerald-dim: #059669;
+  --cyan-main: #06b6d4;
+  --ruby-main: #f43f5e;
+  --amber-main: #f59e0b;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--text-primary);
+  font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow-x: hidden;
+  letter-spacing: -0.01em;
+}
+
+/* Panel de cristal suave - descanso visual */
+.terminal-panel {
+  background: rgba(14, 21, 36, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+.terminal-panel-hover:hover {
+  background: rgba(19, 28, 46, 0.95);
+  border-color: rgba(16, 185, 129, 0.3);
+  transition: all 0.2s ease-in-out;
+}
+
+/* Scrollbar suave */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090d16;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2d3d59;
+}

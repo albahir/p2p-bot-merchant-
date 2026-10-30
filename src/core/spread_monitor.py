@@ -164,7 +164,7 @@ class SpreadMonitor:
         for q_buy in quotes:
             for q_sell in quotes:
                 # El arbitraje cruzado requiere entidades o métodos distintos
-                if q_buy.bank_name == q_sell.bank_name or q_buy.buy_rate <= 0:
+                if q_buy.bank_name == q_sell.bank_name or q_buy.buy_rate <= 0 or q_sell.sell_rate <= 0:
                     continue
 
                 spread_ves = round(q_sell.sell_rate - q_buy.buy_rate, 4)
@@ -186,6 +186,8 @@ class SpreadMonitor:
                         "spread_pct": spread_pct,
                         "net_profit_ves_100u": calc.net_profit_ves,
                         "is_viable": calc.is_viable,
+                        "buy_source": getattr(q_buy, "source", "unknown"),
+                        "sell_source": getattr(q_sell, "source", "unknown"),
                     }
 
         return best_cross
@@ -416,10 +418,11 @@ class SpreadMonitor:
 
                 if quotes:
                     return quotes
-                return self.get_market_quotes()
+                logger.warning("No se encontraron órdenes P2P para los bancos especificados.")
+                return []
             except (httpx.RequestError, RuntimeError, ValueError, KeyError, OSError, TypeError) as e:
-                logger.warning(f"Fallo consultando cliente Binance P2P ({e}). Usando cotizaciones calibradas.")
-                return self.get_market_quotes()
+                logger.warning(f"Fallo consultando cliente Binance P2P ({e}).")
+                return []
 
         # Nivel 1: PitbullChain Aggregated API
         pitbull_quotes = self.fetch_pitbullchain_quotes(exchange=exchange)
@@ -456,28 +459,9 @@ class SpreadMonitor:
         except (ImportError, ValueError, KeyError, OSError, RuntimeError) as e:
             logger.debug(f"Fallo Nivel 2 Binance Client: {e}")
 
-        # Nivel 3: Anclaje de precio mediante CriptoYa / Yadio
-        yadio_usd = self.fetch_yadio_rate(fiat=fiat)
-        cripto_data = self.fetch_criptoya_rate(asset=asset, fiat=fiat)
-
-        anchor_price: float | None = None
-        if yadio_usd and yadio_usd > 0:
-            anchor_price = yadio_usd
-        elif cripto_data and cripto_data.get("ask", 0) > 0:
-            anchor_price = cripto_data["ask"]
-
-        if anchor_price and anchor_price > 0:
-            now = datetime.now(UTC)
-            return [
-                BankRateQuote("Pago Móvil", buy_rate=round(anchor_price * 1.003, 2), sell_rate=round(anchor_price * 0.996, 2), updated_at=now, total_ads=20, score=85, liquidity_pct=25.0, binance_code="PagoMovil", source="yadio_anchor"),
-                BankRateQuote("Banesco", buy_rate=round(anchor_price * 1.002, 2), sell_rate=round(anchor_price * 0.997, 2), updated_at=now, total_ads=18, score=88, liquidity_pct=22.0, binance_code="Banesco", source="yadio_anchor"),
-                BankRateQuote("Banco de Venezuela", buy_rate=round(anchor_price * 1.0025, 2), sell_rate=round(anchor_price * 0.998, 2), updated_at=now, total_ads=15, score=80, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="yadio_anchor"),
-                BankRateQuote("Mercantil", buy_rate=round(anchor_price * 1.0035, 2), sell_rate=round(anchor_price * 0.9975, 2), updated_at=now, total_ads=8, score=60, liquidity_pct=10.0, binance_code="Mercantil", source="yadio_anchor"),
-                BankRateQuote("Bancamiga", buy_rate=round(anchor_price * 1.001, 2), sell_rate=round(anchor_price * 1.015, 2), updated_at=now, total_ads=4, score=50, liquidity_pct=5.0, binance_code="Bancamiga", source="yadio_anchor"),
-            ]
-
-        # Nivel 4: Fallback de seguridad (Cotizaciones calibradas offline)
-        return self.get_market_quotes()
+        # Fail-closed: Si no se obtuvieron cotizaciones de los libros reales P2P, no fabricar datos sintéticos
+        logger.warning("FAIL-CLOSED: No se obtuvieron cotizaciones P2P reales ni de PitbullChain ni de Binance API.")
+        return []
 
     def get_market_quotes(self, client: Any | None = None, use_sandbox: bool = True) -> list[BankRateQuote]:
         """Obtiene cotizaciones de mercado en tiempo real o genera instantáneas calibradas."""
@@ -486,12 +470,12 @@ class SpreadMonitor:
 
         now = datetime.now(UTC)
         return [
-            BankRateQuote("Banco de Venezuela", buy_rate=1001.20, sell_rate=1008.50, updated_at=now, total_ads=15, score=82.0, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="calibrated"),
-            BankRateQuote("Banesco", buy_rate=1002.50, sell_rate=1012.80, updated_at=now, total_ads=18, score=89.0, liquidity_pct=22.0, binance_code="Banesco", source="calibrated"),
-            BankRateQuote("Pago Móvil", buy_rate=1001.80, sell_rate=1011.00, updated_at=now, total_ads=22, score=88.0, liquidity_pct=25.0, binance_code="PagoMovil", source="calibrated"),
-            BankRateQuote("Mercantil", buy_rate=1002.00, sell_rate=1010.50, updated_at=now, total_ads=7, score=55.0, liquidity_pct=9.0, binance_code="Mercantil", source="calibrated"),
-            BankRateQuote("Bancamiga", buy_rate=1000.80, sell_rate=1016.50, updated_at=now, total_ads=3, score=45.0, liquidity_pct=4.0, binance_code="Bancamiga", source="calibrated"),
-            BankRateQuote("BNC Banco Nacional de Crédito", buy_rate=1001.00, sell_rate=1014.20, updated_at=now, total_ads=2, score=43.0, liquidity_pct=3.0, binance_code="BNCBancoNacional", source="calibrated"),
-            BankRateQuote("Banco Activo", buy_rate=998.50, sell_rate=1021.00, updated_at=now, total_ads=1, score=42.0, liquidity_pct=1.0, binance_code="BancoActivo", source="calibrated"),
+            BankRateQuote("Banco de Venezuela", buy_rate=1012.20, sell_rate=1007.50, updated_at=now, total_ads=15, score=82.0, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="calibrated"),
+            BankRateQuote("Banesco", buy_rate=1012.50, sell_rate=1007.20, updated_at=now, total_ads=18, score=89.0, liquidity_pct=22.0, binance_code="Banesco", source="calibrated"),
+            BankRateQuote("Pago Móvil", buy_rate=1012.80, sell_rate=1007.80, updated_at=now, total_ads=22, score=88.0, liquidity_pct=25.0, binance_code="PagoMovil", source="calibrated"),
+            BankRateQuote("Mercantil", buy_rate=1013.00, sell_rate=1007.60, updated_at=now, total_ads=7, score=55.0, liquidity_pct=9.0, binance_code="Mercantil", source="calibrated"),
+            BankRateQuote("Bancamiga", buy_rate=1013.50, sell_rate=1008.00, updated_at=now, total_ads=3, score=45.0, liquidity_pct=4.0, binance_code="Bancamiga", source="calibrated"),
+            BankRateQuote("BNC Banco Nacional de Crédito", buy_rate=1013.20, sell_rate=1007.90, updated_at=now, total_ads=2, score=43.0, liquidity_pct=3.0, binance_code="BNCBancoNacional", source="calibrated"),
+            BankRateQuote("Banco Activo", buy_rate=1014.00, sell_rate=1006.50, updated_at=now, total_ads=1, score=42.0, liquidity_pct=1.0, binance_code="BancoActivo", source="calibrated"),
         ]
 

@@ -2,8 +2,10 @@
 Opera en modo seguro con autenticación RBAC y aislamiento estricto de roles.
 """
 
+import logging
 from typing import Any, cast
 
+import httpx
 import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
@@ -13,6 +15,8 @@ from src.data.database import SessionLocal
 from src.data.models import BankVoucher, Order, SecurityEvent
 from src.data.repositories import IdentityRepository, OrderRepository, UserRepository
 from src.reporting.dashboard.components.ai_telemetry import render_ai_telemetry
+
+logger = logging.getLogger("dashboard_app")
 from src.reporting.dashboard.components.arbitrage_matrix import (
     render_arbitrage_matrix,
     render_maker_calculator,
@@ -404,6 +408,51 @@ def render_credentials_tab() -> None:
                 for u in users
             ]
             st.dataframe(pd.DataFrame(users_data), width="stretch")
+
+            # Formulario interactivo para cambiar rol / promover usuarios y notificar
+            with st.expander("⚡ Cambiar Rol / Promover Usuario y Notificar por Telegram"), st.form("form_update_user_role"):
+                user_options = {f"{u.username} (ID: {u.id}, Telegram: {u.telegram_id or 'Sin ID'})": u for u in users}
+                selected_label = st.selectbox("Selecciona Usuario", list(user_options.keys()))
+                selected_user = user_options[selected_label]
+
+                curr_role = str(selected_user.role)
+                role_idx = ["ADMIN", "TRADER", "INVITADO"].index(curr_role) if curr_role in ["ADMIN", "TRADER", "INVITADO"] else 1
+                new_role = st.selectbox("Nuevo Rol", ["ADMIN", "TRADER", "INVITADO"], index=role_idx)
+                new_active = st.checkbox("Usuario Activo", value=bool(selected_user.is_active))
+                btn_save_role = st.form_submit_button("Guardar Cambios y Notificar", use_container_width=True)
+
+                if btn_save_role:
+                    try:
+                        user_repo.update_role(int(selected_user.id), new_role)
+                        user_repo.set_active_status(int(selected_user.id), new_active)
+                        db.commit()
+
+                        # Notificar por Telegram si tiene telegram_id
+                        if selected_user.telegram_id:
+                            try:
+                                from src.integrations.telegram_notifier import TelegramNotifier
+                                notifier = TelegramNotifier()
+                                if new_active:
+                                    notifier.send_alert(
+                                        f"🎉 *¡Tu rol ha sido actualizado en P2P Merchant Bot!*\n\n"
+                                        f"Un Administrador ha asignado tu cuenta al rol: `{new_role}`.\n"
+                                        f"Estado: 🟢 Activo.\n\n"
+                                        f"Envía `/ayuda` en este chat para conocer tus comandos disponibles.",
+                                        chat_id=str(selected_user.telegram_id),
+                                        reply_markup=notifier.get_persistent_menu_markup(role=new_role),
+                                    )
+                                else:
+                                    notifier.send_alert(
+                                        "🛑 *Notificación de Seguridad*: Tu acceso al P2P Merchant Bot ha sido suspendido por un Administrador.",
+                                        chat_id=str(selected_user.telegram_id),
+                                    )
+                            except (httpx.RequestError, OSError, ValueError, RuntimeError, KeyError) as ex_tg:
+                                logger.warning(f"No se pudo notificar por Telegram: {ex_tg}")
+
+                        st.success(f"✅ ¡Usuario `{selected_user.username}` actualizado a `{new_role}`!")
+                        st.rerun()
+                    except (SQLAlchemyError, ValueError, OSError, RuntimeError) as e:
+                        st.error(f"Error al actualizar usuario: {e}")
     finally:
         db.close()
 
@@ -573,6 +622,22 @@ def run_dashboard() -> None:
                                     is_active=True,
                                 )
                                 st.success(f"✅ ¡Usuario `{u.username}` creado como `{u.role}`!")
+                                if trader_tg.strip():
+                                    try:
+                                        from src.integrations.telegram_notifier import (
+                                            TelegramNotifier,
+                                        )
+                                        notifier = TelegramNotifier()
+                                        notifier.send_alert(
+                                            f"🎉 *¡Acceso Autorizado en P2P Merchant Bot!*\n\n"
+                                            f"Tu cuenta `{u.username}` ha sido creada por un Administrador con el rol: `{u.role}`.\n"
+                                            f"Estado: 🟢 Activo.\n\n"
+                                            f"Envía `/ayuda` en este chat para comenzar a interactuar con el bot.",
+                                            chat_id=trader_tg.strip(),
+                                            reply_markup=notifier.get_persistent_menu_markup(role=str(u.role)),
+                                        )
+                                    except (httpx.RequestError, OSError, ValueError, RuntimeError, KeyError) as ex_tg:
+                                        logger.warning(f"No se pudo notificar por Telegram al nuevo usuario: {ex_tg}")
                         except (SQLAlchemyError, ValueError, OSError, RuntimeError) as e:
                             st.error(f"Error creando usuario: {e}")
                         finally:

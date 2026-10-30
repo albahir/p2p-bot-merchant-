@@ -434,14 +434,117 @@
       - `mypy src/` limpio (0 errores en 49 archivos).
       - `ruff check .` limpio (0 errores de linting).
 
+43. **Notificación de Aprobación/Promoción de Usuarios, Unificación de Comandos y Filtro Anti-Oportunidades Falsas (ADR 043)**:
+    - **Notificación Directa al Usuario en Aprobación / Promoción**:
+      - En `TelegramNotifier._handle_admin_authorize_user`: Cuando un Administrador aprueba a un nuevo usuario (`/autorizar`, `/aprobar`) o cambia su rol (`/promover`, `/promote`, `/rol`, `/role`), el bot envía un mensaje inmediato al Telegram del usuario notificándole de su nuevo rol y activándole el menú persistente de botones correspondiente.
+      - En `TelegramNotifier._handle_admin_revoke_user`: Si se revoca el acceso (`/revocar`, `/bloquear`), se notifica al usuario que su cuenta ha sido suspendida.
+      - En `src/reporting/dashboard/app.py`: Tanto en el formulario de creación de traders (`sidebar_create_trader_form`) como en el gestor de usuarios RBAC (`form_update_user_role`), al crear o promover usuarios se despacha la alerta de bienvenida/actualización a Telegram automáticamente.
+    - **Unificación de Comandos Nativos de Spreads**:
+      - Se retiró la entrada redundante `"matriz"` de `set_bot_commands()`, manteniendo únicamente `/spread` en el menú interactivo de Telegram para evitar que aparezcan 2 comandos duplicados. El comando `/matriz` se mantiene como alias transparente en el despachador.
+    - **Filtro Anti-Oportunidades Falsas en Arbitraje Cruzado y Corrección de Formato**:
+      - Se identificó que la alerta `⚡ ¡OPORTUNIDAD DE ARBITRAJE INTERBANCARIO DETECTADA! (Spread: ++2.02%) Bancamiga a 1,000.80 Bs y Banco Activo a 1,021.00 Bs` se disparaba porque `RateAlertService.poll_and_check()` llamaba a `get_market_quotes()` con valores de fallback en sandbox invertidos donde el precio de venta superaba al de compra.
+      - **Blindaje Estricto**: `check_spread_opportunities()` descarta automáticamente cualquier lista de cotizaciones que contenga fuentes simuladas (`source in ("calibrated", "mock", "fallback")`). NUNCA se enviarán alertas de oportunidades comerciales a Telegram basadas en datos simulados o sin viabilidad operativa (`is_viable == True`).
+      - En `poll_and_check()`, se sustituyó la consulta a datos estáticos por `fetch_live_quotes(use_public_bapi=True)`.
+      - Se calibraron los datos de fallback estático en `get_market_quotes()` a precios reales de mercado venezolano (Taker Buy 1,012 - 1,014 y Taker Sell 1,006 - 1,008).
+      - Se corrigieron los doble signos (`++2.02%` -> `+2.02%`, `++20.20 Bs` -> `+20.20 Bs` y `net_profit` con `{val:+,.2f} Bs`).
+    - **Calidad y Verificación**:
+      - **138/138 pruebas unitarias pasando al 100%** (`pytest`).
+      - `mypy src/` limpio (0 errores en 49 archivos).
+      - `ruff check .` limpio (0 errores de linting).
+
+44. **Extracción Automatizada de Histórico P2P vía API de Binance y Exportación Directa a CSV (ADR 044)**:
+    - **Servicio de Sincronización Histórica (`BinanceHistorySyncer`)**:
+      - Ubicación: `src/core/binance_history_syncer.py`.
+      - Consulta directamente el endpoint oficial firmado `GET /sapi/v1/c2c/orderMatch/listUserOrderHistory` paginando automáticamente compras y ventas en ventanas de hasta 30 días continuos.
+      - Mapea las entidades de respuesta `BinanceOrderMatchItem` a modelos `Order` relacionales.
+      - Ingesta de forma estrictamente idempotente en la base de datos fiscal (`OrderRepository`) reportando órdenes nuevas insertadas vs ya existentes.
+      - Genera en memoria el archivo CSV con codificación UTF-8-SIG y encabezados completos en español.
+    - **Integración Visual en el Dashboard Streamlit**:
+      - Ubicación: `src/reporting/dashboard/components/fiscal_reconstruction_view.py`.
+      - Pestaña **Reconstrucción Fiscal**: añadido panel expandible `Extraer Histórico de Órdenes P2P vía API de Binance (CSV)`.
+      - Selector de ventana de consulta (1 a 30 días) y filtro de tipo de operación (Ambas, Solo BUY, Solo SELL).
+      - Botón de ejecución con telemetría en tiempo real: tarjetas KPI con volumen USDT, total de órdenes y botón interactivo `📥 Descargar Histórico Extraído en CSV`.
+      - Valida en caliente que existan credenciales cifradas en `ApiKeyManager` antes de consultar.
+    - **Script de Línea de Comandos (CLI)**:
+      - Creado `scripts/export_binance_orders.py` para exportar órdenes históricas directamente a disco (`data/exports/binance_p2p_orders_YYYYMMDD_HHMMSS.csv`) sin interfaz gráfica.
+    - **Calidad y Verificación**:
+      - **142/142 pruebas unitarias pasando al 100%** (`pytest`).
+      - `mypy src/` limpio (0 errores en 50 archivos fuente).
+      - `ruff check .` limpio (0 errores de linting).
+
+---
+
+45. **Fase 1: API REST & WebSockets Multi-Usuario con FastAPI, JWT y Telegram SSO (ADR 045)**:
+    - **Módulo Criptográfico y Seguridad API (`src/api/security.py`)**:
+      - Generación y decodificación de tokens de acceso JWT (`HS256`, expiración configurable).
+      - Validación oficial de firma HMAC-SHA256 para el Widget de Telegram Login (SSO) y para Telegram Mini App (`initData`).
+      - Principio Fail-closed: rechazo de tokens manipulados o expirados y datos de Telegram fuera de la ventana de tiempo permitida.
+    - **Enrutadores Modulares y Control de Acceso (`src/api/routes/`)**:
+      - `auth.py`: Inicio de sesión estándar (`/api/auth/login`), SSO de Telegram (`/api/auth/telegram`, `/api/auth/telegram-webapp`), perfil (`/api/auth/me`), refresco (`/api/auth/refresh`). Auto-registro con asignación de rol (`ADMIN` si está en `telegram_allowed_users`, de lo contrario `INVITADO`).
+      - `spreads.py`: Cotizaciones oficiales BCV (`/api/spreads/bcv`), matriz completa de arbitraje interbancario (`/api/spreads/matrix`) y catálogo de métodos bancarios (`/api/spreads/banks`).
+      - `orders.py`: Listado paginado de órdenes (`/api/orders`), sincronización directa desde Binance P2P (`/api/orders/sync`) y descarga de exportaciones en Excel `.xlsx`, CSV con punto y coma `;` y CSV internacional `,` (`/api/orders/export`).
+      - `users.py`: Gestión administrativa de usuarios (`/api/users`), actualización de rol RBAC con notificación automática al usuario por Telegram y activación/suspensión de cuentas.
+      - `bot.py`: Monitoreo de estado operativo (`/api/bot/status`), parada de emergencia (`/api/bot/pause`) y reanudación (`/api/bot/resume`) sincronizados con `TelegramNotifier`.
+      - `websockets.py`: Canal en tiempo real (`/ws/live`) con `ConnectionManager` para emisión de eventos, alertas de mercado y actualizaciones de tasas.
+    - **Servidor y Ciclo de Vida (`src/api/main.py`)**:
+      - Inicialización automática de BD y usuario administrador inicial en el `lifespan`.
+      - CORS middleware configurado para permitir Next.js local (`http://localhost:3000`), Vercel y Cloudflare Tunnel.
+      - Manejador global de excepciones sanitizado que previene la fuga de secretos o stack traces internos.
+      - Comando añadido a `Makefile`: `make api`.
+    - **Calidad y Verificación**:
+      - **161/161 pruebas automatizadas pasando al 100%** (`pytest`).
+      - 19 nuevas pruebas unitarias dedicadas a seguridad JWT, firmas Telegram y endpoints REST.
+      - `mypy src/` limpio (0 errores en 66 archivos fuente).
+      - `ruff check .` limpio (0 errores de linting en todo el repositorio).
+
+46. **Eliminación Total de Valores por Defecto y Blindaje Fail-Closed en BCV y Spreads (ADR 046)**:
+    - **Remoción de Constante BCV por Defecto (`BCVService`)**:
+      - Se eliminó `DEFAULT_FALLBACK_RATE = 36.50` de `src/reporting/bcv_service.py`.
+      - Ante la indisponibilidad total de scraping directo, API de respaldo y caché en memoria, el servicio no inventa tasas y retorna `0.0`.
+      - En la API REST (`/api/spreads/bcv`), si la tasa es `<= 0`, se devuelve un error HTTP `503 Service Unavailable` indicando que el BCV oficial no está disponible, impidiendo cálculos financieros con datos fabricados.
+    - **Eliminación de Spreads Sintéticos / Calibrados (`SpreadMonitor`)**:
+      - Se eliminó la generación de cotizaciones sintéticas basadas en anclas macro (Yadio/CriptoYa) en `SpreadMonitor.fetch_live_quotes()`.
+      - Se retiró el fallback a cotizaciones calibradas (`get_market_quotes()`) ante caídas de red o timeouts.
+      - Ante ausencia de datos de los libros reales P2P (PitbullChain o Binance API), `fetch_live_quotes()` retorna lista vacía `[]` (Fail-closed estricto).
+      - En `/api/spreads/matrix`, si no hay cotizaciones en vivo, se retorna matriz vacía y `best_arbitrage: None`, evitando falsos arbitrajes.
+    - **Calidad y Verificación**:
+      - **161/161 pruebas automatizadas pasando al 100%** (`pytest`).
+      - Actualizadas pruebas unitarias en `test_bcv_service.py` y `test_spread_monitor.py` para validar el comportamiento fail-closed ante errores de red.
+      - `mypy src/` limpio (0 errores en 66 archivos).
+      - `ruff check .` limpio (0 errores).
+
+47. **Frontend Moderno con Next.js 14, Diseño Ergonómico en Español y Google Stitch MCP (ADR 047)**:
+    - **Reemplazo de Streamlit por Next.js 14**:
+      - Creado subdirectorio `frontend/` con Next.js 14 (App Router), Tailwind CSS y TypeScript.
+      - Compilación y empaquetado de producción (`npm run build`) verificado con **0 errores** en todas las rutas estáticas (`/`, `/orders`, `/admin`, `/login`).
+    - **Diseño Visual Ergonómico Anti-Fatiga**:
+      - Tono general oscuro y mate (Dark Obsidian `#090d16`, superficies `#0e1524`, tarjetas `#131c2e`), eliminando neones saturados que fatigan la visión en sesiones extensas de trading.
+      - Acentos suaves en esmeralda mate (`#10b981`), cian calmado (`#06b6d4`), rubí suave (`#f43f5e`) y ámbar (`#f59e0b`).
+      - Componentes con bordes suaves y tarjetas redondeadas (`rounded-2xl`) inspiradas en la referencia de app cripto móvil enviada por el usuario.
+    - **100% en Español Nativo**:
+      - Traducción total de términos financieros, tablas de cotizaciones, filtros rápidos, libros de órdenes, administración de usuarios y navegación móvil.
+    - **Navegación Móvil & Telegram Mini App (TMA)**:
+      - Barra inferior flotante (`TelegramMiniAppBar`) con iconos de acceso rápido a Arbitraje, Órdenes, Gestión RBAC y Estado de Sesión.
+      - Soporte para auto-expansión e inicio de sesión automático vía `window.Telegram.WebApp.initData`.
+    - **Integración con Google Stitch vía MCP**:
+      - Servidor remoto conectado en `https://stitch.googleapis.com/mcp` con API Key persistente.
+      - Proyecto creado (`projects/9103204688335004581`), generando pantallas de referencia para terminal de escritorio y app móvil.
+    - **Arquitectura de Despliegue Sin VPS (Costo $0)**:
+      - Frontend alojable en Vercel o Cloudflare Pages con CDN global y HTTPS nativo gratuito.
+      - Conexión al backend local mediante Cloudflare Tunnel (`cloudflared`), sin requerir apertura de puertos ni IP pública fija.
+
 ---
 
 ## 🎯 Guía Operativa Actual
 
-1. **Dashboard y Panel de Control**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
-2. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run` (opera en bucle continuo emitiendo alertas y respondiendo comandos).
-3. **Smoke Tests Operacionales**: `python scripts/smoke_test.py --stage=local`.
-4. **Suite de Pruebas**: `pytest -v tests/` (**136/136 tests pasando al 100%**).
-5. **Comprobación de Calidad de Código**:
-   - `mypy src/` (0 errores en 49 archivos fuente).
+1. **Frontend Moderno (Next.js 14)**:
+   - Desarrollo: `cd frontend && npm run dev` (abre en `http://localhost:3000`).
+   - Compilación: `cd frontend && npm run build`.
+2. **API REST y WebSockets (FastAPI)**:
+   - Iniciar API: `uvicorn src.api.main:app --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
+3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
+4. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
+5. **Suite de Pruebas Automatizadas**: `pytest` (**161/161 tests pasando al 100%**).
+6. **Calidad y Verificación**:
+   - `mypy src/` (0 errores en 66 archivos fuente).
    - `ruff check .` (0 errores de linting).

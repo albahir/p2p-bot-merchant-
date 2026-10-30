@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>ARBITEX // VES-USDT ENGINE</title>
+<!-- Material Symbols Outlined -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- JetBrains Mono & Geist Fonts -->
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          "colors": {
+            "surface-container-lowest": "#0a0e16",
+            "on-primary-container": "#006b41",
+            "on-primary-fixed": "#002111",
+            "on-tertiary-fixed": "#2a1700",
+            "tertiary-fixed": "#ffddb8",
+            "primary-fixed": "#53ffab",
+            "surface-variant": "#31353e",
+            "outline": "#849588",
+            "on-tertiary-fixed-variant": "#653e00",
+            "on-secondary": "#003640",
+            "on-secondary-fixed-variant": "#004e5c",
+            "secondary-container": "#03b5d3",
+            "secondary-fixed-dim": "#4cd7f6",
+            "tertiary": "#fff1e4",
+            "secondary": "#4cd7f6",
+            "secondary-fixed": "#acedff",
+            "on-surface": "#dfe2ee",
+            "surface-tint": "#00e38f",
+            "surface-container": "#1c2028",
+            "tertiary-container": "#ffce95",
+            "surface-container-high": "#262a33",
+            "on-secondary-container": "#00424e",
+            "error-container": "#93000a",
+            "on-error": "#690005",
+            "on-tertiary-container": "#835200",
+            "on-primary": "#003920",
+            "background": "#0f131c",
+            "on-surface-variant": "#b9cbbd",
+            "surface": "#0f131c",
+            "surface-dim": "#0f131c",
+            "surface-bright": "#353942",
+            "on-primary-fixed-variant": "#005231",
+            "tertiary-fixed-dim": "#ffb95f",
+            "surface-container-highest": "#31353e",
+            "on-secondary-fixed": "#001f26",
+            "on-error-container": "#ffdad6",
+            "outline-variant": "#3b4a3f",
+            "inverse-surface": "#dfe2ee",
+            "primary-fixed-dim": "#00e38f",
+            "error": "#ffb4ab",
+            "on-background": "#dfe2ee",
+            "on-tertiary": "#472a00",
+            "primary-container": "#00f59b",
+            "inverse-on-surface": "#2c3039",
+            "inverse-primary": "#006d42",
+            "surface-container-low": "#181c24",
+            "primary": "#cdffdc"
+          },
+          "borderRadius": {
+            "DEFAULT": "0.125rem",
+            "lg": "0.25rem",
+            "xl": "0.5rem",
+            "full": "0.75rem"
+          },
+          "spacing": {
+            "space-xl": "1.5rem",
+            "space-md": "0.75rem",
+            "gutter": "0.5rem",
+            "gutter-desktop": "0.75rem",
+            "margin-desktop": "1rem",
+            "margin": "0.75rem",
+            "space-sm": "0.375rem",
+            "space-lg": "1rem",
+            "space-xs": "0.25rem"
+          },
+          "fontFamily": {
+            "body-sm": ["Geist"],
+            "headline-xl": ["Geist"],
+            "body-md": ["Geist"],
+            "headline-lg": ["Geist"],
+            "mono-metric-lg": ["JetBrains Mono"],
+            "mono-metric-md": ["JetBrains Mono"],
+            "headline-sm": ["Geist"],
+            "label-caps": ["JetBrains Mono"],
+            "mono-metric-sm": ["JetBrains Mono"],
+            "headline-xl-mobile": ["Geist"]
+          },
+          "fontSize": {
+            "body-sm": ["12px", { "lineHeight": "16px", "fontWeight": "400" }],
+            "headline-xl": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+            "body-md": ["13px", { "lineHeight": "18px", "fontWeight": "400" }],
+            "headline-lg": ["22px", { "lineHeight": "28px", "letterSpacing": "-0.015em", "fontWeight": "600" }],
+            "mono-metric-lg": ["24px", { "lineHeight": "28px", "letterSpacing": "-0.03em", "fontWeight": "500" }],
+            "mono-metric-md": ["14px", { "lineHeight": "18px", "letterSpacing": "-0.02em", "fontWeight": "500" }],
+            "headline-sm": ["16px", { "lineHeight": "22px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+            "label-caps": ["10px", { "lineHeight": "12px", "letterSpacing": "0.06em", "fontWeight": "600" }],
+            "mono-metric-sm": ["11px", { "lineHeight": "14px", "letterSpacing": "0em", "fontWeight": "400" }],
+            "headline-xl-mobile": ["24px", { "lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "600" }]
+          }
+        },
+      },
+    }
+  </script>
+<style>
+    .material-symbols-outlined {
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+      font-size: 16px;
+      line-height: 1;
+    }
+    .material-symbols-outlined.fill {
+      font-variation-settings: 'FILL' 1;
+    }
+    /* Glow utilities matching tokens */
+    .glow-emerald {
+      box-shadow: 0 0 10px rgba(0, 245, 155, 0.25);
+    }
+    .glow-emerald-strong {
+      box-shadow: 0 0 16px rgba(0, 245, 155, 0.45);
+    }
+    .glow-crimson {
+      box-shadow: 0 0 12px rgba(239, 68, 68, 0.35);
+    }
+    .glow-cyan {
+      box-shadow: 0 0 10px rgba(76, 215, 246, 0.25);
+    }
+    /* Custom thin scrollbar */
+    ::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0a0e16;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #262a33;
+      border-radius: 2px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #3b4a3f;
+    }
+  </style>
+</head>
+<body class="bg-surface text-on-surface antialiased overflow-x-hidden select-none min-h-screen flex flex-col font-body-md text-body-md">
+<!-- TOP NAVIGATION BAR (Exact adherence to Shared Components JSON) -->
+<header class="flex justify-between items-center w-full px-space-md h-11 border-b border-outline-variant bg-surface-container-lowest z-50 shrink-0 sticky top-0 backdrop-blur-md">
+<!-- Brand / Engine Node Identifier -->
+<div class="flex items-center gap-space-md">
+<div class="flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-primary-container fill" data-icon="hub">hub</span>
+<span class="text-headline-sm font-headline-sm font-bold tracking-tight text-primary-container uppercase">
+          ARBITEX // VES-USDT
+        </span>
+</div>
+<div class="hidden xl:flex items-center gap-space-xs px-2 py-0.5 rounded bg-surface-container-high border border-outline-variant">
+<span class="w-1.5 h-1.5 rounded-full bg-primary-container animate-ping"></span>
+<span class="font-label-caps text-label-caps text-primary-container">12ms LATENCY // VES_USDT</span>
+</div>
+</div>
+<!-- Center Navigation Links -->
+<nav class="hidden md:flex items-center gap-space-lg">
+<a class="text-primary-container border-b-2 border-primary-container pb-1 font-label-caps text-label-caps uppercase" href="#">
+        Spread Matrix
+      </a>
+<a class="text-on-surface-variant hover:text-on-surface font-label-caps text-label-caps uppercase transition-colors" href="#">
+        Order Books
+      </a>
+<a class="text-on-surface-variant hover:text-on-surface font-label-caps text-label-caps uppercase transition-colors" href="#">
+        Triangular Loop
+      </a>
+<a class="text-on-surface-variant hover:text-on-surface font-label-caps text-label-caps uppercase transition-colors" href="#">
+        Execution Deck
+      </a>
+<a class="text-on-surface-variant hover:text-on-surface font-label-caps text-label-caps uppercase transition-colors" href="#">
+        Settlement
+      </a>
+</nav>
+<!-- Trailing Actions & Telemetry -->
+<div class="flex items-center gap-space-sm">
+<!-- BOT Status Pill -->
+<button class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-surface-container-high border border-outline-variant hover:border-primary-container transition-all active:scale-[0.98]" id="bot-toggle-btn">
+<span class="w-2 h-2 rounded-full bg-primary-container animate-pulse"></span>
+<span class="font-label-caps text-label-caps text-primary-container font-bold tracking-wider">BOT: ACTIVE</span>
+</button>
+<!-- Emergency Pause Button -->
+<button class="flex items-center gap-1.5 px-3 py-1 rounded bg-error-container border border-error/50 text-tertiary font-label-caps text-label-caps uppercase tracking-wider glow-crimson hover:bg-error hover:text-on-error transition-all active:scale-[0.98]">
+<span class="material-symbols-outlined text-sm" data-icon="sensors">sensors</span>
+<span>EMERGENCY KILL SWITCH</span>
+</button>
+<!-- Action Icons -->
+<div class="hidden sm:flex items-center gap-0.5 border-l border-outline-variant pl-space-sm">
+<button class="p-1 rounded text-on-surface-variant hover:text-primary-container hover:bg-surface-container-high transition-colors" title="Sensors feed">
+<span class="material-symbols-outlined" data-icon="sensors">sensors</span>
+</button>
+<button class="p-1 rounded text-on-surface-variant hover:text-primary-container hover:bg-surface-container-high transition-colors" title="History">
+<span class="material-symbols-outlined" data-icon="history">history</span>
+</button>
+<button class="p-1 rounded text-on-surface-variant hover:text-primary-container hover:bg-surface-container-high transition-colors" title="Engine tuning">
+<span class="material-symbols-outlined" data-icon="tune">tune</span>
+</button>
+<button class="p-1 rounded text-on-surface-variant hover:text-primary-container hover:bg-surface-container-high transition-colors" title="Alerts">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+</div>
+<!-- Quick Export CSV CTA -->
+<button class="hidden lg:flex items-center gap-1 px-2.5 py-1 rounded bg-surface-container border border-outline-variant text-secondary font-label-caps text-label-caps hover:bg-surface-container-high hover:border-secondary transition-all">
+<span class="material-symbols-outlined text-xs" data-icon="monitoring">monitoring</span>
+<span>EXPORT LOGS</span>
+</button>
+</div>
+</header>
+<!-- MAIN APP CONTAINER (SideNav + Multi-Panel Modular Canvas) -->
+<div class="flex-1 flex overflow-hidden">
+<!-- SIDE NAVIGATION BAR (Exact adherence to Shared Components JSON) -->
+<aside class="hidden lg:flex flex-col justify-between h-[calc(100vh-2.75rem)] w-64 shrink-0 bg-surface-container-lowest border-r border-outline-variant">
+<!-- Upper Section: Node Telemetry Header & Tabs -->
+<div class="flex flex-col">
+<!-- Node Profile Header -->
+<div class="p-space-md border-b border-outline-variant bg-surface-container-lowest/80">
+<div class="flex items-center gap-space-sm mb-1">
+<div class="w-8 h-8 rounded bg-surface-container-high flex items-center justify-center border border-outline-variant">
+<span class="material-symbols-outlined text-primary-container" data-icon="bolt">bolt</span>
+</div>
+<div>
+<div class="text-headline-sm font-headline-sm font-bold text-primary">NODE 01: P2P ENGINE</div>
+<div class="text-label-caps font-label-caps text-secondary">12ms LATENCY // VES_USDT</div>
+</div>
+</div>
+<div class="mt-2 flex items-center justify-between text-mono-metric-sm font-mono-metric-sm text-on-surface-variant">
+<span>MEM: 184MB / 4GB</span>
+<span class="text-primary-container">WS: HEALTHY</span>
+</div>
+</div>
+<!-- Tab Links (6 Mandatory tabs) -->
+<nav class="flex flex-col py-space-xs">
+<!-- Active: Arbitrage Matrix -->
+<a class="flex items-center gap-space-sm px-space-md py-space-xs text-primary-container bg-surface-container-high border-l-2 border-primary-container font-label-caps text-label-caps" href="#">
+<span class="material-symbols-outlined text-primary-container" data-icon="hub">hub</span>
+<span>Arbitrage Matrix</span>
+</a>
+<a class="flex items-center gap-space-sm px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low font-label-caps text-label-caps transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="format_list_bulleted">format_list_bulleted</span>
+<span>Live Orderbook</span>
+</a>
+<a class="flex items-center gap-space-sm px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low font-label-caps text-label-caps transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="bolt">bolt</span>
+<span>Auto Execution</span>
+</a>
+<a class="flex items-center gap-space-sm px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low font-label-caps text-label-caps transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="account_balance">account_balance</span>
+<span>Bank Routing</span>
+</a>
+<a class="flex items-center gap-space-sm px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low font-label-caps text-label-caps transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="monitoring">monitoring</span>
+<span>Analytics &amp; Export</span>
+</a>
+<a class="flex items-center gap-space-sm px-space-md py-space-xs text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low font-label-caps text-label-caps transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span>Terminal Settings</span>
+</a>
+</nav>
+</div>
+<!-- Lower Section: Telemetry Footer Tabs & CTA -->
+<div class="border-t border-outline-variant bg-surface-container-lowest/60 p-space-sm flex flex-col gap-2">
+<div class="flex flex-col gap-1">
+<a class="flex items-center gap-space-sm px-space-sm py-1 rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label-caps text-label-caps transition-colors" href="#">
+<span class="material-symbols-outlined text-secondary" data-icon="wifi">wifi</span>
+<span>Websocket Feed</span>
+<span class="ml-auto w-2 h-2 rounded-full bg-primary-container"></span>
+</a>
+<a class="flex items-center gap-space-sm px-space-sm py-1 rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label-caps text-label-caps transition-colors" href="#">
+<span class="material-symbols-outlined text-tertiary-fixed-dim" data-icon="terminal">terminal</span>
+<span>System Diagnostics</span>
+</a>
+</div>
+<button class="w-full py-1.5 px-3 rounded bg-surface-container-high hover:bg-surface-variant border border-outline-variant text-on-surface font-label-caps text-label-caps uppercase flex items-center justify-center gap-1 transition-all active:scale-[0.98]">
+<span class="material-symbols-outlined text-xs" data-icon="monitoring">monitoring</span>
+<span>EXPORT LOGS</span>
+</button>
+</div>
+</aside>
+<!-- MAIN DASHBOARD CONTENT AREA -->
+<main class="flex-1 overflow-y-auto bg-surface p-space-md flex flex-col gap-space-md">
+<!-- TOP METRIC CARDS STRIP -->
+<div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-space-sm">
+<!-- Metric 1: BCV Official Rate -->
+<div class="p-space-md bg-surface-container-low border border-outline-variant rounded flex flex-col justify-between relative overflow-hidden backdrop-blur-md">
+<div class="flex items-center justify-between">
+<span class="font-label-caps text-label-caps text-on-surface-variant uppercase">BCV Official Rate</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high font-label-caps text-label-caps text-secondary border border-outline-variant">
+              14:00 VET update
+            </span>
+</div>
+<div class="mt-2 flex items-baseline gap-2">
+<span class="font-mono-metric-lg text-mono-metric-lg text-on-surface font-bold">881.07</span>
+<span class="font-label-caps text-label-caps text-on-surface-variant">VES / USD</span>
+</div>
+<div class="mt-2 flex items-center justify-between text-mono-metric-sm font-mono-metric-sm text-outline">
+<span>Source: Banco Central VE</span>
+<span class="text-secondary flex items-center gap-0.5">
+<span class="material-symbols-outlined text-xs" data-icon="sensors">sensors</span> Verified
+            </span>
+</div>
+<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-secondary to-transparent opacity-40"></div>
+</div>
+<!-- Metric 2: Binance P2P Median Ask/Bid -->
+<div class="p-space-md bg-surface-container-low border border-outline-variant rounded flex flex-col justify-between relative overflow-hidden backdrop-blur-md">
+<div class="flex items-center justify-between">
+<span class="font-label-caps text-label-caps text-on-surface-variant uppercase">Binance P2P Median</span>
+<span class="font-label-caps text-label-caps text-primary-container flex items-center gap-1">
+<span class="w-1.5 h-1.5 rounded-full bg-primary-container animate-ping"></span> LIVE TICKER
+            </span>
+</div>
+<div class="mt-2 flex items-baseline justify-between">
+<div>
+<span class="font-mono-metric-lg text-mono-metric-lg text-primary font-bold">942.30</span>
+<span class="font-label-caps text-label-caps text-on-surface-variant">/</span>
+<span class="font-mono-metric-md text-mono-metric-md text-on-surface-variant">940.15</span>
+<span class="font-label-caps text-label-caps text-on-surface-variant ml-1">VES</span>
+</div>
+</div>
+<div class="mt-2 flex items-center justify-between text-mono-metric-sm font-mono-metric-sm text-outline">
+<span>24h Vol: <strong class="text-on-surface">$1.42M USDT</strong></span>
+<span class="text-primary-container">Depth: 418 Orders</span>
+</div>
+<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-primary-container to-transparent opacity-40"></div>
+</div>
+<!-- Metric 3: Parallel vs BCV Currency Gap -->
+<div class="p-space-md bg-surface-container-low border border-outline-variant rounded flex flex-col justify-between relative overflow-hidden backdrop-blur-md">
+<div class="flex items-center justify-between">
+<span class="font-label-caps text-label-caps text-on-surface-variant uppercase">Parallel vs BCV Gap</span>
+<span class="px-1.5 py-0.5 rounded bg-tertiary-container/20 text-tertiary-fixed-dim border border-outline-variant font-label-caps text-label-caps">
+              SPREAD INDEX
+            </span>
+</div>
+<div class="mt-2 flex items-baseline gap-2">
+<span class="font-mono-metric-lg text-mono-metric-lg text-primary-container font-bold">+6.95%</span>
+<span class="font-mono-metric-sm text-mono-metric-sm text-tertiary-fixed-dim">(+61.23 VES premium)</span>
+</div>
+<div class="mt-2 flex items-center justify-between text-mono-metric-sm font-mono-metric-sm text-outline">
+<span>Gap Volatility: ±0.34%</span>
+<span class="text-primary-container">High Liquidity</span>
+</div>
+<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-tertiary-fixed-dim to-transparent opacity-40"></div>
+</div>
+<!-- Metric 4: 24h Arbitrage Realized Yield -->
+<div class="p-space-md bg-surface-container-low border border-outline-variant rounded flex flex-col justify-between relative overflow-hidden backdrop-blur-md">
+<div class="flex items-center justify-between">
+<span class="font-label-caps text-label-caps text-on-surface-variant uppercase">24h Realized Yield</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-primary-container border border-primary-container/30 font-label-caps text-label-caps glow-emerald">
+              AUTO-HARVEST
+            </span>
+</div>
+<div class="mt-2 flex items-baseline gap-2">
+<span class="font-mono-metric-lg text-mono-metric-lg text-primary-container font-bold">+$3,482.50</span>
+<span class="font-label-caps text-label-caps text-on-surface-variant">USDT</span>
+</div>
+<div class="mt-2 flex items-center justify-between text-mono-metric-sm font-mono-metric-sm text-outline">
+<span class="text-primary">+3.84% ROI Net</span>
+<span class="text-on-surface font-mono-metric-sm">142 Cycles Filled</span>
+</div>
+<div class="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-primary-container to-transparent opacity-70"></div>
+</div>
+</div>
+<!-- FEATURED CROSS-BANK OPPORTUNITY CALLOUT BANNER -->
+<section class="p-space-md bg-surface-container-lowest border-2 border-primary-container/40 rounded glow-emerald relative overflow-hidden flex flex-col lg:flex-row items-center justify-between gap-space-md">
+<!-- Visual Accent Corner -->
+<div class="absolute -top-12 -right-12 w-48 h-48 bg-primary-container/10 rounded-full blur-3xl pointer-events-none"></div>
+<div class="flex flex-col sm:flex-row items-start sm:items-center gap-space-md z-10 w-full lg:w-auto">
+<div class="p-2.5 rounded bg-surface-container border border-primary-container/40 glow-emerald shrink-0">
+<span class="material-symbols-outlined text-primary-container text-2xl" data-icon="bolt">bolt</span>
+</div>
+<div>
+<div class="flex items-center gap-2">
+<span class="px-2 py-0.5 rounded bg-primary-container/20 border border-primary-container text-primary-container font-label-caps text-label-caps font-bold animate-pulse">
+                HOT ARBITRAGE OPPORTUNITY DETECTED
+              </span>
+<span class="text-mono-metric-sm font-mono-metric-sm text-secondary">Route: BDV → Pago Móvil / Banesco</span>
+</div>
+<div class="mt-1 text-headline-sm font-headline-sm text-on-surface">
+              Buy via <span class="text-primary font-bold">Banco de Venezuela (936.50 VES)</span>
+<span class="text-secondary mx-1">➔</span> 
+              Sell via <span class="text-primary-container font-bold">Pago Móvil / Banesco (948.80 VES)</span>
+</div>
+<div class="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-mono-metric-sm font-mono-metric-sm text-on-surface-variant">
+<span>Gross Spread: <strong class="text-primary-container font-bold">+1.31%</strong></span>
+<span class="text-outline">|</span>
+<span>Estimated Net Profit: <strong class="text-primary-container font-bold">+$1.28 USDT / 100 USDT</strong></span>
+<span class="text-outline">|</span>
+<span class="text-outline">Deductions: 0.1% Binance Maker + 0.3% IGTF Interbank Tax</span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-space-sm z-10 w-full lg:w-auto justify-end">
+<div class="text-right hidden sm:block">
+<div class="font-label-caps text-label-caps text-on-surface-variant uppercase">Route Fill Window</div>
+<div class="font-mono-metric-sm text-mono-metric-sm text-tertiary-fixed-dim font-bold">~ 2m 14s remaining</div>
+</div>
+<button class="w-full sm:w-auto px-4 py-2.5 rounded bg-primary-container text-surface-container-lowest font-headline-sm font-headline-sm font-bold flex items-center justify-center gap-2 hover:bg-surface-tint glow-emerald-strong transition-all active:scale-[0.98]">
+<span class="material-symbols-outlined text-xl" data-icon="bolt">bolt</span>
+<span>One-Click Fast Route Execution</span>
+</button>
+</div>
+</section>
+<!-- MAIN SPLIT WORKSPACE: Central Matrix (Left/Center) + Execution Deck & History (Right) -->
+<div class="grid grid-cols-1 xl:grid-cols-12 gap-space-md items-start">
+<!-- CENTRAL ARBITRAGE DATA MATRIX (Col 1-8) -->
+<div class="xl:col-span-8 flex flex-col gap-space-sm bg-surface-container-lowest border border-outline-variant rounded p-space-md">
+<!-- Matrix Header & Interactive Controls -->
+<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-space-sm border-b border-outline-variant pb-space-sm">
+<div>
+<div class="flex items-center gap-2">
+<h2 class="text-headline-sm font-headline-sm font-bold text-on-surface uppercase tracking-wide">
+                  Central Interbank Arbitrage Matrix
+                </h2>
+<span class="px-2 py-0.5 rounded bg-surface-container-high border border-outline-variant text-mono-metric-sm font-mono-metric-sm text-primary-container">
+                  VES / USDT
+                </span>
+</div>
+<p class="text-mono-metric-sm font-mono-metric-sm text-outline">
+                Real-time Binance P2P depth scanner across top Venezuelan clearing channels
+              </p>
+</div>
+<!-- Polling Indicator & Counter -->
+<div class="flex items-center gap-space-sm">
+<span class="text-mono-metric-sm font-mono-metric-sm text-on-surface-variant flex items-center gap-1">
+<span class="material-symbols-outlined text-xs text-secondary" data-icon="history">history</span>
+                Next block poll: <strong class="text-primary-container" id="poll-timer">0.8s</strong>
+</span>
+<button class="p-1.5 rounded bg-surface-container-high border border-outline-variant hover:text-primary-container transition-colors" title="Force Refresh Depth">
+<span class="material-symbols-outlined" data-icon="tune">tune</span>
+</button>
+</div>
+</div>
+<!-- Filter Tabs & Quick Payment Search -->
+<div class="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-space-sm pt-1">
+<!-- Filter Tabs -->
+<div class="flex flex-wrap items-center gap-1">
+<button class="px-2.5 py-1 rounded bg-surface-container-high border border-primary-container text-primary-container font-label-caps text-label-caps">
+                All Banks (6)
+              </button>
+<button class="px-2.5 py-1 rounded bg-surface-container border border-outline-variant text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label-caps text-label-caps transition-colors">
+                Instant Pago Móvil
+              </button>
+<button class="px-2.5 py-1 rounded bg-surface-container border border-outline-variant text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label-caps text-label-caps transition-colors">
+                Private Banks
+              </button>
+<button class="px-2.5 py-1 rounded bg-surface-container border border-outline-variant text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high font-label-caps text-label-caps transition-colors">
+                High Liquidity &gt;$5k
+              </button>
+</div>
+<!-- Search Bar -->
+<div class="relative w-full md:w-56">
+<span class="absolute inset-y-0 left-2 flex items-center pointer-events-none text-outline">
+<span class="material-symbols-outlined text-sm" data-icon="format_list_bulleted">format_list_bulleted</span>
+</span>
+<input class="w-full bg-surface-container-low border border-outline-variant rounded pl-7 pr-2 py-1 text-mono-metric-sm font-mono-metric-sm text-on-surface placeholder-outline focus:border-secondary focus:outline-none" placeholder="Filter bank rail..." type="text"/>
+</div>
+</div>
+<!-- THE DATA MATRIX TABLE -->
+<div class="overflow-x-auto mt-space-xs">
+<table class="w-full border-collapse text-left">
+<thead>
+<tr class="border-b border-outline-variant font-label-caps text-label-caps text-on-surface-variant bg-surface-container-low/70">
+<th class="py-2 px-space-sm">Bank / Payment Rail</th>
+<th class="py-2 px-space-sm">24h Vol</th>
+<th class="py-2 px-space-sm">Best Buy (VES)</th>
+<th class="py-2 px-space-sm">Best Sell (VES)</th>
+<th class="py-2 px-space-sm">Gross Spread</th>
+<th class="py-2 px-space-sm">Fee / Slip</th>
+<th class="py-2 px-space-sm">Net / 100 USDT</th>
+<th class="py-2 px-space-sm">Velocity</th>
+<th class="py-2 px-space-sm">Depth (USDT)</th>
+<th class="py-2 px-space-sm text-right">Auto Route</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant/40 font-mono-metric-sm text-mono-metric-sm">
+<!-- Row 1: Banesco -->
+<tr class="hover:bg-surface-container-high/60 transition-colors group cursor-pointer">
+<td class="py-2 px-space-sm">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-bold text-on-surface">Banesco Banco</span>
+</div>
+</td>
+<td class="py-2 px-space-sm text-outline">$482,900</td>
+<td class="py-2 px-space-sm text-primary font-medium">939.80</td>
+<td class="py-2 px-space-sm text-tertiary-fixed-dim font-medium">948.50</td>
+<td class="py-2 px-space-sm">
+<span class="text-primary-container font-bold">+0.93%</span>
+</td>
+<td class="py-2 px-space-sm text-outline">0.10%</td>
+<td class="py-2 px-space-sm text-primary-container font-bold">+$0.83</td>
+<td class="py-2 px-space-sm text-on-surface">3.4 min</td>
+<td class="py-2 px-space-sm text-outline">$94,200</td>
+<td class="py-2 px-space-sm text-right">
+<span class="px-2 py-0.5 rounded bg-surface-container border border-primary-container/40 text-primary-container font-label-caps text-label-caps">
+                      ARMED
+                    </span>
+</td>
+</tr>
+<!-- Row 2: Mercantil Banco -->
+<tr class="hover:bg-surface-container-high/60 transition-colors group cursor-pointer">
+<td class="py-2 px-space-sm">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-secondary-fixed"></span>
+<span class="font-bold text-on-surface">Mercantil Banco</span>
+</div>
+</td>
+<td class="py-2 px-space-sm text-outline">$312,400</td>
+<td class="py-2 px-space-sm text-primary font-medium">938.20</td>
+<td class="py-2 px-space-sm text-tertiary-fixed-dim font-medium">946.90</td>
+<td class="py-2 px-space-sm">
+<span class="text-primary-container font-bold">+0.92%</span>
+</td>
+<td class="py-2 px-space-sm text-outline">0.12%</td>
+<td class="py-2 px-space-sm text-primary-container font-bold">+$0.80</td>
+<td class="py-2 px-space-sm text-on-surface">4.1 min</td>
+<td class="py-2 px-space-sm text-outline">$62,150</td>
+<td class="py-2 px-space-sm text-right">
+<span class="px-2 py-0.5 rounded bg-surface-container border border-primary-container/40 text-primary-container font-label-caps text-label-caps">
+                      ARMED
+                    </span>
+</td>
+</tr>
+<!-- Row 3: Pago Móvil (Instant Interbank) -->
+<tr class="bg-primary-container/5 hover:bg-primary-container/10 transition-colors group cursor-pointer border-l-2 border-primary-container">
+<td class="py-2 px-space-sm">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-primary-container animate-pulse"></span>
+<span class="font-bold text-primary-container">Pago Móvil (Instant)</span>
+</div>
+</td>
+<td class="py-2 px-space-sm text-outline">$590,100</td>
+<td class="py-2 px-space-sm text-primary font-medium">937.10</td>
+<td class="py-2 px-space-sm text-tertiary-fixed-dim font-medium">948.80</td>
+<td class="py-2 px-space-sm">
+<span class="text-primary-container font-bold text-sm glow-emerald">+1.25%</span>
+</td>
+<td class="py-2 px-space-sm text-outline">0.30%</td>
+<td class="py-2 px-space-sm text-primary-container font-bold glow-emerald">+$0.95</td>
+<td class="py-2 px-space-sm text-primary-container font-bold">1.2 min</td>
+<td class="py-2 px-space-sm text-on-surface">$128,400</td>
+<td class="py-2 px-space-sm text-right">
+<span class="px-2 py-0.5 rounded bg-primary-container text-surface-container-lowest font-label-caps text-label-caps font-bold">
+                      ACTIVE TRIGGER
+                    </span>
+</td>
+</tr>
+<!-- Row 4: Banco de Venezuela (BDV) -->
+<tr class="bg-primary-container/5 hover:bg-primary-container/10 transition-colors group cursor-pointer border-l-2 border-primary-container">
+<td class="py-2 px-space-sm">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-primary-container animate-pulse"></span>
+<span class="font-bold text-primary">BDV (Venezuela)</span>
+</div>
+</td>
+<td class="py-2 px-space-sm text-outline">$410,250</td>
+<td class="py-2 px-space-sm text-primary font-medium">936.50</td>
+<td class="py-2 px-space-sm text-tertiary-fixed-dim font-medium">947.20</td>
+<td class="py-2 px-space-sm">
+<span class="text-primary-container font-bold text-sm glow-emerald">+1.14%</span>
+</td>
+<td class="py-2 px-space-sm text-outline">0.10%</td>
+<td class="py-2 px-space-sm text-primary-container font-bold glow-emerald">+$1.04</td>
+<td class="py-2 px-space-sm text-on-surface">2.8 min</td>
+<td class="py-2 px-space-sm text-on-surface">$85,300</td>
+<td class="py-2 px-space-sm text-right">
+<span class="px-2 py-0.5 rounded bg-primary-container text-surface-container-lowest font-label-caps text-label-caps font-bold">
+                      ACTIVE TRIGGER
+                    </span>
+</td>
+</tr>
+<!-- Row 5: BBVA Provincial -->
+<tr class="hover:bg-surface-container-high/60 transition-colors group cursor-pointer">
+<td class="py-2 px-space-sm">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-bold text-on-surface">BBVA Provincial</span>
+</div>
+</td>
+<td class="py-2 px-space-sm text-outline">$198,700</td>
+<td class="py-2 px-space-sm text-primary font-medium">940.50</td>
+<td class="py-2 px-space-sm text-tertiary-fixed-dim font-medium">946.80</td>
+<td class="py-2 px-space-sm">
+<span class="text-primary-container font-bold">+0.67%</span>
+</td>
+<td class="py-2 px-space-sm text-outline">0.10%</td>
+<td class="py-2 px-space-sm text-primary-container font-bold">+$0.57</td>
+<td class="py-2 px-space-sm text-on-surface">5.2 min</td>
+<td class="py-2 px-space-sm text-outline">$38,900</td>
+<td class="py-2 px-space-sm text-right">
+<span class="px-2 py-0.5 rounded bg-surface-container border border-outline-variant text-on-surface-variant font-label-caps text-label-caps">
+                      ARMED
+                    </span>
+</td>
+</tr>
+<!-- Row 6: Bancamiga -->
+<tr class="hover:bg-surface-container-high/60 transition-colors group cursor-pointer">
+<td class="py-2 px-space-sm">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="font-bold text-on-surface">Bancamiga</span>
+</div>
+</td>
+<td class="py-2 px-space-sm text-outline">$88,400</td>
+<td class="py-2 px-space-sm text-primary font-medium">941.00</td>
+<td class="py-2 px-space-sm text-tertiary-fixed-dim font-medium">945.80</td>
+<td class="py-2 px-space-sm">
+<span class="text-primary-container font-bold">+0.51%</span>
+</td>
+<td class="py-2 px-space-sm text-outline">0.10%</td>
+<td class="py-2 px-space-sm text-primary-container font-bold">+$0.41</td>
+<td class="py-2 px-space-sm text-on-surface">6.7 min</td>
+<td class="py-2 px-space-sm text-outline">$22,400</td>
+<td class="py-2 px-space-sm text-right">
+<span class="px-2 py-0.5 rounded bg-surface-container border border-outline-variant text-on-surface-variant font-label-caps text-label-caps">
+                      STANDBY
+                    </span>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!-- Bottom Micro-Chart / Liquidity Depth Bar -->
+<div class="pt-space-sm border-t border-outline-variant flex flex-col sm:flex-row items-center justify-between gap-2 text-mono-metric-sm font-mono-metric-sm">
+<div class="flex items-center gap-space-md text-outline">
+<span class="flex items-center gap-1">
+<span class="w-2 h-2 rounded bg-primary-container"></span> Bids (Buy Depth): 64%
+              </span>
+<span class="flex items-center gap-1">
+<span class="w-2 h-2 rounded bg-error-container"></span> Asks (Sell Depth): 36%
+              </span>
+</div>
+<div class="text-on-surface-variant">
+              Aggregated P2P Liquidity: <strong class="text-on-surface font-bold">$1,692,050 USDT</strong>
+</div>
+</div>
+</div>
+<!-- SIDE ANALYTICS & EXECUTION CONTROLS (Col 9-12) -->
+<div class="xl:col-span-4 flex flex-col gap-space-md">
+<!-- QUICK EXECUTION DECK CARD -->
+<div class="p-space-md bg-surface-container-lowest border border-outline-variant rounded flex flex-col gap-space-md">
+<div class="flex items-center justify-between border-b border-outline-variant pb-2">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-primary-container" data-icon="bolt">bolt</span>
+<h3 class="font-headline-sm text-headline-sm font-bold text-on-surface uppercase">Execution Deck</h3>
+</div>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-high text-primary-container font-label-caps text-label-caps border border-outline-variant">
+                SUB-SECOND READY
+              </span>
+</div>
+<!-- Capital Deployment Slider -->
+<div class="flex flex-col gap-1.5">
+<div class="flex justify-between items-center text-mono-metric-sm font-mono-metric-sm">
+<span class="text-on-surface-variant font-label-caps text-label-caps">CAPITAL DEPLOYMENT (USDT)</span>
+<span class="text-primary-container font-bold text-sm" id="capital-val">500 USDT</span>
+</div>
+<input class="w-full h-1.5 bg-surface-container-high rounded appearance-none cursor-pointer accent-primary-container" id="capital-slider" max="5000" min="100" step="50" type="range" value="500"/>
+<div class="flex justify-between text-mono-metric-sm font-mono-metric-sm text-outline">
+<span>Min: 100 USDT</span>
+<span>Max: 5,000 USDT</span>
+</div>
+</div>
+<!-- Configuration Grid: Slippage & Max Time -->
+<div class="grid grid-cols-2 gap-space-sm">
+<div class="p-2 rounded bg-surface-container-low border border-outline-variant flex flex-col">
+<span class="font-label-caps text-label-caps text-outline uppercase">MAX SLIPPAGE</span>
+<div class="mt-1 flex items-center justify-between">
+<span class="font-mono-metric-md text-mono-metric-md text-on-surface font-bold">0.25%</span>
+<span class="material-symbols-outlined text-secondary text-sm" data-icon="tune">tune</span>
+</div>
+</div>
+<div class="p-2 rounded bg-surface-container-low border border-outline-variant flex flex-col">
+<span class="font-label-caps text-label-caps text-outline uppercase">MIN NET ROI</span>
+<div class="mt-1 flex items-center justify-between">
+<span class="font-mono-metric-md text-mono-metric-md text-primary-container font-bold">&gt; 0.85%</span>
+<span class="material-symbols-outlined text-primary-container text-sm" data-icon="monitoring">monitoring</span>
+</div>
+</div>
+</div>
+<!-- Toggle switches: Auto-Rebalance & Anti-Triangulation Fraud -->
+<div class="flex flex-col gap-2 pt-1 border-t border-outline-variant">
+<label class="flex items-center justify-between cursor-pointer py-1">
+<span class="font-body-sm text-body-sm text-on-surface">Auto-Rebalance via Interbank</span>
+<div class="relative inline-flex items-center">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-9 h-5 bg-surface-container-high peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface after:border-outline-variant after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary-container"></div>
+</div>
+</label>
+<label class="flex items-center justify-between cursor-pointer py-1">
+<span class="font-body-sm text-body-sm text-on-surface">Auto-Confirm Binance Release</span>
+<div class="relative inline-flex items-center">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-9 h-5 bg-surface-container-high peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface after:border-outline-variant after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary-container"></div>
+</div>
+</label>
+</div>
+<!-- Action Button: Fire Loop -->
+<button class="w-full py-2.5 rounded bg-primary-container hover:bg-surface-tint text-surface-container-lowest font-headline-sm font-headline-sm font-bold flex items-center justify-center gap-2 glow-emerald transition-all active:scale-[0.98]">
+<span class="material-symbols-outlined" data-icon="bolt">bolt</span>
+<span>DEPLOY INSTANT ARBITRAGE</span>
+</button>
+</div>
+<!-- RECENT TRIANGULAR CYCLES LOG (Live Feed) -->
+<div class="p-space-md bg-surface-container-lowest border border-outline-variant rounded flex flex-col gap-space-sm">
+<div class="flex items-center justify-between border-b border-outline-variant pb-2">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-secondary" data-icon="history">history</span>
+<h3 class="font-headline-sm text-headline-sm font-bold text-on-surface uppercase">Recent Triangular Cycles</h3>
+</div>
+<span class="w-2 h-2 rounded-full bg-primary-container animate-ping"></span>
+</div>
+<div class="flex flex-col gap-2 font-mono-metric-sm text-mono-metric-sm overflow-hidden">
+<!-- Feed Item 1 -->
+<div class="p-2 rounded bg-surface-container-low border border-outline-variant/60 flex flex-col gap-1 hover:border-primary-container/40 transition-colors">
+<div class="flex items-center justify-between">
+<span class="text-primary-container font-bold flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="bolt">bolt</span> +$6.42 USDT
+                  </span>
+<span class="text-outline">14:02:18 VET</span>
+</div>
+<div class="text-on-surface-variant flex items-center justify-between text-[11px]">
+<span>BDV ➔ Pago Móvil</span>
+<span class="text-outline">Tx: #940a...82f</span>
+</div>
+<div class="flex items-center justify-between text-[10px] text-primary">
+<span>Settled: 500 USDT</span>
+<span class="text-secondary font-bold">SETTLED IN 78s</span>
+</div>
+</div>
+<!-- Feed Item 2 -->
+<div class="p-2 rounded bg-surface-container-low border border-outline-variant/60 flex flex-col gap-1 hover:border-primary-container/40 transition-colors">
+<div class="flex items-center justify-between">
+<span class="text-primary-container font-bold flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="bolt">bolt</span> +$4.15 USDT
+                  </span>
+<span class="text-outline">13:58:44 VET</span>
+</div>
+<div class="text-on-surface-variant flex items-center justify-between text-[11px]">
+<span>Banesco ➔ Mercantil</span>
+<span class="text-outline">Tx: #182c...94a</span>
+</div>
+<div class="flex items-center justify-between text-[10px] text-primary">
+<span>Settled: 350 USDT</span>
+<span class="text-secondary font-bold">SETTLED IN 124s</span>
+</div>
+</div>
+<!-- Feed Item 3 -->
+<div class="p-2 rounded bg-surface-container-low border border-outline-variant/60 flex flex-col gap-1 hover:border-primary-container/40 transition-colors">
+<div class="flex items-center justify-between">
+<span class="text-primary-container font-bold flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="bolt">bolt</span> +$12.80 USDT
+                  </span>
+<span class="text-outline">13:51:02 VET</span>
+</div>
+<div class="text-on-surface-variant flex items-center justify-between text-[11px]">
+<span>BDV ➔ Banesco Interbank</span>
+<span class="text-outline">Tx: #773f...11b</span>
+</div>
+<div class="flex items-center justify-between text-[10px] text-primary">
+<span>Settled: 1,000 USDT</span>
+<span class="text-secondary font-bold">SETTLED IN 64s</span>
+</div>
+</div>
+</div>
+<div class="pt-1 text-center">
+<a class="text-label-caps font-label-caps text-secondary hover:underline uppercase" href="#">
+                View all 142 completed cycles →
+              </a>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+<!-- Vanilla JS Interactive Interactivity -->
+<script>
+    // Live Countdown Timer
+    let countdown = 0.8;
+    const timerEl = document.getElementById('poll-timer');
+    setInterval(() => {
+      countdown -= 0.1;
+      if (countdown <= 0) {
+        countdown = 0.8;
+      }
+      if (timerEl) {
+        timerEl.textContent = countdown.toFixed(1) + 's';
+      }
+    }, 100);
+
+    // Capital Deployment Slider interaction
+    const slider = document.getElementById('capital-slider');
+    const valDisplay = document.getElementById('capital-val');
+    if (slider && valDisplay) {
+      slider.addEventListener('input', (e) => {
+        valDisplay.textContent = e.target.value + ' USDT';
+      });
+    }
+
+    // Bot toggle state
+    const botBtn = document.getElementById('bot-toggle-btn');
+    if (botBtn) {
+      let active = true;
+      botBtn.addEventListener('click', () => {
+        active = !active;
+        if (active) {
+          botBtn.innerHTML = `
+            <span class="w-2 h-2 rounded-full bg-primary-container animate-pulse"></span>
+            <span class="font-label-caps text-label-caps text-primary-container font-bold tracking-wider">BOT: ACTIVE</span>
+          `;
+        } else {
+          botBtn.innerHTML = `
+            <span class="w-2 h-2 rounded-full bg-tertiary-fixed-dim"></span>
+            <span class="font-label-caps text-label-caps text-tertiary-fixed-dim font-bold tracking-wider">BOT: PAUSED</span>
+          `;
+        }
+      });
+    }
+  </script>
+</body></html>

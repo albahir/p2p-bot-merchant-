@@ -81,6 +81,21 @@ class Settings(BaseSettings):
         description="Ruta local al archivo de credenciales de Google Service Account"
     )
 
+    # API REST, WebSockets & JWT
+    JWT_SECRET_KEY: str = Field(
+        default="",
+        description="Clave secreta para firmar tokens JWT. Si está vacía se deriva de MASTER_ENCRYPTION_KEY"
+    )
+    JWT_ALGORITHM: str = Field(default="HS256", description="Algoritmo de firma JWT")
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=1440,
+        description="Expiración de tokens de acceso en minutos (por defecto 24 horas)"
+    )
+    CORS_ORIGINS: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000,*",
+        description="Orígenes CORS permitidos separados por coma"
+    )
+
     # Entorno y Operaciones
     ENVIRONMENT: str = Field(default="development")
     USE_SANDBOX: bool = Field(default=True, description="Activa el simulador P2P si no hay claves reales")
@@ -114,3 +129,11 @@ class Settings(BaseSettings):
             if clean_chat.isdigit() and not clean_chat.startswith("-"):
                 users.append(int(clean_chat))
         return users
+
+    @property
+    def jwt_secret(self) -> str:
+        return self.JWT_SECRET_KEY.strip() or self.MASTER_ENCRYPTION_KEY
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
