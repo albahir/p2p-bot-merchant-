@@ -128,16 +128,15 @@ def test_spread_monitor_fetch_live_quotes_with_client():
 
 
 def test_spread_monitor_fetch_live_quotes_fallback_on_network_error():
-    """fetch_live_quotes debe retornar cotizaciones de respaldo si el cliente de red falla."""
+    """fetch_live_quotes debe aplicar Fail-closed y retornar lista vacía si el cliente de red falla."""
     class FailingClient:
         def search_p2p_ads(self, *args, **kwargs):
             raise RuntimeError("Network timeout simulation")
 
     monitor = SpreadMonitor()
     quotes = monitor.fetch_live_quotes(client=FailingClient())
-    # Debe retornar cotizaciones calibradas de respaldo sin fallar
-    assert len(quotes) > 0
-    assert any(q.bank_name == "Banco de Venezuela" for q in quotes)
+    # Fail-closed: No fabricar cotizaciones falsas en fallo de red
+    assert quotes == []
 
 
 def test_bank_rate_quote_extended_attributes():

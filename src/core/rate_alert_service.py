@@ -162,8 +162,16 @@ class RateAlertService:
         if not quotes:
             return None
 
+        # NUNCA alertar sobre cotizaciones simuladas o calibradas de fallback
+        if any(getattr(q, "source", "") in ("calibrated", "mock", "fallback") for q in quotes):
+            return None
+
         cross = self.monitor.find_best_cross_arbitrage(quotes)
         if not cross or cross["spread_pct"] < 1.50:
+            return None
+
+        # Requiere viabilidad operativa (margen neto positivo tras comisiones Binance y bancarias)
+        if not cross.get("is_viable", False):
             return None
 
         key = f"{cross['buy_bank']}->{cross['sell_bank']}"
@@ -196,11 +204,11 @@ class RateAlertService:
             self.last_arbitrage_spread_pct = float(cross["spread_pct"])
             self.last_arbitrage_alert_time = now
             return (
-                f"⚡ *¡OPORTUNIDAD DE ARBITRAJE INTERBANCARIO DETECTADA!* (Spread: `+{cross['spread_pct']:+.2f}%`)\n\n"
+                f"⚡ *¡OPORTUNIDAD DE ARBITRAJE INTERBANCARIO DETECTADA!* (Spread: `{cross['spread_pct']:+.2f}%`)\n\n"
                 f"• Compra en: *{cross['buy_bank']}* a `{cross['buy_rate']:,.2f} Bs`\n"
                 f"• Venta en: *{cross['sell_bank']}* a `{cross['sell_rate']:,.2f} Bs`\n"
-                f"• Spread Bruto: `+{cross['spread_ves']:+.2f} Bs`\n"
-                f"• Retorno Estimado: `+{cross['net_profit_ves_100u']:,.2f} Bs` por cada 100 USDT\n\n"
+                f"• Spread Bruto: `{cross['spread_ves']:+.2f} Bs`\n"
+                f"• Retorno Estimado: `{cross['net_profit_ves_100u']:+,.2f} Bs` por cada 100 USDT\n\n"
                 f"💡 Usa `/spread` para ver la matriz completa de bancos."
             )
 
@@ -218,7 +226,8 @@ class RateAlertService:
                 if bcv_alert:
                     alerts.append(bcv_alert)
 
-            quotes = self.monitor.get_market_quotes()
+            # Consultar cotizaciones en vivo mediante failover multinivel (Pitbull / Binance / CriptoYa / Yadio)
+            quotes = self.monitor.fetch_live_quotes(use_public_bapi=True)
             spread_alert = self.check_spread_opportunities(quotes)
             if spread_alert:
                 alerts.append(spread_alert)

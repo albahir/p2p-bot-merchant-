@@ -39,6 +39,34 @@ class OrderRepository:
             query = query.filter(Order.created_at <= end_date)  # type: ignore[arg-type]
         return query.order_by(Order.created_at.asc()).all()
 
+    def list_paginated(
+        self,
+        skip: int = 0,
+        limit: int = 50,
+        trade_type: str | None = None,
+        order_status: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        search: str | None = None,
+    ) -> tuple[int, list[Order]]:
+        query = self.db.query(Order)
+        if trade_type:
+            query = query.filter(Order.trade_type == trade_type.upper())
+        if order_status:
+            query = query.filter(Order.order_status == order_status.upper())
+        if start_date:
+            query = query.filter(Order.created_at >= start_date)  # type: ignore[arg-type]
+        if end_date:
+            query = query.filter(Order.created_at <= end_date)  # type: ignore[arg-type]
+        if search:
+            s = f"%{search}%"
+            query = query.filter(
+                (Order.order_number.like(s)) | (Order.counterparty_name.like(s))
+            )
+        total = query.count()
+        items = query.order_by(Order.created_at.desc()).offset(skip).limit(limit).all()
+        return total, items
+
 
 class SecurityRepository:
     """Acceso a eventos de auditoría y almacenamiento de secretos."""

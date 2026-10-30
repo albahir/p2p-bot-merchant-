@@ -56,6 +56,8 @@ def test_bcv_fallback_when_scrape_fails():
             rate = service.fetch_current_rate()
             assert rate == 875.50
 
+        # Sin caché previa ni fuentes disponibles, debe aplicar Fail-closed y retornar 0.0
+        service._cached_rate = None
         with patch.object(service, "_fetch_from_fallback_api", return_value=None):
             rate_default = service.fetch_current_rate()
-            assert rate_default > 0
+            assert rate_default == 0.0

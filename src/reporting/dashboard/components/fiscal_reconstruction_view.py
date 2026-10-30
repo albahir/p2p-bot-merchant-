@@ -7,8 +7,10 @@ from datetime import UTC, datetime
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy.exc import SQLAlchemyError
 
 from config.settings import Settings
+from src.core.binance_history_syncer import BinanceHistorySyncer
 from src.core.file_parser import BinanceFileParser
 from src.data.database import SessionLocal
 from src.data.models import BankVoucher
@@ -30,7 +32,127 @@ def render_fiscal_reconstruction() -> None:
     db = SessionLocal()
     try:
         # -------------------------------------------------------------
-        # SECCIÓN 1: Ingesta de Archivos de Binance (.csv / .xlsx)
+        # SECCIÓN 1: Extracción Directa vía Binance P2P API y Descarga CSV
+        # -------------------------------------------------------------
+        with st.expander(":material/sync: Extraer Histórico de Órdenes P2P vía API de Binance (CSV)", expanded=True):
+            st.write(
+                "Consulta directamente la API oficial de Binance P2P (`GET /sapi/v1/c2c/orderMatch/listUserOrderHistory`), "
+                "ingesta las órdenes automáticamente en la base de datos fiscal y genera el archivo CSV listo para descargar."
+            )
+            col_days, col_type = st.columns(2)
+            with col_days:
+                days_to_fetch = st.slider(
+                    "Días hacia atrás a consultar",
+                    min_value=1,
+                    max_value=30,
+                    value=30,
+                    help="Binance limita cada consulta a una ventana máxima de 30 días continuos.",
+                )
+            with col_type:
+                trade_type_choice = st.selectbox(
+                    "Tipo de Operación a Extraer",
+                    ["Ambas (COMPRA y VENTA)", "Solo COMPRAS (BUY)", "Solo VENTAS (SELL)"],
+                )
+                type_map = {
+                    "Ambas (COMPRA y VENTA)": "ALL",
+                    "Solo COMPRAS (BUY)": "BUY",
+                    "Solo VENTAS (SELL)": "SELL",
+                }
+
+            if st.button("🚀 Extraer y Sincronizar Histórico P2P desde Binance", key="btn_sync_binance_api", width="stretch"):
+                with st.spinner("Consultando órdenes en Binance P2P con firma criptográfica..."):
+                    try:
+                        settings = Settings()
+                        from src.security.api_key_manager import ApiKeyManager
+
+                        km = ApiKeyManager(
+                            master_key=settings.MASTER_ENCRYPTION_KEY,
+                            db_session_factory=SessionLocal,
+                        )
+                        api_key = km.get_secret("binance_api_key") or ""
+                        private_key = km.get_secret("binance_private_key") or ""
+
+                        if not api_key:
+                            st.warning(
+                                "⚠️ **API Key no encontrada**: Por favor configura tu Binance API Key en la pestaña "
+                                "'Credenciales & RBAC' del menú superior."
+                            )
+                        elif not private_key:
+                            st.warning(
+                                "⚠️ **Clave Secreta/Privada no encontrada**: Binance exige firma para consultar "
+                                "el historial de órdenes. Ingresa tu Secret Key o Clave Privada en la pestaña 'Credenciales & RBAC'."
+                            )
+                        else:
+                            from src.core.binance_client import BinanceP2PClient
+
+                            client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
+                            syncer = BinanceHistorySyncer()
+                            res = syncer.sync_orders(
+                                client=client,
+                                db=db,
+                                days=days_to_fetch,
+                                trade_type=type_map[trade_type_choice],
+                            )
+                            if not res.success:
+                                st.error(f"❌ Error al consultar Binance: {res.error_message}")
+                            else:
+                                st.success(
+                                    f"✅ Sincronización exitosa: {res.total_fetched} órdenes extraídas "
+                                    f"({res.orders_inserted} nuevas guardadas en BD, {res.orders_existing} ya existían)."
+                                )
+                                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                                kpi1.metric("Total Órdenes", res.total_fetched)
+                                kpi2.metric("Compras (BUY)", res.buy_orders)
+                                kpi3.metric("Ventas (SELL)", res.sell_orders)
+                                kpi4.metric("Volumen USDT", f"{res.total_volume_usdt:,.2f} U")
+
+                                time_str = datetime.now(UTC).strftime("%Y%m%d_%H%M")
+                                st.write("---")
+                                st.markdown("##### 📥 Opciones de Descarga de Archivos")
+                                col_dl1, col_dl2, col_dl3 = st.columns(3)
+                                with col_dl1:
+                                    if res.excel_bytes:
+                                        st.download_button(
+                                            label="📗 Excel (.xlsx) [Recomendado]",
+                                            data=res.excel_bytes,
+                                            file_name=f"binance_p2p_orders_{time_str}.xlsx",
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            key="btn_download_synced_xlsx",
+                                            width="stretch",
+                                            help="Abre directo en columnas perfectas con formato nativo de Excel.",
+                                        )
+                                with col_dl2:
+                                    if res.csv_bytes:
+                                        st.download_button(
+                                            label="📄 CSV (Excel España/Latam ';')",
+                                            data=res.csv_bytes,
+                                            file_name=f"binance_p2p_orders_excel_{time_str}.csv",
+                                            mime="text/csv",
+                                            key="btn_download_synced_csv_semi",
+                                            width="stretch",
+                                            help="CSV con punto y coma (;) para que Excel en español separe columnas automáticamente.",
+                                        )
+                                with col_dl3:
+                                    if res.csv_comma_bytes:
+                                        st.download_button(
+                                            label="📄 CSV (Estándar Internacional ',')",
+                                            data=res.csv_comma_bytes,
+                                            file_name=f"binance_p2p_orders_comma_{time_str}.csv",
+                                            mime="text/csv",
+                                            key="btn_download_synced_csv_comma",
+                                            width="stretch",
+                                            help="CSV con delimitador de coma estándar.",
+                                        )
+
+                                if res.orders:
+                                    st.markdown("##### 🔍 Vista Previa de Órdenes Extraídas")
+                                    df_preview = syncer.generate_orders_df(res.orders)
+                                    st.dataframe(df_preview, width="stretch")
+                    except (SQLAlchemyError, ValueError, OSError, RuntimeError, KeyError) as e:
+                        st.error(f"Error inesperado al sincronizar con Binance: {e}")
+
+        # -------------------------------------------------------------
+        # SECCIÓN 2: Ingesta de Archivos de Binance (.csv / .xlsx)
         # -------------------------------------------------------------
         with st.expander(":material/upload_file: Cargar Archivos Históricos de Binance (C2C, Depósitos, Retiros)", expanded=False):
             st.write(
@@ -49,13 +171,13 @@ def render_fiscal_reconstruction() -> None:
                 total_movements = 0
                 for u_file in uploaded_binance_files:
                     content_bytes = u_file.read()
-                    res = BinanceFileParser.import_into_database(
+                    parse_res = BinanceFileParser.import_into_database(
                         content=content_bytes,
                         file_name=u_file.name,
                         db=db,
                     )
-                    orders_added = res.get("orders_imported", 0)
-                    movs_added = res.get("movements_imported", 0)
+                    orders_added = parse_res.get("orders_imported", 0)
+                    movs_added = parse_res.get("movements_imported", 0)
                     total_orders += orders_added
                     total_movements += movs_added
                     st.write(f"• **{u_file.name}**: {orders_added} órdenes importadas, {movs_added} movimientos importados.")
@@ -139,13 +261,13 @@ def render_fiscal_reconstruction() -> None:
         snap_repo = FiscalSnapshotRepository(db)
         existing_snap = snap_repo.get_by_period(period_val)
 
-        default_init = float(existing_snap.initial_balance) if existing_snap else 0.0
-        default_actual = float(existing_snap.actual_final_balance) if existing_snap else 0.0
+        default_init = float(existing_snap.initial_balance) if (existing_snap and existing_snap.initial_balance is not None) else 0.0
+        default_actual = float(existing_snap.actual_final_balance) if (existing_snap and existing_snap.actual_final_balance is not None) else 0.0
 
         with col_init:
             init_balance = st.number_input(
                 "1. Saldo Inicial USDT (Apertura):",
-                min_value=0.0,
+                min_value=None,
                 value=default_init,
                 step=10.0,
                 format="%.2f",
@@ -154,7 +276,7 @@ def render_fiscal_reconstruction() -> None:
         with col_actual:
             actual_balance = st.number_input(
                 "6. Saldo Final Real USDT (Snapshot):",
-                min_value=0.0,
+                min_value=None,
                 value=default_actual,
                 step=10.0,
                 format="%.2f",

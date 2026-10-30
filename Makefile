@@ -1,8 +1,9 @@
-.PHONY: help test lint typecheck dev run dashboard clean
+.PHONY: help test lint typecheck dev run dashboard api clean
 
 help:
 	@echo "Comandos disponibles:"
 	@echo "  make run        Iniciar el motor del bot (src/main.py)"
+	@echo "  make api        Iniciar la API REST y WebSockets con FastAPI (puerto 8000)"
 	@echo "  make dashboard  Abrir el dashboard interactivo de Streamlit"
 	@echo "  make test       Ejecutar pruebas automatizadas con pytest"
 	@echo "  make lint       Revisar estilo y código con ruff"
@@ -15,6 +16,9 @@ run:
 
 dashboard:
 	streamlit run src/reporting/dashboard/app.py
+
+api:
+	uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 test:
 	pytest -v tests/

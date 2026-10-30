@@ -112,6 +112,33 @@ def test_rate_alert_service_arbitrage_opportunity():
     assert "ARBITRAJE" in alert
     assert "Banco de Venezuela" in alert
     assert "Bancamiga" in alert
+    assert "++" not in alert
+    assert "+-" not in alert
+
+
+def test_rate_alert_service_ignores_calibrated_and_sandbox_quotes():
+    """Valida que cotizaciones de fallback calibradas NUNCA disparen falsas alertas de arbitraje."""
+    from src.core.spread_monitor import BankRateQuote
+
+    service = RateAlertService(cooldown_seconds=0)
+    calibrated_quotes = [
+        BankRateQuote(bank_name="Bancamiga", buy_rate=1000.80, sell_rate=1016.50, source="calibrated"),
+        BankRateQuote(bank_name="Banco Activo", buy_rate=998.50, sell_rate=1021.00, source="calibrated"),
+    ]
+    assert service.check_spread_opportunities(calibrated_quotes) is None
+
+
+def test_telegram_set_bot_commands_no_duplicate_spread_matriz():
+    """Valida que set_bot_commands registre únicamente '/spread' y no duplique con '/matriz'."""
+    notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
+    with patch.object(notifier._client, "post") as mock_post:
+        mock_post.return_value.status_code = 200
+        ok = notifier.set_bot_commands()
+        assert ok is True
+        payload = mock_post.call_args[1]["json"]
+        registered_cmds = [c["command"] for c in payload["commands"]]
+        assert "spread" in registered_cmds
+        assert "matriz" not in registered_cmds
 
 
 def test_rate_alert_service_deduplication_anti_spam():

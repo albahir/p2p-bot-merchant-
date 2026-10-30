@@ -10,7 +10,6 @@ logger = logging.getLogger("bcv_service")
 
 BCV_OFFICIAL_URL = "https://www.bcv.org.ve"
 BCV_FALLBACK_API = "https://pydolarvenezuela-api.vercel.app/api/v1/dollar?page=bcv"
-DEFAULT_FALLBACK_RATE = 36.50
 
 
 class BCVService:
@@ -23,7 +22,7 @@ class BCVService:
         self._cached_rates_dict: dict[str, Any] = {}
 
     def fetch_current_rate(self) -> float:
-        """Obtiene la tasa oficial actual de USD/VES."""
+        """Obtiene la tasa oficial actual de USD/VES aplicando principio Fail-closed estricto."""
         # 1. Intentar scraping directo del portal oficial del BCV
         rate = self._scrape_bcv_official()
         if rate is not None and rate > 0:
@@ -36,13 +35,14 @@ class BCVService:
             self._cached_rate = rate_fallback
             return rate_fallback
 
-        # 3. Retornar tasa cacheada previa o valor por defecto
-        if self._cached_rate:
+        # 3. Retornar tasa cacheada previa si existe
+        if self._cached_rate and self._cached_rate > 0:
             logger.warning(f"Usando tasa BCV previamente cacheada: {self._cached_rate}")
             return self._cached_rate
 
-        logger.warning(f"No se pudo consultar el BCV, usando valor seguro de referencia: {DEFAULT_FALLBACK_RATE}")
-        return DEFAULT_FALLBACK_RATE
+        # 4. Fail-closed: No fabricar valores arbitrarios ni por defecto
+        logger.error("FAIL-CLOSED: No se pudo obtener la tasa oficial del BCV de ninguna fuente ni de caché.")
+        return 0.0
 
     def get_official_rate(self) -> float:
         """Alias para fetch_current_rate que retorna la tasa oficial vigente."""

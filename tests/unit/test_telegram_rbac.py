@@ -89,27 +89,50 @@ def test_telegram_admin_user_management_commands(db_session):
         bot_token="fake_token",
         default_chat_id="1001",
         allowed_user_ids=[1001],
-        session_factory=lambda: db_session
+        session_factory=lambda: db_session,
     )
 
-    # 1. Admin autoriza a un nuevo usuario como TRADER
-    res_auth = notifier.handle_command(user_id=1001, command="/autorizar 8888 TRADER")
-    assert "autorizado exitosamente" in res_auth or "actualizado" in res_auth
+    with patch.object(notifier, "send_alert", wraps=notifier.send_alert) as mock_send_alert:
+        # 1. Admin autoriza a un nuevo usuario como TRADER
+        res_auth = notifier.handle_command(user_id=1001, command="/autorizar 8888 TRADER")
+        assert "autorizado exitosamente" in res_auth or "actualizado" in res_auth
 
-    user_8888 = repo.get_by_telegram_id("8888")
-    assert user_8888 is not None
-    assert user_8888.role == "TRADER"
+        user_8888 = repo.get_by_telegram_id("8888")
+        assert user_8888 is not None
+        assert user_8888.role == "TRADER"
+        # Debe haberse notificado al usuario 8888
+        assert any(
+            str(call.kwargs.get("chat_id")) == "8888" for call in mock_send_alert.call_args_list
+        )
 
-    # 2. Admin lista usuarios
-    res_list = notifier.handle_command(user_id=1001, command="/usuarios")
-    assert "8888" in res_list
-    assert "TRADER" in res_list
+        # 2. Admin promueve usuario a ADMIN usando alias /promover
+        mock_send_alert.reset_mock()
+        res_promote = notifier.handle_command(user_id=1001, command="/promover 8888 ADMIN")
+        assert "actualizado exitosamente" in res_promote
+        promoted_user = repo.get_by_telegram_id("8888")
+        assert promoted_user is not None
+        assert promoted_user.role == "ADMIN"
+        # Debe notificar al usuario sobre su promoción
+        assert any(
+            str(call.kwargs.get("chat_id")) == "8888" for call in mock_send_alert.call_args_list
+        )
 
-    # 3. Admin revoca usuario
-    res_revoke = notifier.handle_command(user_id=1001, command="/revocar 8888")
-    assert "revocado" in res_revoke or "desactivado" in res_revoke
-    user_revoked = repo.get_by_telegram_id("8888")
-    assert user_revoked.is_active is False
+        # 3. Admin lista usuarios
+        res_list = notifier.handle_command(user_id=1001, command="/usuarios")
+        assert "8888" in res_list
+        assert "ADMIN" in res_list
+
+        # 4. Admin revoca usuario
+        mock_send_alert.reset_mock()
+        res_revoke = notifier.handle_command(user_id=1001, command="/revocar 8888")
+        assert "revocado" in res_revoke or "desactivado" in res_revoke
+        user_revoked = repo.get_by_telegram_id("8888")
+        assert user_revoked is not None
+        assert user_revoked.is_active is False
+        # Debe notificar al usuario revocado
+        assert any(
+            str(call.kwargs.get("chat_id")) == "8888" for call in mock_send_alert.call_args_list
+        )
 
 
 def test_telegram_poller_unauthorized_user_approval_workflow(db_session):
