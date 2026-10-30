@@ -6,49 +6,51 @@ import {
   Zap, 
   Building2, 
   RefreshCw, 
-  ArrowRight,
-  ShieldCheck,
-  CheckCircle2,
-  Sliders,
-  Clock,
-  ArrowUpRight,
-  Radio,
-  Flame,
-  Cpu,
-  ArrowLeftRight,
-  Wallet,
-  Settings,
-  User as UserIcon,
-  Search,
-  Download,
-  AlertCircle,
-  ChevronRight,
-  Calendar,
-  Layers,
-  FileSpreadsheet
+  ArrowRight, 
+  ShieldCheck, 
+  CheckCircle2, 
+  AlertCircle, 
+  ChevronRight, 
+  FileSpreadsheet, 
+  User as UserIcon, 
+  Flame, 
+  ArrowLeftRight, 
+  Wallet, 
+  Settings, 
+  Sun, 
+  Moon, 
+  KeyRound, 
+  X,
+  SlidersHorizontal,
+  ExternalLink
 } from "lucide-react";
 import { 
   getBCVRates, 
   getArbitrageMatrix, 
-  getOrders,
-  getBotStatus,
-  pauseBot,
-  resumeBot,
-  getCurrentUser,
-  getExportOrdersUrl,
+  getOrders, 
+  getBotStatus, 
+  pauseBot, 
+  resumeBot, 
+  getCurrentUser, 
   BCVRates, 
-  ArbitrageMatrix,
-  OrderItem,
-  BotStatus,
-  User
+  ArbitrageMatrix, 
+  OrderItem, 
+  BotStatus, 
+  User 
 } from "@/lib/api";
 import { useWebSocket } from "@/lib/useWebSocket";
+import { useTheme } from "@/lib/theme-context";
 import BinanceSettingsCard from "@/components/binance-settings-card";
 
 export default function CryptoAppDashboard() {
+  const { theme, toggleTheme } = useTheme();
+
   // Pestaña activa para la vista móvil
   const [activeTab, setActiveTab] = useState<"mercado" | "swap" | "ordenes" | "fiscal" | "ajustes" | "perfil">("mercado");
   
+  // Modal de Credenciales Binance
+  const [isBinanceModalOpen, setIsBinanceModalOpen] = useState(false);
+
   // Datos de la API
   const [bcv, setBcv] = useState<BCVRates | null>(null);
   const [matrix, setMatrix] = useState<ArbitrageMatrix | null>(null);
@@ -62,7 +64,6 @@ export default function CryptoAppDashboard() {
   const [timeframe, setTimeframe] = useState<string>("1D");
   const [autoRebalance, setAutoRebalance] = useState<boolean>(true);
   const [autoLiberar, setAutoLiberar] = useState<boolean>(true);
-  const [alertasTelegram, setAlertasTelegram] = useState<boolean>(true);
   const [cargando, setCargando] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [notifMsg, setNotifMsg] = useState<string | null>(null);
@@ -138,87 +139,112 @@ export default function CryptoAppDashboard() {
   const bolivaresSalida = (montoUsdt * tasaVenta).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
-    <div className="w-full max-w-7xl mx-auto min-h-screen bg-[#080d1a] text-slate-100 flex flex-col relative pb-20 lg:pb-8 shadow-2xl rounded-3xl overflow-hidden border border-slate-800/80 font-sans">
+    <div className="w-full max-w-7xl mx-auto min-h-screen bg-[#F8F9FA] dark:bg-[#07090E] text-slate-900 dark:text-slate-100 flex flex-col relative pb-20 lg:pb-8 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 transition-colors duration-150">
       
       {/* ======================================================== */}
       {/* 1. BARRA DE NAVEGACIÓN SUPERIOR (DESKTOP & TELEMETRÍA)    */}
       {/* ======================================================== */}
-      <div className="hidden lg:flex items-center justify-between px-6 py-2.5 bg-[#0a0f1d] border-b border-slate-800 text-xs font-mono">
-        <div className="flex items-center space-x-4">
-          <span className="font-bold text-rose-500 flex items-center space-x-1.5">
-            <Zap className="h-4 w-4 fill-rose-500" />
-            <span>ARBITEX P2P // VENEZUELA</span>
+      <div className="hidden lg:flex items-center justify-between px-6 py-2.5 bg-white dark:bg-[#0D111A] border-b border-slate-200 dark:border-slate-800 text-xs font-mono">
+        <div className="flex items-center space-x-3">
+          <span className="font-bold text-slate-900 dark:text-slate-100 flex items-center space-x-1.5">
+            <span className="h-2 w-2 rounded-full bg-emerald-500" />
+            <span>P2P MERCHANT WORKSTATION</span>
           </span>
-          <span className="text-slate-600">|</span>
-          <span className="text-slate-400">NODO 01: MOTOR P2P</span>
-          <span className="text-slate-600">|</span>
-          <span className="text-emerald-400 flex items-center space-x-1">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>WS: EN VIVO</span>
+          <span className="text-slate-300 dark:text-slate-700">|</span>
+          <span className="text-slate-500 dark:text-slate-400">VES / USDT</span>
+          <span className="text-slate-300 dark:text-slate-700">|</span>
+          <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
+            FAIL-CLOSED ACTIVO
           </span>
         </div>
 
-        {/* Enlaces de Escritorio a todas las Vistas del Proyecto */}
+        {/* Enlaces de Escritorio + Controles de Modo y API */}
         <div className="flex items-center space-x-2">
-          <a href="/" className="px-3 py-1 rounded-full bg-rose-600 text-white font-bold transition-colors">
-            Mercado & Spreads
+          {/* Selector de Modo Blanco Perla / Modo Oscuro */}
+          <button
+            onClick={toggleTheme}
+            className="px-2.5 py-1 rounded-lg text-xs font-medium flex items-center space-x-1.5 border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+            title="Alternar entre Blanco Perla y Negro Azabache"
+          >
+            {theme === "dark" ? (
+              <>
+                <Sun className="h-3.5 w-3.5 text-amber-500" />
+                <span>Blanco Perla</span>
+              </>
+            ) : (
+              <>
+                <Moon className="h-3.5 w-3.5 text-slate-700" />
+                <span>Negro Azabache</span>
+              </>
+            )}
+          </button>
+
+          {/* Botón para Abrir Modal de Credenciales Binance */}
+          <button
+            onClick={() => setIsBinanceModalOpen(true)}
+            className="px-2.5 py-1 rounded-lg text-xs font-medium flex items-center space-x-1.5 border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+          >
+            <KeyRound className="h-3.5 w-3.5 text-slate-500" />
+            <span>Claves Binance</span>
+          </button>
+
+          <span className="text-slate-300 dark:text-slate-700">|</span>
+
+          <a href="/" className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-semibold">
+            Mercado
           </a>
-          <a href="/orders" className="px-3 py-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
-            Libro de Órdenes
+          <a href="/orders" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
+            Órdenes
           </a>
-          <a href="/fiscal" className="px-3 py-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
-            Conciliación Fiscal (SENIAT)
+          <a href="/fiscal" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
+            Fiscal SENIAT
           </a>
           {user?.role === "ADMIN" && (
-            <a href="/admin" className="px-3 py-1 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
-              Usuarios & RBAC
+            <a href="/admin" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
+              Usuarios
             </a>
           )}
-          <a href="/login" className="px-3 py-1 rounded-full text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors">
-            {user ? user.username : "Acceso"}
+          <a href="/login" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors font-medium">
+            {user ? user.username : "Iniciar Sesión"}
           </a>
         </div>
       </div>
 
       {/* ======================================================== */}
-      {/* 2. CABECERA CURVA ESTILO MOCKUP (ROJO CARMESÍ / CORAL) */}
+      {/* 2. CABECERA OPERATIVA (SOBRIA, ELEGANTE, PROFESIONAL)     */}
       {/* ======================================================== */}
-      <header className="bg-gradient-to-br from-red-600 via-rose-600 to-red-700 text-white rounded-b-[2.5rem] pt-6 px-6 pb-7 shadow-xl relative overflow-hidden">
-        {/* Adorno visual sutil */}
-        <div className="absolute -right-8 -top-8 w-48 h-48 bg-white/10 rounded-full blur-2xl pointer-events-none" />
-        <div className="absolute -left-8 -bottom-8 w-48 h-48 bg-black/15 rounded-full blur-xl pointer-events-none" />
-
-        {/* Fila Superior: Perfil + Notificaciones + Control */}
-        <div className="flex items-center justify-between relative z-10">
-          <div className="flex items-center space-x-3">
+      <header className="bg-slate-900 text-white dark:bg-[#0D111A] border-b border-slate-800 pt-5 px-6 pb-6 relative">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center space-x-3.5">
             <div className="relative">
-              <div className="h-12 w-12 rounded-full bg-white/20 border-2 border-white/60 flex items-center justify-center text-white font-bold text-base shadow">
+              <div className="h-11 w-11 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-white font-bold text-sm">
                 {user ? user.username.substring(0, 2).toUpperCase() : "CM"}
               </div>
-              <span className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-2 border-red-600 ${
-                botStatus?.is_paused ? "bg-amber-400" : "bg-emerald-400 animate-pulse"
+              <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-slate-900 ${
+                botStatus?.is_paused ? "bg-amber-500" : "bg-emerald-500"
               }`} />
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <span className="font-bold text-base tracking-wide text-white">
-                  {user ? user.username : "Carlos M."}
+                <span className="font-semibold text-base text-white">
+                  {user ? user.username : "Operador"}
                 </span>
-                <span className="text-[10px] bg-white/20 px-2 py-0.5 rounded-full font-semibold uppercase text-white/95">
+                <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded border border-slate-700 font-mono uppercase text-slate-300">
                   {user?.role || "TRADER"}
                 </span>
               </div>
-              <p className="text-xs text-white/80 font-mono">
-                {botStatus?.is_paused ? "Bot: Pausado (Fail-closed)" : "Motor P2P Binance: Activo"}
+              <p className="text-xs text-slate-400 font-mono mt-0.5">
+                {botStatus?.is_paused ? "Motor: Pausado (Fail-Closed Activo)" : "Motor P2P Binance: En Línea"}
               </p>
             </div>
           </div>
 
+          {/* Acciones Rápidas del Operador */}
           <div className="flex items-center space-x-2">
             <button
               onClick={cargarDatos}
               title="Refrescar cotizaciones"
-              className="p-2.5 rounded-full bg-white/15 hover:bg-white/25 text-white transition-all backdrop-blur-sm"
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors"
             >
               <RefreshCw className={`h-4 w-4 ${cargando ? "animate-spin" : ""}`} />
             </button>
@@ -227,86 +253,89 @@ export default function CryptoAppDashboard() {
               <button
                 onClick={alternarPausaBot}
                 title={botStatus?.is_paused ? "Reanudar motor" : "Parada de emergencia"}
-                className={`px-3 py-2 rounded-full text-xs font-bold transition-all flex items-center space-x-1.5 shadow ${
+                className={`px-3 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center space-x-1.5 ${
                   botStatus?.is_paused 
-                    ? "bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold" 
-                    : "bg-black/30 hover:bg-black/40 text-white"
+                    ? "bg-emerald-600 hover:bg-emerald-500 text-white font-bold" 
+                    : "bg-rose-700 hover:bg-rose-600 text-white font-bold"
                 }`}
               >
-                <Zap className="h-4 w-4" />
-                <span className="hidden sm:inline">{botStatus?.is_paused ? "REANUDAR" : "PARADA"}</span>
+                <Zap className="h-3.5 w-3.5" />
+                <span>{botStatus?.is_paused ? "REANUDAR MOTOR" : "PARADA DE EMERGENCIA"}</span>
               </button>
             )}
           </div>
         </div>
 
-        {/* Balance Principal (Como se ve en el mockup: $267,345) */}
-        <div className="mt-5 text-center relative z-10">
-          <p className="text-xs uppercase tracking-wider text-white/80 font-semibold">
-            Saldo de Operaciones & Tesorería Arbitraje
-          </p>
-          <div className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white my-1">
-            ${ (montoUsdt * 1.5).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }
-            <span className="text-sm font-medium text-white/80 ml-2 font-mono">USDT</span>
+        {/* Barra de Saldo y Tasas Oficiales (Soberbio, sin brillos neon) */}
+        <div className="mt-5 pt-4 border-t border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+          <div>
+            <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block">
+              Capital Activo para Despliegue de Arbitraje
+            </span>
+            <div className="text-2xl font-bold font-mono tracking-tight text-white mt-0.5">
+              ${ montoUsdt.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }
+              <span className="text-xs font-normal text-slate-400 ml-1.5">USDT</span>
+            </div>
           </div>
-          <div className="inline-flex flex-wrap items-center justify-center gap-2 bg-black/25 backdrop-blur-md px-4 py-1.5 rounded-full text-xs font-mono text-white/95 mt-1 border border-white/10">
-            <span>Tasa BCV: <strong>{bcv?.usd ? bcv.usd.toFixed(2) : "881.07"} VES</strong></span>
-            <span>•</span>
-            <span>Mediana P2P: <strong>{bcv?.p2p_usdt_ref ? bcv.p2p_usdt_ref.toFixed(2) : "948.80"} VES</strong></span>
-            <span>•</span>
-            <span className="text-emerald-300 font-bold">Brecha: +{bcv?.brecha_pct ? bcv.brecha_pct.toFixed(2) : "7.68"}%</span>
+
+          <div className="inline-flex flex-wrap items-center gap-3 bg-slate-800/80 px-4 py-2 rounded-lg border border-slate-700 font-mono text-xs">
+            <span>Tasa BCV: <strong className="text-white">{bcv?.usd ? bcv.usd.toFixed(2) : "881.07"} VES</strong></span>
+            <span className="text-slate-600">|</span>
+            <span>Mediana P2P: <strong className="text-white">{bcv?.p2p_usdt_ref ? bcv.p2p_usdt_ref.toFixed(2) : "948.80"} VES</strong></span>
+            <span className="text-slate-600">|</span>
+            <span className="text-emerald-400 font-semibold">Brecha Oficial: +{bcv?.brecha_pct ? bcv.brecha_pct.toFixed(2) : "7.68"}%</span>
           </div>
         </div>
       </header>
 
       {/* ======================================================== */}
-      {/* 3. ALERTAS Y NOTIFICACIONES FLOTANTES                    */}
+      {/* 3. ALERTAS DE NOTIFICACIÓN                               */}
       {/* ======================================================== */}
       <div className="px-5 pt-3">
         {notifMsg && (
-          <div className="p-3 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs flex items-center space-x-2 shadow">
-            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs flex items-center space-x-2">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{notifMsg}</span>
           </div>
         )}
         {errorMsg && (
-          <div className="p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center space-x-2 shadow">
-            <AlertCircle className="h-4 w-4 shrink-0" />
+          <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-300 text-xs flex items-center space-x-2">
+            <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
             <span>{errorMsg}</span>
           </div>
         )}
       </div>
 
       {/* ======================================================== */}
-      {/* 4. CONTENIDO PRINCIPAL: RESPONSIVO DUAL (PC & MÓVIL)     */}
+      {/* 4. CONTENIDO PRINCIPAL: RESPONSIVO DUAL                  */}
       {/* ======================================================== */}
-      <main className="flex-1 px-4 sm:px-6 pt-2 pb-6 space-y-5 overflow-y-auto">
+      <main className="flex-1 px-4 sm:px-6 pt-3 pb-6 space-y-5 overflow-y-auto">
 
         {/* ==================================================== */}
-        {/* BANNER DE OPORTUNIDAD EN CALIENTE (AMBAS VISTAS)      */}
+        {/* BANNER DE MEJOR RUTA EN CALIENTE                     */}
         {/* ==================================================== */}
-        <div className="bg-[#111927] p-4 rounded-3xl border border-rose-500/30 shadow-md">
+        <div className="bg-white dark:bg-[#0E121A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-1">
-              <span className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">
-                <Flame className="h-3.5 w-3.5" />
-                <span>OPORTUNIDAD DE ARBITRAJE EN CALIENTE</span>
+              <span className="inline-flex items-center space-x-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700">
+                <Flame className="h-3 w-3 text-red-600" />
+                <span>MEJOR RUTA DE ARBITRAJE DETECTADA</span>
               </span>
-              <p className="text-sm font-semibold text-slate-100 flex items-center space-x-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center space-x-2">
                 <span>Comprar en <strong>{bestArbitrage?.buy_bank || "Banco de Venezuela"}</strong> ({tasaCompra.toFixed(2)} VES)</span>
-                <ArrowRight className="h-4 w-4 text-rose-500" />
+                <ArrowRight className="h-4 w-4 text-slate-400" />
                 <span>Vender en <strong>{bestArbitrage?.sell_bank || "Pago Móvil / Banesco"}</strong> ({tasaVenta.toFixed(2)} VES)</span>
               </p>
-              <p className="text-xs text-slate-400 font-mono">
-                Spread Bruto: <strong className="text-emerald-400">+{spreadPct.toFixed(2)}%</strong> | Ganancia Neta Est: <strong className="text-emerald-400">+{gananciaNetaUsdt} USDT</strong> / {montoUsdt}u
+              <p className="text-xs text-slate-600 dark:text-slate-400 font-mono">
+                Spread Bruto: <strong className="text-emerald-700 dark:text-emerald-400">+{spreadPct.toFixed(2)}%</strong> | Ganancia Neta Est: <strong className="text-emerald-700 dark:text-emerald-400">+{gananciaNetaUsdt} USDT</strong> / {montoUsdt}u
               </p>
             </div>
 
             <button
-              onClick={() => alert(`Ruta de arbitraje armada por ${montoUsdt} USDT. Verificación Fail-Closed de libro activa.`)}
-              className="px-5 py-3 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow-lg shadow-rose-600/30 transition-all shrink-0"
+              onClick={() => alert(`Ruta de arbitraje verificada para ${montoUsdt} USDT. Control Fail-Closed de libro activo.`)}
+              className="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-700 active:scale-[0.99] text-white font-semibold text-xs flex items-center justify-center space-x-1.5 transition-colors shrink-0 shadow-xs"
             >
-              <Zap className="h-4 w-4 fill-white" />
+              <Zap className="h-3.5 w-3.5 fill-white" />
               <span>EJECUTAR RUTA EN 1 CLIC</span>
             </button>
           </div>
@@ -315,28 +344,29 @@ export default function CryptoAppDashboard() {
         {/* ==================================================== */}
         {/* VISTA DESKTOP (PANTALLAS GRANDES >= lg: 1024px)      */}
         {/* ==================================================== */}
-        <div className="hidden lg:grid lg:grid-cols-12 lg:gap-6">
+        <div className="hidden lg:grid lg:grid-cols-12 lg:gap-5">
           {/* Columna Izquierda: Matriz de Cotizaciones & Gráfica (8 Cols) */}
           <div className="lg:col-span-8 space-y-4">
-            {/* Gráfica y Filtros */}
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 shadow-sm space-y-4">
+            <div className="bg-white dark:bg-[#0E121A] p-5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider flex items-center space-x-2">
-                    <TrendingUp className="h-4 w-4 text-rose-500" />
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 uppercase tracking-wide flex items-center space-x-2">
+                    <TrendingUp className="h-4 w-4 text-slate-700 dark:text-slate-300" />
                     <span>Matriz de Profundidad Interbancaria (VES / USDT)</span>
                   </h3>
-                  <p className="text-xs text-slate-400">Escáner en tiempo real a través de los canales de compensación en Venezuela</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Escáner de libros Binance P2P a través de los canales de compensación en Venezuela
+                  </p>
                 </div>
 
                 {/* Filtros de Intervalo */}
-                <div className="flex items-center space-x-1 bg-[#162032] p-1 rounded-2xl border border-slate-700 text-xs font-semibold text-slate-400">
+                <div className="flex items-center space-x-1 bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-400">
                   {["1D", "1S", "1M", "6M", "1A"].map((tf) => (
                     <button
                       key={tf}
                       onClick={() => setTimeframe(tf)}
-                      className={`px-2.5 py-1 rounded-xl transition-all ${
-                        timeframe === tf ? "bg-rose-600 text-white font-bold" : "hover:text-white"
+                      className={`px-2 py-0.5 rounded transition-colors ${
+                        timeframe === tf ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs font-semibold" : "hover:text-slate-900 dark:hover:text-slate-200"
                       }`}
                     >
                       {tf}
@@ -345,28 +375,44 @@ export default function CryptoAppDashboard() {
                 </div>
               </div>
 
-              {/* Curva de Brecha en Escritorio */}
-              <div className="h-28 w-full bg-[#0d1424] rounded-2xl p-3 border border-slate-800/80">
-                <svg viewBox="0 0 500 80" className="w-full h-full stroke-rose-500 fill-none" preserveAspectRatio="none">
+              {/* Gráfica Financiera Limpia (Gridlines y Ticks de Precio Sobrios) */}
+              <div className="h-28 w-full bg-slate-50 dark:bg-[#0A0D14] rounded-lg p-2.5 border border-slate-200 dark:border-slate-800 relative">
+                <svg viewBox="0 0 500 70" className="w-full h-full" preserveAspectRatio="none">
+                  {/* Líneas de cuadrícula sutiles */}
+                  <line x1="0" y1="18" x2="500" y2="18" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" strokeDasharray="3 3" />
+                  <line x1="0" y1="36" x2="500" y2="36" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" strokeDasharray="3 3" />
+                  <line x1="0" y1="54" x2="500" y2="54" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" strokeDasharray="3 3" />
+
+                  {/* Curva de cotización paralela P2P */}
                   <path
-                    d="M 0,60 Q 50,25 100,50 T 200,35 T 300,65 T 400,30 T 500,20"
-                    strokeWidth="2.5"
+                    d="M 0,45 L 60,38 L 120,42 L 180,30 L 240,32 L 300,24 L 360,28 L 420,20 L 500,16"
+                    className="stroke-red-600 fill-none"
+                    strokeWidth="2"
+                    strokeLinejoin="round"
                     strokeLinecap="round"
                   />
+                  {/* Curva de referencia oficial BCV */}
                   <path
-                    d="M 0,70 Q 50,45 100,60 T 200,55 T 300,75 T 400,50 T 500,40"
+                    d="M 0,54 L 500,54"
+                    className="stroke-slate-400 dark:stroke-slate-600 fill-none"
                     strokeWidth="1.5"
                     strokeDasharray="4 4"
-                    className="stroke-slate-600"
                   />
                 </svg>
+                {/* Ticks laterales */}
+                <div className="absolute right-3 top-2 text-[9px] font-mono text-slate-400">
+                  Venta P2P: 948.80
+                </div>
+                <div className="absolute right-3 bottom-2 text-[9px] font-mono text-slate-500">
+                  BCV: 881.07
+                </div>
               </div>
 
-              {/* Píldoras de Filtro de Bancos */}
-              <div className="flex items-center space-x-2 overflow-x-auto text-xs">
+              {/* Filtro de Canales Bancarios */}
+              <div className="flex items-center space-x-1.5 overflow-x-auto text-xs">
                 {[
-                  { id: "TODOS", label: "Todos los Bancos (6)" },
-                  { id: "PAGO_MOVIL", label: "Pago Móvil Inmediato" },
+                  { id: "TODOS", label: "Todos los Canales" },
+                  { id: "PAGO_MOVIL", label: "Pago Móvil" },
                   { id: "BANESCO", label: "Banesco" },
                   { id: "MERCANTIL", label: "Mercantil" },
                   { id: "BDV", label: "Banco de Venezuela" }
@@ -374,10 +420,10 @@ export default function CryptoAppDashboard() {
                   <button
                     key={f.id}
                     onClick={() => setFiltroBanco(f.id)}
-                    className={`px-3 py-1.5 rounded-full whitespace-nowrap transition-all font-medium ${
+                    className={`px-2.5 py-1 rounded-lg whitespace-nowrap transition-colors font-medium ${
                       filtroBanco === f.id
-                        ? "bg-rose-600 text-white shadow-md font-bold"
-                        : "bg-[#162032] text-slate-300 hover:bg-slate-700"
+                        ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 font-semibold"
+                        : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
                     }`}
                   >
                     {f.label}
@@ -385,46 +431,46 @@ export default function CryptoAppDashboard() {
                 ))}
               </div>
 
-              {/* Tabla de Cotizaciones en Escritorio */}
+              {/* Tabla de Cotizaciones */}
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse text-xs font-mono">
                   <thead>
-                    <tr className="border-b border-slate-800 text-slate-400 text-[11px]">
-                      <th className="py-2.5 px-3">Banco / Canal</th>
-                      <th className="py-2.5 px-3 text-right">Compra (VES)</th>
-                      <th className="py-2.5 px-3 text-right">Venta (VES)</th>
-                      <th className="py-2.5 px-3 text-right">Spread Bruto</th>
-                      <th className="py-2.5 px-3 text-right">Retorno / 100u</th>
-                      <th className="py-2.5 px-3 text-right">Acción</th>
+                    <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 text-[11px]">
+                      <th className="py-2 px-3">Banco / Canal</th>
+                      <th className="py-2 px-3 text-right">Compra (VES)</th>
+                      <th className="py-2 px-3 text-right">Venta (VES)</th>
+                      <th className="py-2 px-3 text-right">Spread Bruto</th>
+                      <th className="py-2 px-3 text-right">Retorno / 100u</th>
+                      <th className="py-2 px-3 text-right">Estado</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800/60">
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
                     {cotizacionesFiltradas.length > 0 ? (
                       cotizacionesFiltradas.map((q, idx) => (
-                        <tr key={idx} className="hover:bg-[#162032] transition-colors">
-                          <td className="py-3 px-3 font-medium text-slate-200 flex items-center space-x-2">
-                            <span className="h-2.5 w-2.5 rounded-full bg-rose-500" />
+                        <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-[#121622] transition-colors">
+                          <td className="py-2.5 px-3 font-medium text-slate-900 dark:text-slate-200 flex items-center space-x-2">
+                            <span className="h-1.5 w-1.5 rounded-full bg-red-600" />
                             <span>{q.bank_name}</span>
                           </td>
-                          <td className="py-3 px-3 text-right text-slate-300">{q.buy_rate.toFixed(2)}</td>
-                          <td className="py-3 px-3 text-right text-slate-300">{q.sell_rate.toFixed(2)}</td>
-                          <td className="py-3 px-3 text-right">
-                            <span className="text-emerald-400 font-bold">+{q.spread_pct.toFixed(2)}%</span>
+                          <td className="py-2.5 px-3 text-right text-slate-600 dark:text-slate-400">{q.buy_rate.toFixed(2)}</td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 dark:text-slate-400">{q.sell_rate.toFixed(2)}</td>
+                          <td className="py-2.5 px-3 text-right">
+                            <span className="text-emerald-700 dark:text-emerald-400 font-semibold">+{q.spread_pct.toFixed(2)}%</span>
                           </td>
-                          <td className="py-3 px-3 text-right text-emerald-400 font-bold">
+                          <td className="py-2.5 px-3 text-right text-emerald-700 dark:text-emerald-400 font-semibold">
                             +${((q.spread_ves || 12) * 0.1).toFixed(2)}
                           </td>
-                          <td className="py-3 px-3 text-right">
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30">
-                              ARMADO
+                          <td className="py-2.5 px-3 text-right">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                              LÍQUIDO
                             </span>
                           </td>
                         </tr>
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={6} className="py-6 text-center text-slate-500">
-                          {cargando ? "Sincronizando libros Binance P2P..." : "Sin cotizaciones en este canal."}
+                        <td colSpan={6} className="py-6 text-center text-slate-400">
+                          {cargando ? "Sincronizando libros Binance P2P..." : "Sin cotizaciones activas en este canal."}
                         </td>
                       </tr>
                     )}
@@ -434,20 +480,19 @@ export default function CryptoAppDashboard() {
             </div>
           </div>
 
-          {/* Columna Derecha: Panel de Ejecución Swap & Historial (4 Cols) */}
+          {/* Columna Derecha: Panel de Ejecución de Capital (4 Cols) */}
           <div className="lg:col-span-4 space-y-4">
-            {/* Tarjeta de Conversión / Swap */}
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 shadow-md space-y-4">
-              <span className="font-bold text-sm text-slate-100 flex items-center space-x-2">
-                <ArrowLeftRight className="h-4 w-4 text-rose-500" />
-                <span>Panel de Ejecución de Arbitraje</span>
+            <div className="bg-white dark:bg-[#0E121A] p-5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+              <span className="font-semibold text-sm text-slate-900 dark:text-slate-100 flex items-center space-x-2">
+                <ArrowLeftRight className="h-4 w-4 text-red-600" />
+                <span>Ejecutor de Arbitraje</span>
               </span>
 
-              {/* Presets de Capital */}
+              {/* Slider de Capital */}
               <div>
-                <div className="flex justify-between text-xs text-slate-300 mb-1">
+                <div className="flex justify-between text-xs text-slate-600 dark:text-slate-400 mb-1">
                   <span>Despliegue de Capital:</span>
-                  <span className="font-bold text-rose-400 font-mono text-sm">{montoUsdt} USDT</span>
+                  <span className="font-bold text-slate-900 dark:text-slate-100 font-mono">{montoUsdt} USDT</span>
                 </div>
                 <input
                   type="range"
@@ -456,15 +501,17 @@ export default function CryptoAppDashboard() {
                   step="50"
                   value={montoUsdt}
                   onChange={(e) => setMontoUsdt(Number(e.target.value))}
-                  className="w-full accent-rose-600 cursor-pointer"
+                  className="w-full accent-red-600 cursor-pointer"
                 />
-                <div className="grid grid-cols-4 gap-1.5 text-xs font-mono font-bold mt-2">
+                <div className="grid grid-cols-4 gap-1 text-xs font-mono mt-2">
                   {[100, 250, 500, 1000].map((val) => (
                     <button
                       key={val}
                       onClick={() => setMontoUsdt(val)}
-                      className={`py-1 rounded-xl transition-all ${
-                        montoUsdt === val ? "bg-rose-600 text-white font-bold" : "bg-[#162032] text-slate-300"
+                      className={`py-1 rounded text-center transition-colors ${
+                        montoUsdt === val 
+                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 font-bold" 
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900"
                       }`}
                     >
                       ${val}
@@ -473,71 +520,70 @@ export default function CryptoAppDashboard() {
                 </div>
               </div>
 
-              {/* Resumen */}
-              <div className="p-3.5 rounded-2xl bg-[#162032] border border-slate-700 space-y-2 text-xs">
-                <div className="flex justify-between text-slate-300">
-                  <span>Bolívares de Retorno:</span>
-                  <strong className="font-mono text-white">{bolivaresSalida} VES</strong>
+              {/* Retorno Estimado */}
+              <div className="p-3 rounded-lg bg-slate-50 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 space-y-1.5 text-xs font-mono">
+                <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                  <span>Retorno en VES:</span>
+                  <strong className="text-slate-900 dark:text-slate-100">{bolivaresSalida}</strong>
                 </div>
-                <div className="flex justify-between text-emerald-400 font-bold border-t border-slate-700/60 pt-2">
+                <div className="flex justify-between text-emerald-700 dark:text-emerald-400 font-semibold border-t border-slate-200 dark:border-slate-700/80 pt-1.5">
                   <span>Ganancia Neta Estimada:</span>
-                  <span className="font-mono">+{gananciaNetaUsdt} USDT</span>
+                  <span>+{gananciaNetaUsdt} USDT</span>
                 </div>
               </div>
 
               <button
                 onClick={() => alert(`Ruta de arbitraje armada por ${montoUsdt} USDT.`)}
-                className="w-full py-3.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center space-x-2 transition-all shadow-lg shadow-rose-600/30 uppercase"
+                className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-700 active:scale-[0.99] text-white font-semibold text-xs flex items-center justify-center space-x-1.5 transition-colors shadow-xs"
               >
-                <Zap className="h-4 w-4 fill-white" />
-                <span>Ejecutar Arbitraje en 1 Clic</span>
+                <Zap className="h-3.5 w-3.5 fill-white" />
+                <span>Ejecutar Arbitraje</span>
               </button>
             </div>
 
             {/* Accesos Rápidos a Módulos del Sistema */}
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 shadow-md space-y-2.5 text-xs">
-              <span className="font-bold text-xs uppercase tracking-wider text-slate-400 block mb-1">
-                Vistas Especializadas del Sistema
+            <div className="bg-white dark:bg-[#0E121A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-2 text-xs">
+              <span className="font-semibold text-xs text-slate-500 uppercase tracking-wide block mb-1">
+                Módulos del Sistema
               </span>
 
               <a
                 href="/fiscal"
-                className="flex items-center justify-between p-3 rounded-2xl bg-[#162032] hover:bg-slate-700 transition-all text-slate-200 group"
+                className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-[#121622] hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-800 dark:text-slate-200 group border border-slate-200 dark:border-slate-800"
               >
-                <div className="flex items-center space-x-2.5">
-                  <Building2 className="h-4 w-4 text-rose-500" />
-                  <span>Reconstrucción Fiscal de 6 Piezas</span>
+                <div className="flex items-center space-x-2">
+                  <Building2 className="h-4 w-4 text-slate-500" />
+                  <span>Reconciliación Fiscal SENIAT</span>
                 </div>
-                <ChevronRight className="h-4 w-4 text-slate-400 group-hover:translate-x-1 transition-transform" />
+                <ChevronRight className="h-3.5 w-3.5 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
               </a>
 
               <a
                 href="/orders"
-                className="flex items-center justify-between p-3 rounded-2xl bg-[#162032] hover:bg-slate-700 transition-all text-slate-200 group"
+                className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-[#121622] hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-800 dark:text-slate-200 group border border-slate-200 dark:border-slate-800"
               >
-                <div className="flex items-center space-x-2.5">
-                  <FileSpreadsheet className="h-4 w-4 text-rose-500" />
-                  <span>Libro de Órdenes & Ingesta P2P</span>
+                <div className="flex items-center space-x-2">
+                  <FileSpreadsheet className="h-4 w-4 text-slate-500" />
+                  <span>Libro de Órdenes & Exportación</span>
                 </div>
-                <ChevronRight className="h-4 w-4 text-slate-400 group-hover:translate-x-1 transition-transform" />
+                <ChevronRight className="h-3.5 w-3.5 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
               </a>
 
-              {user?.role === "ADMIN" && (
-                <a
-                  href="/admin"
-                  className="flex items-center justify-between p-3 rounded-2xl bg-[#162032] hover:bg-slate-700 transition-all text-slate-200 group"
-                >
-                  <div className="flex items-center space-x-2.5">
-                    <UserIcon className="h-4 w-4 text-rose-500" />
-                    <span>Control de Acceso y Roles RBAC</span>
-                  </div>
-                  <ChevronRight className="h-4 w-4 text-slate-400 group-hover:translate-x-1 transition-transform" />
-                </a>
-              )}
+              {/* Botón directo a Configuración de API Keys Binance */}
+              <button
+                type="button"
+                onClick={() => setIsBinanceModalOpen(true)}
+                className="w-full flex items-center justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-[#121622] hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-800 dark:text-slate-200 group border border-slate-200 dark:border-slate-800 text-left"
+              >
+                <div className="flex items-center space-x-2">
+                  <KeyRound className="h-4 w-4 text-slate-500" />
+                  <span>Configuración API Binance & Test</span>
+                </div>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-400 font-mono font-medium">
+                  Cifrado
+                </span>
+              </button>
             </div>
-
-            {/* Módulo de Configuración de Claves Binance y Diagnóstico en Vivo */}
-            <BinanceSettingsCard />
           </div>
         </div>
 
@@ -547,59 +593,28 @@ export default function CryptoAppDashboard() {
         <div className="lg:hidden space-y-4">
           {/* PESTAÑA MÓVIL: MERCADO */}
           {activeTab === "mercado" && (
-            <div className="space-y-4">
-              {/* Intervalos */}
-              <div className="flex items-center justify-between bg-[#111927] p-1 rounded-2xl border border-slate-800 text-xs font-semibold text-slate-400">
-                {["1D", "1S", "1M", "6M", "1A"].map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setTimeframe(tf)}
-                    className={`flex-1 py-1.5 rounded-xl transition-all ${
-                      timeframe === tf ? "bg-rose-600 text-white font-bold" : "hover:text-slate-200"
-                    }`}
-                  >
-                    {tf}
-                  </button>
-                ))}
-              </div>
-
-              {/* Gráfica Móvil */}
-              <div className="bg-[#111927] p-4 rounded-3xl border border-slate-800 shadow-md">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-[11px] text-slate-400 uppercase font-bold">Brecha Paralelo vs BCV</span>
-                  <span className="text-xs text-emerald-400 font-bold">+{bcv?.brecha_pct ? bcv.brecha_pct.toFixed(2) : "7.68"}%</span>
-                </div>
-                <div className="h-20 w-full">
-                  <svg viewBox="0 0 300 70" className="w-full h-full stroke-rose-500 fill-none" preserveAspectRatio="none">
-                    <path d="M 0,50 Q 30,20 60,45 T 120,30 T 180,60 T 240,25 T 300,15" strokeWidth="2.5" strokeLinecap="round" />
-                  </svg>
-                </div>
-              </div>
-
-              {/* Filtros Móvil */}
-              <div className="flex items-center space-x-1.5 overflow-x-auto pb-1 text-xs">
-                {["TODOS", "PAGO_MOVIL", "BANESCO", "MERCANTIL", "BDV"].map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setFiltroBanco(f)}
-                    className={`px-3 py-1.5 rounded-full whitespace-nowrap transition-all font-medium ${
-                      filtroBanco === f ? "bg-rose-600 text-white font-bold" : "bg-[#111927] text-slate-300 border border-slate-800"
-                    }`}
-                  >
-                    {f}
-                  </button>
-                ))}
+            <div className="space-y-3">
+              {/* Selector de Modo en Móvil */}
+              <div className="flex items-center justify-between p-2 bg-white dark:bg-[#0E121A] rounded-xl border border-slate-200 dark:border-slate-800 text-xs">
+                <span className="text-slate-600 dark:text-slate-400">Tema Visual:</span>
+                <button
+                  onClick={toggleTheme}
+                  className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 font-medium flex items-center space-x-1.5"
+                >
+                  {theme === "dark" ? <Sun className="h-3.5 w-3.5 text-amber-500" /> : <Moon className="h-3.5 w-3.5 text-slate-700" />}
+                  <span>{theme === "dark" ? "Blanco Perla" : "Negro Azabache"}</span>
+                </button>
               </div>
 
               {/* Cotizaciones Móvil */}
               <div className="space-y-2">
                 {cotizacionesFiltradas.map((q, idx) => (
-                  <div key={idx} className="bg-[#111927] p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
+                  <div key={idx} className="bg-white dark:bg-[#0E121A] p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between">
                     <div>
-                      <h4 className="font-bold text-xs text-slate-200">{q.bank_name}</h4>
-                      <p className="text-[10px] text-slate-400 font-mono">C: {q.buy_rate.toFixed(2)} | V: {q.sell_rate.toFixed(2)}</p>
+                      <h4 className="font-semibold text-xs text-slate-900 dark:text-slate-100">{q.bank_name}</h4>
+                      <p className="text-[11px] text-slate-500 font-mono">C: {q.buy_rate.toFixed(2)} | V: {q.sell_rate.toFixed(2)}</p>
                     </div>
-                    <span className="text-xs font-bold text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                    <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800 font-mono">
                       +{q.spread_pct.toFixed(2)}%
                     </span>
                   </div>
@@ -610,56 +625,55 @@ export default function CryptoAppDashboard() {
 
           {/* PESTAÑA MÓVIL: SWAP / ARBITRAJE */}
           {activeTab === "swap" && (
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 shadow-md space-y-4">
-              <span className="font-bold text-sm text-slate-100 flex items-center space-x-2">
-                <ArrowLeftRight className="h-4 w-4 text-rose-500" />
-                <span>Conversor Rápido de Arbitraje</span>
+            <div className="bg-white dark:bg-[#0E121A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+              <span className="font-semibold text-xs text-slate-900 dark:text-slate-100">
+                Calculadora Rápida de Despliegue
               </span>
 
-              <div className="bg-[#162032] p-3 rounded-2xl border border-slate-700">
-                <span className="text-xs text-slate-400 block mb-1">Monto de Operación (USDT)</span>
+              <div className="bg-slate-50 dark:bg-[#121622] p-3 rounded-lg border border-slate-200 dark:border-slate-800">
+                <span className="text-[11px] text-slate-500 block mb-1">Monto en USDT</span>
                 <input
                   type="number"
                   value={montoUsdt}
                   onChange={(e) => setMontoUsdt(Math.max(10, Number(e.target.value)))}
-                  className="bg-transparent text-xl font-bold text-white focus:outline-none w-full font-mono"
+                  className="bg-transparent text-lg font-bold text-slate-900 dark:text-white focus:outline-none w-full font-mono"
                 />
               </div>
 
-              <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-xs">
-                <div className="flex justify-between text-emerald-400 font-bold">
-                  <span>Ganancia Neta Est:</span>
+              <div className="p-3 rounded-lg bg-slate-50 dark:bg-[#121622] border border-slate-200 dark:border-slate-800 text-xs font-mono space-y-1">
+                <div className="flex justify-between text-emerald-700 dark:text-emerald-400 font-semibold">
+                  <span>Ganancia Estimada:</span>
                   <span>+{gananciaNetaUsdt} USDT (+{spreadPct.toFixed(2)}%)</span>
                 </div>
-                <div className="flex justify-between text-slate-400 text-[10px] mt-1">
-                  <span>Retorno en Bs:</span>
+                <div className="flex justify-between text-slate-500 text-[11px]">
+                  <span>Bolívares de Salida:</span>
                   <span>{bolivaresSalida} VES</span>
                 </div>
               </div>
 
               <button
                 onClick={() => alert(`Ruta de ${montoUsdt} USDT armada.`)}
-                className="w-full py-3.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs uppercase"
+                className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold text-xs"
               >
-                Ejecutar Arbitraje en 1 Clic
+                Ejecutar Arbitraje
               </button>
             </div>
           )}
 
           {/* PESTAÑA MÓVIL: ÓRDENES */}
           {activeTab === "ordenes" && (
-            <div className="space-y-3">
+            <div className="space-y-2">
               <div className="flex justify-between items-center px-1">
-                <h4 className="text-xs font-bold text-slate-300">Órdenes Recientes</h4>
-                <a href="/orders" className="text-xs text-rose-400">Ver todas</a>
+                <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300">Órdenes Recientes</h4>
+                <a href="/orders" className="text-xs text-red-600 hover:underline">Ver todas</a>
               </div>
               {orders.slice(0, 5).map((ord) => (
-                <div key={ord.id} className="bg-[#111927] p-3 rounded-2xl border border-slate-800 flex justify-between items-center text-xs">
+                <div key={ord.id} className="bg-white dark:bg-[#0E121A] p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex justify-between items-center text-xs">
                   <div>
-                    <span className="font-bold text-slate-200">{ord.trade_type === "BUY" ? "Compra" : "Venta"} USDT</span>
-                    <span className="block text-[10px] text-slate-400">{ord.counterparty_name || "Comerciante"}</span>
+                    <span className="font-semibold text-slate-900 dark:text-slate-100">{ord.trade_type === "BUY" ? "Compra" : "Venta"} USDT</span>
+                    <span className="block text-[10px] text-slate-500">{ord.counterparty_name || "Comerciante"}</span>
                   </div>
-                  <span className={`font-mono font-bold ${ord.trade_type === "BUY" ? "text-emerald-400" : "text-rose-400"}`}>
+                  <span className={`font-mono font-semibold ${ord.trade_type === "BUY" ? "text-emerald-700 dark:text-emerald-400" : "text-red-600"}`}>
                     {ord.trade_type === "BUY" ? `+${ord.crypto_amount}` : `-${ord.crypto_amount}`} u
                   </span>
                 </div>
@@ -669,15 +683,15 @@ export default function CryptoAppDashboard() {
 
           {/* PESTAÑA MÓVIL: FISCAL */}
           {activeTab === "fiscal" && (
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 space-y-3 text-center">
-              <Building2 className="h-8 w-8 text-rose-500 mx-auto" />
-              <h3 className="font-bold text-sm text-slate-100">Reconciliación Fiscal SENIAT</h3>
-              <p className="text-xs text-slate-400">
+            <div className="bg-white dark:bg-[#0E121A] p-5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3 text-center">
+              <Building2 className="h-7 w-7 text-red-600 mx-auto" />
+              <h3 className="font-semibold text-sm text-slate-900 dark:text-slate-100">Reconciliación Fiscal SENIAT</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 Audita la ecuación de 6 piezas patrimoniales y genera tu declaración contable en Excel.
               </p>
               <a
                 href="/fiscal"
-                className="inline-block px-5 py-2.5 rounded-full bg-rose-600 text-white text-xs font-bold shadow"
+                className="inline-block px-4 py-2 rounded-lg bg-red-600 text-white text-xs font-semibold"
               >
                 Abrir Módulo Fiscal Completo
               </a>
@@ -689,19 +703,19 @@ export default function CryptoAppDashboard() {
             <div className="space-y-4">
               <BinanceSettingsCard />
 
-              <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 space-y-3">
-                <h3 className="font-bold text-xs text-slate-300 uppercase">Ajustes del Sistema</h3>
-                <div className="flex justify-between items-center p-3 rounded-2xl bg-[#162032] text-xs">
-                  <span>Auto-Rebalanceo</span>
-                  <input type="checkbox" checked={autoRebalance} onChange={(e) => setAutoRebalance(e.target.checked)} className="accent-rose-600" />
+              <div className="bg-white dark:bg-[#0E121A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+                <h3 className="font-semibold text-xs text-slate-500 uppercase tracking-wide">Ajustes del Sistema</h3>
+                <div className="flex justify-between items-center p-2.5 rounded-lg bg-slate-50 dark:bg-[#121622] text-xs">
+                  <span className="text-slate-700 dark:text-slate-300">Auto-Rebalanceo</span>
+                  <input type="checkbox" checked={autoRebalance} onChange={(e) => setAutoRebalance(e.target.checked)} className="accent-red-600" />
                 </div>
-                <div className="flex justify-between items-center p-3 rounded-2xl bg-[#162032] text-xs">
-                  <span>Auto-Liberación Binance</span>
-                  <input type="checkbox" checked={autoLiberar} onChange={(e) => setAutoLiberar(e.target.checked)} className="accent-rose-600" />
+                <div className="flex justify-between items-center p-2.5 rounded-lg bg-slate-50 dark:bg-[#121622] text-xs">
+                  <span className="text-slate-700 dark:text-slate-300">Auto-Liberación Binance</span>
+                  <input type="checkbox" checked={autoLiberar} onChange={(e) => setAutoLiberar(e.target.checked)} className="accent-red-600" />
                 </div>
                 <button
                   onClick={alternarPausaBot}
-                  className="w-full py-2.5 rounded-2xl bg-rose-600 text-white font-bold text-xs"
+                  className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold text-xs"
                 >
                   {botStatus?.is_paused ? "REANUDAR MOTOR" : "PARADA DE EMERGENCIA"}
                 </button>
@@ -711,14 +725,14 @@ export default function CryptoAppDashboard() {
 
           {/* PESTAÑA MÓVIL: PERFIL */}
           {activeTab === "perfil" && (
-            <div className="bg-[#111927] p-5 rounded-3xl border border-slate-800 space-y-3 text-center text-xs">
-              <div className="h-12 w-12 mx-auto rounded-full bg-rose-600 flex items-center justify-center font-bold text-white text-base">
+            <div className="bg-white dark:bg-[#0E121A] p-5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3 text-center text-xs">
+              <div className="h-12 w-12 mx-auto rounded-full bg-slate-800 text-white flex items-center justify-center font-bold text-base">
                 {user ? user.username.substring(0, 2).toUpperCase() : "CM"}
               </div>
-              <h3 className="font-bold text-slate-100">{user?.username || "Carlos M."}</h3>
-              <p className="text-slate-400 font-mono">Rol: {user?.role || "TRADER"}</p>
+              <h3 className="font-semibold text-slate-900 dark:text-slate-100">{user?.username || "Operador"}</h3>
+              <p className="text-slate-500 font-mono">Rol: {user?.role || "TRADER"}</p>
               <div className="pt-2">
-                <a href="/login" className="inline-block px-4 py-2 rounded-full bg-rose-600/20 text-rose-400 font-bold">
+                <a href="/login" className="inline-block px-3.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-medium">
                   Cerrar Sesión / Cambiar Usuario
                 </a>
               </div>
@@ -728,13 +742,24 @@ export default function CryptoAppDashboard() {
       </main>
 
       {/* ======================================================== */}
-      {/* 5. BARRA DE NAVEGACIÓN INFERIOR (MÓVIL / TELEGRAM APP)   */}
+      {/* 5. MODAL DE AJUSTES BINANCE (ESPACIOSO Y NO APRETADO)    */}
       {/* ======================================================== */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 max-w-7xl mx-auto bg-[#0a0f1d]/95 backdrop-blur-md border-t border-slate-800 px-3 py-1.5 flex items-center justify-around z-50">
+      {isBinanceModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="relative w-full max-w-2xl bg-white dark:bg-[#0D111A] rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+            <BinanceSettingsCard onClose={() => setIsBinanceModalOpen(false)} isModal={true} />
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 6. BARRA DE NAVEGACIÓN INFERIOR (MÓVIL / TELEGRAM APP)   */}
+      {/* ======================================================== */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 max-w-7xl mx-auto bg-white/95 dark:bg-[#0A0D14]/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 px-3 py-1.5 flex items-center justify-around z-40">
         <button
           onClick={() => setActiveTab("mercado")}
-          className={`flex flex-col items-center py-1 px-2 rounded-2xl transition-all ${
-            activeTab === "mercado" ? "text-rose-500 font-bold" : "text-slate-400 hover:text-slate-200"
+          className={`flex flex-col items-center py-1 px-2 rounded-lg transition-colors ${
+            activeTab === "mercado" ? "text-red-600 font-bold" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
           }`}
         >
           <TrendingUp className="h-5 w-5" />
@@ -743,8 +768,8 @@ export default function CryptoAppDashboard() {
 
         <button
           onClick={() => setActiveTab("swap")}
-          className={`flex flex-col items-center py-1 px-2 rounded-2xl transition-all ${
-            activeTab === "swap" ? "text-rose-500 font-bold" : "text-slate-400 hover:text-slate-200"
+          className={`flex flex-col items-center py-1 px-2 rounded-lg transition-colors ${
+            activeTab === "swap" ? "text-red-600 font-bold" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
           }`}
         >
           <ArrowLeftRight className="h-5 w-5" />
@@ -753,8 +778,8 @@ export default function CryptoAppDashboard() {
 
         <button
           onClick={() => setActiveTab("ordenes")}
-          className={`flex flex-col items-center py-1 px-2 rounded-2xl transition-all ${
-            activeTab === "ordenes" ? "text-rose-500 font-bold" : "text-slate-400 hover:text-slate-200"
+          className={`flex flex-col items-center py-1 px-2 rounded-lg transition-colors ${
+            activeTab === "ordenes" ? "text-red-600 font-bold" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
           }`}
         >
           <Wallet className="h-5 w-5" />
@@ -763,8 +788,8 @@ export default function CryptoAppDashboard() {
 
         <button
           onClick={() => setActiveTab("fiscal")}
-          className={`flex flex-col items-center py-1 px-2 rounded-2xl transition-all ${
-            activeTab === "fiscal" ? "text-rose-500 font-bold" : "text-slate-400 hover:text-slate-200"
+          className={`flex flex-col items-center py-1 px-2 rounded-lg transition-colors ${
+            activeTab === "fiscal" ? "text-red-600 font-bold" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
           }`}
         >
           <Building2 className="h-5 w-5" />
@@ -773,8 +798,8 @@ export default function CryptoAppDashboard() {
 
         <button
           onClick={() => setActiveTab("ajustes")}
-          className={`flex flex-col items-center py-1 px-2 rounded-2xl transition-all ${
-            activeTab === "ajustes" ? "text-rose-500 font-bold" : "text-slate-400 hover:text-slate-200"
+          className={`flex flex-col items-center py-1 px-2 rounded-lg transition-colors ${
+            activeTab === "ajustes" ? "text-red-600 font-bold" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
           }`}
         >
           <Settings className="h-5 w-5" />

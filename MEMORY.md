@@ -576,6 +576,34 @@
       - `ruff check .` limpio (**All checks passed!**).
       - `npm run build` en Next.js genera las **8 rutas estáticas sin errores ni advertencias de tipo**.
 
+51. **Arquitectura de Despliegue 24/7 Sin Servidor Local, Corrección de Posicionamiento de Claves Binance y Erradicación de Estética IA (ADR 051)**:
+    - **Arquitectura de Despliegue en la Nube 24/7 (Cero Dependencia de Laptop)**:
+      - **Frontend (Edge CDN)**: Alojable en Vercel o Cloudflare Pages (100% gratuito), con renderizado híbrido Next.js 14, compilación estática global y SSL TLS 1.3 nativo.
+      - **Backend API & Engine (Región Frankfurt / Europa Obligatoria)**:
+        - *Restricción Geográfica Crítica de Binance*: Los servidores ubicados en EE.UU. son bloqueados por Binance con códigos HTTP 451 / 403. Por tanto, el backend debe desplegarse obligatoriamente en Europa (Frankfurt, Alemania o Ámsterdam).
+        - *Opciones Evaluadas*:
+          1. **Render.com** (Web Service, Frankfurt EU, $7/mes en Starter para 24/7 continuo).
+          2. **Railway.app** (Template Docker, Ámsterdam EU, $5/mes de crédito inicial).
+          3. **Hetzner Cloud VPS (CX22)** (€3.49/mes en Falkenstein/Frankfurt, con IP dedicada fija e ilimitada operación 24/7 con Docker Compose y systemd).
+      - **Base de Datos Gestionada**: Neon.tech Serverless PostgreSQL (región `eu-central-1` Frankfurt, 0.5 GB gratuitos para >500,000 órdenes) o Render Postgres.
+      - **Capa DNS & Protección**: Cloudflare Proxy WAF gestionando dominios `app.tudominio.com` y `api.tudominio.com` con enmascaramiento total de IPs y mitigación DDoS.
+    - **Reubicación de Claves Binance & Corrección de Desbordamiento de Interfaz**:
+      - Se retiró la tarjeta `BinanceSettingsCard` de la columna lateral estrecha (`lg:col-span-4`), resolviendo el colapso horizontal, solapamiento de textos (*"LatenciaSin / Ping: verificar"*) y botones comprimidos reportados en la captura de pantalla del usuario.
+      - Se implementó un disparador dedicado en la barra de navegación superior: **`[ 🔑 Claves Binance ]`**, que abre un diálogo modal espacioso (`max-w-2xl`) con diseño ergonómico para configurar credenciales, diagnosticar en caliente latencia y clock drift, y monitorear cuota API (`x-mbx-used-weight / 5000`).
+      - Accesible asimismo en móviles mediante el menú inferior flotante y en la sección de Ajustes.
+    - **Erradicación de Estética IA y Paleta Institucional Dual (Blanco Perla & Negro Azabache)**:
+      - Se eliminaron todos los colores saturados fluorescentes (rosa/magenta neón, cian hipereléctrico), sombras de color proyectadas (`shadow-rose-600/30`) y curvas falsas de ondas aleatorias.
+      - Se diseñó un gráfico de **Profundidad de Mercado y Spread Real** con cuadrícula discontinua sobria y marcas de precio institucionales (estilo terminal Bloomberg / TradingView).
+      - Se implementó `ThemeProvider` con persistencia en `localStorage` y selector rápido en la barra superior:
+        - **Modo Blanco Perla (`light`)**: Fondo `#F8F9FA`, tarjetas `#FFFFFF`, bordes `#E2E8F0`, textos `#0F172A`.
+        - **Modo Negro Azabache (`dark`)**: Fondo `#07090E`, tarjetas `#0E121A`, bordes `#1E2638`, textos `#F1F5F9`.
+      - Todas las páginas (`/`, `/orders`, `/fiscal`, `/admin`, `/login`) actualizadas con clases reactivas duales.
+    - **Verificación de Calidad y Compilación**:
+      - `npm run build` en Next.js: **8 rutas generadas con 0 errores** de sintaxis, tipos o estilos.
+      - `pytest`: **167/167 tests pasando al 100%**.
+      - `mypy src/`: **0 errores en 69 archivos**.
+      - `ruff check .`: **0 advertencias**.
+
 ---
 
 ## 🎯 Guía Operativa Actual

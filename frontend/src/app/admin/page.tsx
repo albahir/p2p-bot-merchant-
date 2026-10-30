@@ -1,10 +1,12 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
-import { Users, Shield, UserCheck, AlertTriangle, RefreshCw } from "lucide-react";
+import { Users, Shield, UserCheck, AlertTriangle, RefreshCw, Sun, Moon } from "lucide-react";
 import { listUsers, updateUserRole, getCurrentUser, User } from "@/lib/api";
+import { useTheme } from "@/lib/theme-context";
 
 export default function AdminUsersPage() {
+  const { theme, toggleTheme } = useTheme();
   const [users, setUsers] = useState<User[]>([]);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -43,10 +45,10 @@ export default function AdminUsersPage() {
 
   if (currentUser && currentUser.role !== "ADMIN") {
     return (
-      <div className="glass-panel p-8 rounded-xl text-center space-y-3 max-w-md mx-auto my-12 border border-slate-800">
-        <AlertTriangle className="h-10 w-10 text-amber-400 mx-auto" />
-        <h2 className="font-mono text-base font-bold text-slate-200">ACCESO RESTRINGIDO</h2>
-        <p className="text-xs text-slate-400 font-mono">
+      <div className="glass-panel p-8 rounded-xl text-center space-y-3 max-w-md mx-auto my-12">
+        <AlertTriangle className="h-10 w-10 text-amber-500 mx-auto" />
+        <h2 className="font-mono text-base font-bold text-slate-800 dark:text-slate-200">ACCESO RESTRINGIDO</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">
           Esta vista está reservada exclusivamente para el rol ADMINISTRADOR.
         </p>
       </div>
@@ -55,23 +57,43 @@ export default function AdminUsersPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-        <a
-          href="/"
-          className="inline-flex items-center space-x-2 text-xs font-semibold text-rose-400 hover:text-rose-300 transition-colors bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20"
+      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800">
+        <div className="flex items-center space-x-3">
+          <a
+            href="/"
+            className="inline-flex items-center space-x-2 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:opacity-80 transition-opacity bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20"
+          >
+            <span>← Volver a la App Principal</span>
+          </a>
+          <span className="text-xs text-slate-500 dark:text-slate-400 font-mono">Panel Administrativo</span>
+        </div>
+
+        <button
+          onClick={toggleTheme}
+          aria-label="Cambiar tema de color"
+          className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors flex items-center space-x-1.5 text-xs font-mono"
         >
-          <span>← Volver a la App Principal</span>
-        </a>
-        <span className="text-xs text-slate-400 font-mono">Panel Administrativo</span>
+          {theme === "dark" ? (
+            <>
+              <Sun className="h-3.5 w-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Blanco Perla</span>
+            </>
+          ) : (
+            <>
+              <Moon className="h-3.5 w-3.5 text-slate-700" />
+              <span className="hidden sm:inline">Negro Azabache</span>
+            </>
+          )}
+        </button>
       </div>
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="font-mono text-xl font-bold text-slate-100 flex items-center space-x-2">
-            <Shield className="h-6 w-6 text-emerald-400" />
+          <h1 className="font-mono text-xl font-bold text-slate-900 dark:text-slate-100 flex items-center space-x-2">
+            <Shield className="h-6 w-6 text-emerald-500 dark:text-emerald-400" />
             <span>CONTROL DE ACCESO & GESTIÓN DE ROLES (RBAC)</span>
           </h1>
-          <p className="text-xs text-slate-400 mt-1 font-mono">
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 font-mono">
             Administra los permisos de acceso y notifica automáticamente al Telegram de cada usuario.
           </p>
         </div>
@@ -79,7 +101,7 @@ export default function AdminUsersPage() {
         <button
           onClick={loadUsers}
           disabled={isLoading}
-          className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs flex items-center space-x-1.5 self-start sm:self-auto"
+          className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-mono text-xs flex items-center space-x-1.5 self-start sm:self-auto border border-slate-200 dark:border-slate-700"
         >
           <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
           <span>Refrescar</span>
@@ -87,17 +109,17 @@ export default function AdminUsersPage() {
       </div>
 
       {msg && (
-        <div className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-mono">
+        <div className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-xs font-mono">
           {msg}
         </div>
       )}
 
       {/* Tabla de Usuarios */}
-      <div className="glass-panel rounded-xl border border-slate-800 overflow-hidden">
+      <div className="glass-panel rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs font-mono">
             <thead>
-              <tr className="bg-slate-900/60 border-b border-slate-800 text-slate-400">
+              <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
                 <th className="py-3 px-4 font-semibold">ID</th>
                 <th className="py-3 px-4 font-semibold">Usuario</th>
                 <th className="py-3 px-4 font-semibold">Telegram ID</th>
@@ -106,19 +128,19 @@ export default function AdminUsersPage() {
                 <th className="py-3 px-4 font-semibold text-right">Modificar Permisos</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/40">
+            <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/40">
               {users.map((u) => (
-                <tr key={u.id} className="hover:bg-slate-900/30 transition-colors">
-                  <td className="py-3 px-4 text-slate-400">#{u.id}</td>
-                  <td className="py-3 px-4 text-slate-200 font-bold">{u.username}</td>
-                  <td className="py-3 px-4 text-slate-300">{u.telegram_id || "--"}</td>
+                <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/30 transition-colors">
+                  <td className="py-3 px-4 text-slate-400 dark:text-slate-400">#{u.id}</td>
+                  <td className="py-3 px-4 text-slate-900 dark:text-slate-200 font-bold">{u.username}</td>
+                  <td className="py-3 px-4 text-slate-700 dark:text-slate-300">{u.telegram_id || "--"}</td>
                   <td className="py-3 px-4">
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${u.is_active ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${u.is_active ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-rose-500/10 text-rose-600 dark:text-rose-400"}`}>
                       {u.is_active ? "ACTIVO" : "SUSPENDIDO"}
                     </span>
                   </td>
                   <td className="py-3 px-4">
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${u.role === "ADMIN" ? "bg-purple-500/20 text-purple-300 border border-purple-500/30" : u.role === "TRADER" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-slate-800 text-slate-400"}`}>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${u.role === "ADMIN" ? "bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/30" : u.role === "TRADER" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30" : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"}`}>
                       {u.role}
                     </span>
                   </td>
@@ -126,7 +148,7 @@ export default function AdminUsersPage() {
                     <select
                       value={u.role}
                       onChange={(e) => handleRoleChange(u.id, e.target.value as any)}
-                      className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-mono text-xs focus:outline-none focus:border-emerald-500"
+                      className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded px-2 py-1 text-slate-800 dark:text-slate-200 font-mono text-xs focus:outline-none focus:border-emerald-500"
                     >
                       <option value="ADMIN">ADMIN</option>
                       <option value="TRADER">TRADER</option>

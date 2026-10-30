@@ -14,6 +14,8 @@ import {
   LogIn,
   HelpCircle,
   ArrowLeft,
+  Sun,
+  Moon,
 } from "lucide-react";
 import {
   login,
@@ -22,6 +24,7 @@ import {
   recoverPassword,
   resetPassword,
 } from "@/lib/api";
+import { useTheme } from "@/lib/theme-context";
 
 declare global {
   interface Window {
@@ -39,6 +42,7 @@ type AuthTab = "login" | "register" | "recovery";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { theme, toggleTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<AuthTab>("login");
 
   // Campos de formulario
@@ -185,37 +189,51 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-[85vh] flex items-center justify-center px-4 py-8">
-      <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-md space-y-6">
-        {/* Cabecera superior con retorno */}
-        <div className="flex justify-between items-center pb-2 border-b border-slate-800/80">
+      <div className="w-full max-w-md bg-white dark:bg-[#0E121A] border border-slate-200 dark:border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-6">
+        {/* Cabecera superior con retorno y selector de tema */}
+        <div className="flex justify-between items-center pb-2 border-b border-slate-200 dark:border-slate-800/80">
           <a
             href="/"
-            className="inline-flex items-center space-x-1.5 text-xs font-semibold text-rose-400 hover:text-rose-300 transition-colors"
+            className="inline-flex items-center space-x-1.5 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:opacity-80 transition-opacity"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
             <span>Volver a la Terminal</span>
           </a>
-          <span className="text-[11px] font-mono text-slate-500 uppercase tracking-widest">
-            v2.0 P2P Bot
-          </span>
+
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={toggleTheme}
+              aria-label="Cambiar tema de color"
+              className="p-1 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors"
+            >
+              {theme === "dark" ? (
+                <Sun className="h-3.5 w-3.5 text-amber-400" />
+              ) : (
+                <Moon className="h-3.5 w-3.5 text-slate-700" />
+              )}
+            </button>
+            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-widest">
+              v2.0 P2P Bot
+            </span>
+          </div>
         </div>
 
         {/* Título e Icono */}
         <div className="text-center space-y-2">
-          <div className="inline-flex p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 mb-1 shadow-inner">
+          <div className="inline-flex p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 mb-1 shadow-inner">
             <ShieldCheck className="h-8 w-8" />
           </div>
-          <h1 className="text-xl font-bold font-mono tracking-wide text-slate-100">
+          <h1 className="text-xl font-bold font-mono tracking-wide text-slate-900 dark:text-slate-100">
             SISTEMA P2P MERCHANT
           </h1>
-          <p className="text-xs text-slate-400 font-sans">
+          <p className="text-xs text-slate-500 dark:text-slate-400 font-sans">
             Autenticación segura multi-usuario con arquitectura Fail-Closed
           </p>
         </div>
 
         {/* Switcher de Pestañas: Iniciar Sesión / Crear Cuenta */}
         {activeTab !== "recovery" && (
-          <div className="grid grid-cols-2 p-1 bg-slate-950/80 border border-slate-800 rounded-2xl text-xs font-semibold">
+          <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded-2xl text-xs font-semibold">
             <button
               type="button"
               onClick={() => {
@@ -224,8 +242,8 @@ export default function LoginPage() {
               }}
               className={`py-2.5 rounded-xl transition-all flex items-center justify-center space-x-2 ${
                 activeTab === "login"
-                  ? "bg-slate-800 text-emerald-400 shadow-md font-bold"
-                  : "text-slate-400 hover:text-slate-200"
+                  ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm font-bold border border-slate-200 dark:border-transparent"
+                  : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
               }`}
             >
               <LogIn className="h-3.5 w-3.5" />
@@ -239,8 +257,8 @@ export default function LoginPage() {
               }}
               className={`py-2.5 rounded-xl transition-all flex items-center justify-center space-x-2 ${
                 activeTab === "register"
-                  ? "bg-slate-800 text-emerald-400 shadow-md font-bold"
-                  : "text-slate-400 hover:text-slate-200"
+                  ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm font-bold border border-slate-200 dark:border-transparent"
+                  : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
               }`}
             >
               <UserPlus className="h-3.5 w-3.5" />
@@ -251,15 +269,15 @@ export default function LoginPage() {
 
         {/* Notificaciones de Error o Éxito */}
         {errorMsg && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-start space-x-2.5">
-            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-300 text-xs font-mono flex items-start space-x-2.5">
+            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-500" />
             <span>{errorMsg}</span>
           </div>
         )}
 
         {successMsg && (
-          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono flex items-start space-x-2.5">
-            <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-400" />
+          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-300 text-xs font-mono flex items-start space-x-2.5">
+            <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-500" />
             <span>{successMsg}</span>
           </div>
         )}
@@ -268,18 +286,18 @@ export default function LoginPage() {
         {activeTab === "login" && (
           <form onSubmit={handleLogin} className="space-y-4 text-xs font-mono">
             <div>
-              <label className="block text-slate-300 mb-1.5 font-semibold">
+              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                 NOMBRE DE USUARIO
               </label>
               <div className="relative">
-                <UserIcon className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                <UserIcon className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   required
                   autoComplete="username"
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   placeholder="admin / trader"
                 />
               </div>
@@ -287,27 +305,27 @@ export default function LoginPage() {
 
             <div>
               <div className="flex justify-between items-center mb-1.5">
-                <label className="text-slate-300 font-semibold">CONTRASEÑA</label>
+                <label className="text-slate-700 dark:text-slate-300 font-semibold">CONTRASEÑA</label>
                 <button
                   type="button"
                   onClick={() => {
                     setActiveTab("recovery");
                     resetFormFeedback();
                   }}
-                  className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-sans"
+                  className="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline font-sans"
                 >
                   ¿Olvidaste tu contraseña?
                 </button>
               </div>
               <div className="relative">
-                <Lock className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
                   autoComplete="current-password"
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   placeholder="••••••••••••"
                 />
               </div>
@@ -316,7 +334,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 text-slate-950 font-bold font-mono text-xs transition-all shadow-lg shadow-emerald-500/20 active:scale-[0.99]"
+              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 disabled:text-slate-400 font-bold font-mono text-xs transition-colors active:scale-[0.99]"
             >
               {isLoading ? "Validando credenciales..." : "Ingresar a la Terminal"}
             </button>
@@ -327,68 +345,68 @@ export default function LoginPage() {
         {activeTab === "register" && (
           <form onSubmit={handleRegister} className="space-y-4 text-xs font-mono">
             <div>
-              <label className="block text-slate-300 mb-1.5 font-semibold">
+              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                 NUEVO USUARIO
               </label>
               <div className="relative">
-                <UserIcon className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                <UserIcon className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   required
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   placeholder="Elige un alias (ej: trader_caracas)"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1.5 font-semibold">
+              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                 CONTRASEÑA (MÍNIMO 8 CARACTERES)
               </label>
               <div className="relative">
-                <Lock className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   placeholder="••••••••••••"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1.5 font-semibold">
+              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                 CONFIRMAR CONTRASEÑA
               </label>
               <div className="relative">
-                <Lock className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   placeholder="Repite la contraseña"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1.5 font-semibold flex justify-between">
+              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold flex justify-between">
                 <span>TELEGRAM ID NUMÉRICO (OPCIONAL)</span>
                 <span className="text-[10px] text-slate-500 font-normal">Para alertas y OTP</span>
               </label>
               <div className="relative">
-                <Send className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                <Send className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="text"
                   value={telegramId}
                   onChange={(e) => setTelegramId(e.target.value)}
-                  className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   placeholder="Ej: 123456789"
                 />
               </div>
@@ -400,7 +418,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 text-slate-950 font-bold font-mono text-xs transition-all shadow-lg shadow-emerald-500/20 active:scale-[0.99]"
+              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 disabled:text-slate-400 font-bold font-mono text-xs transition-colors active:scale-[0.99]"
             >
               {isLoading ? "Creando cuenta..." : "Crear Cuenta de Usuario"}
             </button>
@@ -410,15 +428,15 @@ export default function LoginPage() {
         {/* TAB 3: RECUPERACIÓN DE CONTRASEÑA VÍA TELEGRAM OTP */}
         {activeTab === "recovery" && (
           <div className="space-y-4 text-xs font-mono">
-            <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-2xl flex items-center justify-between">
-              <span className="font-semibold text-slate-300">Recuperar Acceso</span>
+            <div className="p-3 bg-slate-100 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded-2xl flex items-center justify-between">
+              <span className="font-semibold text-slate-800 dark:text-slate-300">Recuperar Acceso</span>
               <button
                 type="button"
                 onClick={() => {
                   setActiveTab("login");
                   resetFormFeedback();
                 }}
-                className="text-[11px] text-slate-400 hover:text-slate-200"
+                className="text-[11px] text-slate-500 dark:text-slate-400 hover:underline"
               >
                 Volver a Iniciar Sesión
               </button>
@@ -426,22 +444,22 @@ export default function LoginPage() {
 
             {recoveryStep === 1 ? (
               <form onSubmit={handleRequestRecoveryOtp} className="space-y-4">
-                <p className="text-[11px] text-slate-400 font-sans leading-relaxed">
+                <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans leading-relaxed">
                   Ingresa tu nombre de usuario o tu ID numérico de Telegram vinculado. Te enviaremos un código de seguridad OTP de 6 dígitos.
                 </p>
 
                 <div>
-                  <label className="block text-slate-300 mb-1.5 font-semibold">
+                  <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                     USUARIO O TELEGRAM ID
                   </label>
                   <div className="relative">
-                    <UserIcon className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                    <UserIcon className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                     <input
                       type="text"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
                       required
-                      className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500"
+                      className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
                       placeholder="Nombre de usuario o ID"
                     />
                   </div>
@@ -450,47 +468,47 @@ export default function LoginPage() {
                 <button
                   type="submit"
                   disabled={isLoading}
-                  className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:bg-slate-800 text-slate-950 font-bold font-mono text-xs transition-all"
+                  className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-white font-bold font-mono text-xs transition-colors"
                 >
                   {isLoading ? "Despachando código..." : "Enviar Código OTP a Telegram"}
                 </button>
               </form>
             ) : (
               <form onSubmit={handleResetPassword} className="space-y-4">
-                <p className="text-[11px] text-slate-400 font-sans leading-relaxed">
+                <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans leading-relaxed">
                   Ingresa el código OTP de 6 dígitos que recibiste y define tu nueva contraseña.
                 </p>
 
                 <div>
-                  <label className="block text-slate-300 mb-1.5 font-semibold">
+                  <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                     CÓDIGO OTP (6 DÍGITOS)
                   </label>
                   <div className="relative">
-                    <KeyRound className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                    <KeyRound className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                     <input
                       type="text"
                       maxLength={6}
                       value={recoveryCode}
                       onChange={(e) => setRecoveryCode(e.target.value)}
                       required
-                      className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 font-mono tracking-widest text-base focus:outline-none focus:border-emerald-500"
+                      className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 font-mono tracking-widest text-base focus:outline-none focus:border-emerald-500"
                       placeholder="123456"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-slate-300 mb-1.5 font-semibold">
+                  <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
                     NUEVA CONTRASEÑA
                   </label>
                   <div className="relative">
-                    <Lock className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                    <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
                     <input
                       type="password"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       required
-                      className="w-full bg-slate-950/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-200 focus:outline-none focus:border-emerald-500"
+                      className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
                       placeholder="••••••••••••"
                     />
                   </div>
@@ -500,14 +518,14 @@ export default function LoginPage() {
                   <button
                     type="button"
                     onClick={() => setRecoveryStep(1)}
-                    className="w-1/3 py-2.5 rounded-xl border border-slate-800 text-slate-400 hover:text-slate-200 font-mono text-xs"
+                    className="w-1/3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 font-mono text-xs"
                   >
                     Atrás
                   </button>
                   <button
                     type="submit"
                     disabled={isLoading}
-                    className="w-2/3 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-800 text-slate-950 font-bold font-mono text-xs transition-all shadow-md"
+                    className="w-2/3 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 font-bold font-mono text-xs transition-colors"
                   >
                     {isLoading ? "Actualizando..." : "Restablecer"}
                   </button>
@@ -519,25 +537,25 @@ export default function LoginPage() {
 
         {/* Separador */}
         <div className="relative flex py-1 items-center">
-          <div className="flex-grow border-t border-slate-800"></div>
-          <span className="flex-shrink mx-4 text-slate-500 text-[10px] font-mono uppercase tracking-wider">
+          <div className="flex-grow border-t border-slate-200 dark:border-slate-800"></div>
+          <span className="flex-shrink mx-4 text-slate-400 dark:text-slate-500 text-[10px] font-mono uppercase tracking-wider">
             Canales de acceso seguro
           </span>
-          <div className="flex-grow border-t border-slate-800"></div>
+          <div className="flex-grow border-t border-slate-200 dark:border-slate-800"></div>
         </div>
 
         {/* Banner de Telegram SSO y Bot */}
-        <div className="p-3.5 bg-sky-500/10 border border-sky-500/20 rounded-2xl flex items-center justify-between text-sky-400 text-xs font-mono">
+        <div className="p-3.5 bg-sky-500/10 border border-sky-500/20 rounded-2xl flex items-center justify-between text-sky-600 dark:text-sky-400 text-xs font-mono">
           <div className="flex items-center space-x-2.5">
             <Send className="h-4 w-4 shrink-0" />
             <div>
               <p className="font-bold text-[11px]">Telegram SSO / Mini App</p>
-              <p className="text-[10px] text-slate-400 font-sans">
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 font-sans">
                 Acceso sin contraseña mediante el bot oficial
               </p>
             </div>
           </div>
-          <span className="px-2 py-0.5 rounded-full bg-sky-500/20 border border-sky-500/40 text-[10px] font-bold text-sky-300">
+          <span className="px-2 py-0.5 rounded-full bg-sky-500/20 border border-sky-500/40 text-[10px] font-bold text-sky-600 dark:text-sky-300">
             EN LÍNEA
           </span>
         </div>

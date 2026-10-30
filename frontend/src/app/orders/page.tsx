@@ -10,7 +10,9 @@ import {
   CheckCircle2, 
   Clock, 
   AlertCircle,
-  FileText
+  FileText,
+  Sun,
+  Moon
 } from "lucide-react";
 import { 
   getOrders, 
@@ -20,8 +22,10 @@ import {
   getCurrentUser,
   User 
 } from "@/lib/api";
+import { useTheme } from "@/lib/theme-context";
 
 export default function OrdersPage() {
+  const { theme, toggleTheme } = useTheme();
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [total, setTotal] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
@@ -75,25 +79,45 @@ export default function OrdersPage() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      {/* Botón de regreso al Inicio */}
-      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-        <a
-          href="/"
-          className="inline-flex items-center space-x-2 text-xs font-semibold text-rose-400 hover:text-rose-300 transition-colors bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20"
+      {/* Botón de regreso al Inicio y Selector de Tema */}
+      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800">
+        <div className="flex items-center space-x-3">
+          <a
+            href="/"
+            className="inline-flex items-center space-x-2 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:opacity-80 transition-opacity bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20"
+          >
+            <span>← Volver a la App Principal</span>
+          </a>
+          <span className="text-xs text-slate-500 dark:text-slate-400 font-mono">Modo Libro Completo</span>
+        </div>
+
+        <button
+          onClick={toggleTheme}
+          aria-label="Cambiar tema de color"
+          className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors flex items-center space-x-1.5 text-xs font-mono"
         >
-          <span>← Volver a la App Principal</span>
-        </a>
-        <span className="text-xs text-slate-400 font-mono">Modo Libro Completo</span>
+          {theme === "dark" ? (
+            <>
+              <Sun className="h-3.5 w-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Blanco Perla</span>
+            </>
+          ) : (
+            <>
+              <Moon className="h-3.5 w-3.5 text-slate-700" />
+              <span className="hidden sm:inline">Negro Azabache</span>
+            </>
+          )}
+        </button>
       </div>
 
       {/* Encabezado y Acciones de Exportación */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="font-mono text-xl font-bold text-slate-100 flex items-center space-x-2">
-            <FileSpreadsheet className="h-6 w-6 text-emerald-400" />
+          <h1 className="font-mono text-xl font-bold text-slate-900 dark:text-slate-100 flex items-center space-x-2">
+            <FileSpreadsheet className="h-6 w-6 text-emerald-500 dark:text-emerald-400" />
             <span>HISTORIAL DE ÓRDENES BINANCE P2P</span>
           </h1>
-          <p className="text-xs text-slate-400 mt-1 font-mono">
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 font-mono">
             {total} órdenes registradas e ingestadas para reconciliación fiscal
           </p>
         </div>
@@ -104,7 +128,7 @@ export default function OrdersPage() {
             href={getExportOrdersUrl("xlsx")}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-mono font-bold transition-colors"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-mono font-bold transition-colors"
           >
             <Download className="h-3.5 w-3.5" />
             <span>Descargar Excel (.xlsx)</span>
@@ -114,7 +138,7 @@ export default function OrdersPage() {
             href={getExportOrdersUrl("csv_semicolon")}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-mono transition-colors"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-xs font-mono transition-colors"
           >
             <FileText className="h-3.5 w-3.5" />
             <span>CSV (;)</span>
@@ -124,7 +148,7 @@ export default function OrdersPage() {
             href={getExportOrdersUrl("csv_comma")}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-mono transition-colors"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-xs font-mono transition-colors"
           >
             <FileText className="h-3.5 w-3.5" />
             <span>CSV (,)</span>
@@ -134,10 +158,10 @@ export default function OrdersPage() {
 
       {/* Panel de Extracción Directa desde Binance API (TRADER / ADMIN) */}
       {(user?.role === "ADMIN" || user?.role === "TRADER") && (
-        <div className="glass-panel p-4 rounded-xl border border-slate-800 space-y-3">
+        <div className="glass-panel p-4 rounded-xl space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="font-mono text-xs font-bold text-slate-200 uppercase flex items-center space-x-2">
-              <RefreshCw className="h-3.5 w-3.5 text-emerald-400" />
+            <h3 className="font-mono text-xs font-bold text-slate-800 dark:text-slate-200 uppercase flex items-center space-x-2">
+              <RefreshCw className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400" />
               <span>Sincronizador Automático Binance P2P API</span>
             </h3>
             <span className="text-[10px] font-mono text-slate-400">
@@ -146,7 +170,7 @@ export default function OrdersPage() {
           </div>
 
           <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-            <div className="flex items-center space-x-2 text-xs font-mono text-slate-300">
+            <div className="flex items-center space-x-2 text-xs font-mono text-slate-700 dark:text-slate-300">
               <span>Ventana:</span>
               <input
                 type="range"
@@ -156,13 +180,13 @@ export default function OrdersPage() {
                 onChange={(e) => setSyncDays(Number(e.target.value))}
                 className="w-32 accent-emerald-500 cursor-pointer"
               />
-              <span className="font-bold text-emerald-400">{syncDays} días</span>
+              <span className="font-bold text-emerald-600 dark:text-emerald-400">{syncDays} días</span>
             </div>
 
             <button
               onClick={handleSync}
               disabled={isSyncing}
-              className="flex items-center space-x-2 px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 font-mono text-xs font-bold transition-colors"
+              className="flex items-center space-x-2 px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 disabled:text-slate-400 font-mono text-xs font-bold transition-colors"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
               <span>{isSyncing ? "Sincronizando con Binance..." : "Extraer Órdenes en Caliente"}</span>
@@ -170,7 +194,7 @@ export default function OrdersPage() {
           </div>
 
           {syncMessage && (
-            <p className="text-xs font-mono text-emerald-400 bg-emerald-500/10 p-2 rounded border border-emerald-500/20">
+            <p className="text-xs font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 p-2 rounded border border-emerald-500/20">
               {syncMessage}
             </p>
           )}
@@ -178,7 +202,7 @@ export default function OrdersPage() {
       )}
 
       {/* Barra de Filtros y Búsqueda */}
-      <div className="glass-panel p-3 rounded-xl border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono">
+      <div className="glass-panel p-3 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono">
         <div className="flex items-center space-x-2 w-full sm:w-auto">
           <div className="relative w-full sm:w-64">
             <Search className="h-3.5 w-3.5 text-slate-400 absolute left-3 top-2.5" />
@@ -190,7 +214,7 @@ export default function OrdersPage() {
                 setSearch(e.target.value);
                 setPage(1);
               }}
-              className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-slate-800 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:border-emerald-500"
             />
           </div>
 
@@ -202,7 +226,7 @@ export default function OrdersPage() {
                 setTradeType(e.target.value);
                 setPage(1);
               }}
-              className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-slate-200 focus:outline-none focus:border-emerald-500"
+              className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
             >
               <option value="">Todas</option>
               <option value="BUY">Solo Compras (BUY)</option>
@@ -211,17 +235,17 @@ export default function OrdersPage() {
           </div>
         </div>
 
-        <span className="text-slate-400 text-[11px]">
+        <span className="text-slate-500 dark:text-slate-400 text-[11px]">
           Página {page} de {Math.max(1, Math.ceil(total / 25))}
         </span>
       </div>
 
       {/* Tabla de Órdenes */}
-      <div className="glass-panel rounded-xl border border-slate-800 overflow-hidden">
+      <div className="glass-panel rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs font-mono">
             <thead>
-              <tr className="bg-slate-900/60 border-b border-slate-800 text-slate-400">
+              <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
                 <th className="py-3 px-4 font-semibold">N° Orden</th>
                 <th className="py-3 px-4 font-semibold">Tipo</th>
                 <th className="py-3 px-4 font-semibold">Contraparte</th>
@@ -232,35 +256,35 @@ export default function OrdersPage() {
                 <th className="py-3 px-4 font-semibold text-center">Estado</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/40">
+            <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/40">
               {orders.length > 0 ? (
                 orders.map((o) => (
-                  <tr key={o.id} className="hover:bg-slate-900/30 transition-colors">
-                    <td className="py-3 px-4 text-slate-200 font-medium">
+                  <tr key={o.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/30 transition-colors">
+                    <td className="py-3 px-4 text-slate-900 dark:text-slate-200 font-medium">
                       {o.order_number}
                     </td>
                     <td className="py-3 px-4">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${o.trade_type === "BUY" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30" : "bg-rose-500/10 text-rose-400 border border-rose-500/30"}`}>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${o.trade_type === "BUY" ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30" : "bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/30"}`}>
                         {o.trade_type}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-slate-300">
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300">
                       {o.counterparty_name || "--"}
                     </td>
-                    <td className="py-3 px-4 text-right text-slate-200 font-bold">
+                    <td className="py-3 px-4 text-right text-slate-900 dark:text-slate-200 font-bold">
                       {o.crypto_amount.toFixed(2)} {o.asset}
                     </td>
-                    <td className="py-3 px-4 text-right text-slate-300">
+                    <td className="py-3 px-4 text-right text-slate-700 dark:text-slate-300">
                       {o.fiat_amount.toLocaleString("es-VE", { minimumFractionDigits: 2 })} {o.fiat}
                     </td>
-                    <td className="py-3 px-4 text-right text-slate-300">
+                    <td className="py-3 px-4 text-right text-slate-700 dark:text-slate-300">
                       {o.unit_price.toFixed(2)}
                     </td>
-                    <td className="py-3 px-4 text-right text-slate-400">
+                    <td className="py-3 px-4 text-right text-slate-500 dark:text-slate-400">
                       {o.bcv_rate ? o.bcv_rate.toFixed(2) : "--"}
                     </td>
                     <td className="py-3 px-4 text-center">
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
                         {o.order_status}
                       </span>
                     </td>
@@ -268,7 +292,7 @@ export default function OrdersPage() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-500 font-mono">
+                  <td colSpan={8} className="py-8 text-center text-slate-400 dark:text-slate-500 font-mono">
                     {isLoading ? "Cargando órdenes..." : "No se encontraron órdenes registradas."}
                   </td>
                 </tr>
@@ -279,19 +303,19 @@ export default function OrdersPage() {
 
         {/* Paginador */}
         {total > 25 && (
-          <div className="p-3 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">
+          <div className="p-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-mono">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page === 1}
-              className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
+              className="px-3 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-300"
             >
               Anterior
             </button>
-            <span className="text-slate-400">Página {page}</span>
+            <span className="text-slate-500 dark:text-slate-400">Página {page}</span>
             <button
               onClick={() => setPage((p) => p + 1)}
               disabled={page * 25 >= total}
-              className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300"
+              className="px-3 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-300"
             >
               Siguiente
             </button>
