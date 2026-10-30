@@ -16,6 +16,12 @@ const config: Config = {
         "surface-elevated": "#1a253c",
         border: "#1e293b",
         "border-bright": "#2d3d59",
+        brand: {
+          red: "#e11d48",
+          darkRed: "#9f1239",
+          coral: "#f43f5e",
+          lightRed: "#ffe4e6",
+        },
         neon: {
           emerald: "#10b981",
           cyan: "#06b6d4",

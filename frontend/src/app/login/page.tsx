@@ -61,7 +61,15 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="max-w-md mx-auto my-12 glass-panel p-6 sm:p-8 rounded-2xl border border-slate-800 space-y-6">
+    <div className="max-w-md mx-auto my-8 glass-panel p-6 sm:p-8 rounded-3xl border border-slate-800 space-y-6">
+      <div className="pb-2 border-b border-slate-800 flex justify-between items-center">
+        <a
+          href="/"
+          className="inline-flex items-center space-x-1.5 text-xs font-semibold text-rose-400 hover:text-rose-300 transition-colors"
+        >
+          <span>← Volver a la App</span>
+        </a>
+      </div>
       <div className="text-center space-y-2">
         <div className="inline-flex p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 mb-1">
           <ShieldCheck className="h-8 w-8" />

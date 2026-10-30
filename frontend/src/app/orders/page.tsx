@@ -74,7 +74,18 @@ export default function OrdersPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
+      {/* Botón de regreso al Inicio */}
+      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+        <a
+          href="/"
+          className="inline-flex items-center space-x-2 text-xs font-semibold text-rose-400 hover:text-rose-300 transition-colors bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20"
+        >
+          <span>← Volver a la App Principal</span>
+        </a>
+        <span className="text-xs text-slate-400 font-mono">Modo Libro Completo</span>
+      </div>
+
       {/* Encabezado y Acciones de Exportación */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

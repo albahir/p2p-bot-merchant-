@@ -224,7 +224,92 @@ export function getExportOrdersUrl(format: "xlsx" | "csv_semicolon" | "csv_comma
   return `${API_BASE_URL}/api/orders/export?format=${format}&token=${token || ""}`;
 }
 
-// Métodos de control de Bot
+// Métodos de autenticación adicional (Registro y Recuperación)
+export interface RegisterData {
+  username: string;
+  password: string;
+  telegram_id?: string;
+}
+
+export async function registerUser(data: RegisterData): Promise<AuthResponse> {
+  return apiRequest<AuthResponse>("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function recoverPassword(username: string): Promise<{
+  success: boolean;
+  message: string;
+  has_telegram: boolean;
+  debug_code?: string;
+}> {
+  return apiRequest("/api/auth/recover-password", {
+    method: "POST",
+    body: JSON.stringify({ username }),
+  });
+}
+
+export async function resetPassword(
+  username: string,
+  reset_code: string,
+  new_password: string
+): Promise<{ success: boolean; message: string }> {
+  return apiRequest("/api/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ username, reset_code, new_password }),
+  });
+}
+
+// Métodos de configuración y diagnóstico de Binance API
+export interface BinanceStatusResponse {
+  is_configured: boolean;
+  api_key_masked: string;
+  key_type: "HMAC" | "Ed25519" | string;
+  is_connected: boolean;
+  latency_ms: number;
+  clock_drift_ms: number;
+  used_weight: number;
+  max_weight: number;
+  permissions: string[];
+  message: string;
+}
+
+export interface SaveBinanceKeysRequest {
+  api_key: string;
+  secret_key: string;
+  key_type: "HMAC" | "Ed25519";
+}
+
+export interface VerifyBinanceResponse {
+  success: boolean;
+  is_connected: boolean;
+  latency_ms: number;
+  clock_drift_ms: number;
+  used_weight: number;
+  max_weight: number;
+  is_weight_safe: boolean;
+  server_time_utc?: string | null;
+  message: string;
+}
+
+export async function getBinanceSettings(): Promise<BinanceStatusResponse> {
+  return apiRequest<BinanceStatusResponse>("/api/settings/binance");
+}
+
+export async function saveBinanceSettings(data: SaveBinanceKeysRequest): Promise<BinanceStatusResponse> {
+  return apiRequest<BinanceStatusResponse>("/api/settings/binance", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function verifyBinanceConnection(): Promise<VerifyBinanceResponse> {
+  return apiRequest<VerifyBinanceResponse>("/api/settings/binance/verify", {
+    method: "POST",
+  });
+}
+
 export async function getBotStatus(): Promise<BotStatus> {
   return apiRequest<BotStatus>("/api/bot/status");
 }
@@ -247,4 +332,39 @@ export async function updateUserRole(userId: number, role: "ADMIN" | "TRADER" | 
     method: "PATCH",
     body: JSON.stringify({ role }),
   });
+}
+
+// Métodos de Reconciliación Fiscal P2P (6 Piezas)
+export interface FiscalSummary {
+  period: string;
+  initial_balance: number;
+  inflows_p2p_buys: number;
+  total_inflows: number;
+  outflows_p2p_sells: number;
+  total_outflows: number;
+  volume_operated: number;
+  total_fees: number;
+  calculated_final_balance: number;
+  actual_final_balance: number;
+  discrepancy: number;
+  gross_revenue_ves: number;
+  acquisition_cost_ves: number;
+  net_profit_ves: number;
+  net_profit_usd: number;
+  status: string;
+  orders_count: number;
+  message: string;
+  bcv_rate: number;
+}
+
+export async function getFiscalSummary(
+  period?: string,
+  initial_balance?: number,
+  actual_final_balance?: number
+): Promise<FiscalSummary> {
+  const query = new URLSearchParams();
+  if (period) query.set("period", period);
+  if (initial_balance !== undefined) query.set("initial_balance", initial_balance.toString());
+  if (actual_final_balance !== undefined) query.set("actual_final_balance", actual_final_balance.toString());
+  return apiRequest<FiscalSummary>(`/api/fiscal/summary?${query.toString()}`);
 }

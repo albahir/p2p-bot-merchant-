@@ -127,3 +127,69 @@ def test_telegram_sso_unauthorized_user_gets_invitado(client, test_db):
     res_data = res.json()
     assert res_data["user"]["telegram_id"] == "999888777"
     assert res_data["user"]["role"] == "INVITADO"
+
+
+def test_register_new_user_and_login(client):
+    """Verifica registro de un nuevo usuario e inicio de sesión subsecuente."""
+    reg_res = client.post(
+        "/api/auth/register",
+        json={
+            "username": "usuario_nuevo",
+            "password": "Password123!",
+            "telegram_id": "555444333",
+        },
+    )
+    assert reg_res.status_code == 201
+    data = reg_res.json()
+    assert "access_token" in data
+    assert data["user"]["username"] == "usuario_nuevo"
+    assert data["user"]["role"] == "INVITADO"
+
+    # Duplicado debe responder 400
+    dup_res = client.post(
+        "/api/auth/register",
+        json={"username": "usuario_nuevo", "password": "AnotherPassword!"},
+    )
+    assert dup_res.status_code == 400
+
+
+def test_password_recovery_and_reset_flow(client):
+    """Verifica el flujo completo de recuperación con OTP y cambio de contraseña."""
+    # 1. Registrar usuario
+    client.post(
+        "/api/auth/register",
+        json={"username": "recovery_user", "password": "InitialPass123!"},
+    )
+
+    # 2. Solicitar recuperación
+    rec_res = client.post("/api/auth/recover-password", json={"username": "recovery_user"})
+    assert rec_res.status_code == 200
+    rec_data = rec_res.json()
+    assert rec_data["success"] is True
+    # En entorno de prueba sin telegram bot real, retorna debug_code
+    otp = rec_data.get("debug_code")
+    assert otp is not None
+    assert len(otp) == 6
+
+    # 3. Restablecer con código incorrecto falla
+    bad_reset = client.post(
+        "/api/auth/reset-password",
+        json={"username": "recovery_user", "reset_code": "000000", "new_password": "NewStrongPass999!"},
+    )
+    assert bad_reset.status_code == 400
+
+    # 4. Restablecer con código correcto
+    ok_reset = client.post(
+        "/api/auth/reset-password",
+        json={"username": "recovery_user", "reset_code": otp, "new_password": "NewStrongPass999!"},
+    )
+    assert ok_reset.status_code == 200
+    assert ok_reset.json()["success"] is True
+
+    # 5. Iniciar sesión con nueva contraseña
+    login_res = client.post(
+        "/api/auth/login",
+        json={"username": "recovery_user", "password": "NewStrongPass999!"},
+    )
+    assert login_res.status_code == 200
+

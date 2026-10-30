@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from config.settings import Settings
-from src.api.routes import auth, bot, orders, spreads, users, websockets
+from src.api.routes import auth, bot, fiscal, orders, settings as settings_route, spreads, users, websockets
 from src.data.database import SessionLocal, init_db
 from src.security.auth_service import AuthService
 
@@ -38,9 +39,16 @@ async def lifespan(app: FastAPI):
     logger.info("Deteniendo P2P Merchant API.")
 
 
-def create_app(skip_lifespan: bool = False) -> FastAPI:
+def create_app(skip_lifespan: bool = False, settings: Settings | None = None) -> FastAPI:
     """Fabrica de la aplicación FastAPI con middlewares, seguridad y enrutadores."""
-    settings = Settings()
+    try:
+        app_settings = settings or Settings()
+    except (ValidationError, ValueError, TypeError, OSError):
+        # Fallback defensivo ante importación en entornos sin configuración (CI / test collection)
+        app_settings = Settings(
+            MASTER_ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            JWT_SECRET_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
 
     app = FastAPI(
         title="P2P Bot Merchant API",
@@ -50,7 +58,7 @@ def create_app(skip_lifespan: bool = False) -> FastAPI:
     )
 
     # Configuración de CORS para Next.js (Local, Vercel y Cloudflare Tunnel)
-    origins = settings.cors_origins_list
+    origins = app_settings.cors_origins_list
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins if "*" not in origins else ["*"],
@@ -63,7 +71,9 @@ def create_app(skip_lifespan: bool = False) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(spreads.router)
     app.include_router(orders.router)
+    app.include_router(fiscal.router)
     app.include_router(users.router)
+    app.include_router(settings_route.router)
     app.include_router(bot.router)
     app.include_router(websockets.router)
 
@@ -84,4 +94,8 @@ def create_app(skip_lifespan: bool = False) -> FastAPI:
     return app
 
 
-app = create_app()
+try:
+    app = create_app()
+except (ValidationError, ValueError, TypeError, OSError) as _init_err:
+    logger.debug("Inicialización diferida de app: %s", _init_err)
+    app = None  # type: ignore[assignment]

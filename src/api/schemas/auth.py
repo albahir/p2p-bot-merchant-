@@ -11,6 +11,25 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=6)
 
 
+class RegisterRequest(BaseModel):
+    """Datos para registro de una cuenta nueva."""
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8, description="Contraseña de al menos 8 caracteres")
+    telegram_id: str | None = Field(default=None, description="ID numérico de Telegram para vincular cuenta")
+
+
+class PasswordRecoveryRequest(BaseModel):
+    """Solicitud de recuperación de contraseña."""
+    username: str = Field(..., description="Nombre de usuario o ID de Telegram registrado")
+
+
+class PasswordResetRequest(BaseModel):
+    """Restablecimiento de contraseña con código de verificación."""
+    username: str = Field(...)
+    reset_code: str = Field(..., min_length=6, max_length=16, description="Código de recuperación")
+    new_password: str = Field(..., min_length=8, description="Nueva contraseña segura")
+
+
 class TelegramAuthData(BaseModel):
     """Datos recibidos del widget oficial de Telegram Login."""
     id: str | int
