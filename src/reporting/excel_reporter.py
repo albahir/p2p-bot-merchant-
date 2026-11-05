@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from src.data.models import BankVoucher, Order, WalletMovement
+from src.data.models import BankVoucher, JournalEntry, Order, WalletMovement
+from src.reporting.accounting_engine import LedgerSummary
 from src.reporting.tax_engine import TradeResult
 
 if TYPE_CHECKING:
@@ -269,6 +270,100 @@ class ExcelReporter:
             df_ventas.to_excel(writer, sheet_name="Entradas (Ventas P2P)", index=False)
             df_compras.to_excel(writer, sheet_name="Salidas (Compras P2P)", index=False)
             df_traza.to_excel(writer, sheet_name="Traza de Conciliación", index=False)
+
+        return output_path
+
+    @staticmethod
+    def generate_accounting_report(
+        journal_entries: list[JournalEntry],
+        ledger_summaries: list[LedgerSummary],
+        vouchers: list[BankVoucher],
+        output_path: str = "reporte_contable_p2p.xlsx",
+        tax_results: list[TradeResult] | None = None,
+    ) -> str:
+        """Crea el informe contable formal de 4 pestañas:
+        1. 'Libro Diario': Partida doble cronológica con hash SHA-256 encadenado.
+        2. 'Libro Mayor': Consolidación mensual con Saldo Inicial y Final.
+        3. 'Conciliación Bancaria': Comprobantes procesados y su trazabilidad.
+        4. 'Liquidación Fiscal SENIAT': Resumen tributario gravable.
+        """
+        # 1. Libro Diario
+        diario_rows = [
+            {
+                "Asiento #": e.entry_number,
+                "Fecha y Hora": e.date_time.strftime("%Y-%m-%d %H:%M:%S") if e.date_time else "-",
+                "Código Cuenta": e.account_code,
+                "Nombre de Cuenta": e.account_name,
+                "Debe (VES)": float(e.debit),
+                "Haber (VES)": float(e.credit),
+                "Referencia": e.reference,
+                "Descripción / Glosa": e.description,
+                "Orden P2P": e.order_number or "-",
+                "Hash Asiento (SHA-256)": e.entry_hash,
+            }
+            for e in journal_entries
+        ]
+        df_diario = pd.DataFrame(diario_rows)
+
+        # 2. Libro Mayor
+        mayor_rows = [
+            {
+                "Código Cuenta": s.account_code,
+                "Nombre de Cuenta": s.account_name,
+                "Período": f"{s.year}-{s.month:02d}",
+                "Saldo Inicial (VES)": s.initial_balance,
+                "Total Debe (VES)": s.total_debit,
+                "Total Haber (VES)": s.total_credit,
+                "Saldo Final (VES)": s.final_balance,
+                "N° Asientos": s.entries_count,
+            }
+            for s in ledger_summaries
+        ]
+        df_mayor = pd.DataFrame(mayor_rows)
+
+        # 3. Conciliación Bancaria
+        vouchers_rows = [
+            {
+                "ID": v.id or "-",
+                "Fecha": v.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if v.voucher_date else "-",
+                "Banco Origen": v.bank_name,
+                "Banco Destino": v.destination_bank or "-",
+                "Referencia": v.reference_number,
+                "Monto Neto (VES)": float(v.amount_ves),
+                "Comisión Bancaria (VES)": float(v.bank_fee_ves or 0.0),
+                "Total Debitado (VES)": float(v.total_debited_ves or v.amount_ves),
+                "Cédula/RIF Emisor": v.sender_id or "S/C",
+                "Teléfono": v.sender_phone or "N/A",
+                "Concepto / Motivo": v.concept or "-",
+                "Método": v.payment_method,
+                "Tipo Flujo": v.movement_type,
+                "Orden Asociada": v.associated_order_number or "-",
+                "Estado Conciliación": v.verification_status,
+                "Score (%)": float(v.reconciliation_score or 0.0),
+            }
+            for v in vouchers
+        ]
+        df_vouchers = pd.DataFrame(vouchers_rows)
+
+        # 4. Liquidación Fiscal SENIAT
+        total_ingresos = sum(e.debit for e in journal_entries if e.account_code == "1.1.01")
+        total_egresos = sum(e.credit for e in journal_entries if e.account_code == "1.1.01")
+        total_comisiones_banco = sum(e.debit for e in journal_entries if e.account_code == "5.2.01")
+
+        seniat_rows = [
+            {"Concepto Fiscal": "Base Imponible Estimada (VES)", "Monto (VES)": total_ingresos},
+            {"Concepto Fiscal": "Egresos y Compras P2P (VES)", "Monto (VES)": total_egresos},
+            {"Concepto Fiscal": "Gastos Financieros Deducibles - Comisiones Bancarias (VES)", "Monto (VES)": total_comisiones_banco},
+            {"Concepto Fiscal": "Utilidad Neta en Operaciones (VES)", "Monto (VES)": round(total_ingresos - total_egresos, 2)},
+            {"Concepto Fiscal": "Normativa Aplicable", "Monto (VES)": "Ley de ISLR / Providencia SNAT Criptoactivos"},
+        ]
+        df_seniat = pd.DataFrame(seniat_rows)
+
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            df_diario.to_excel(writer, sheet_name="Libro Diario", index=False)
+            df_mayor.to_excel(writer, sheet_name="Libro Mayor", index=False)
+            df_vouchers.to_excel(writer, sheet_name="Conciliación Bancaria", index=False)
+            df_seniat.to_excel(writer, sheet_name="Liquidación Fiscal SENIAT", index=False)
 
         return output_path
 

@@ -368,3 +368,104 @@ export async function getFiscalSummary(
   if (actual_final_balance !== undefined) query.set("actual_final_balance", actual_final_balance.toString());
   return apiRequest<FiscalSummary>(`/api/fiscal/summary?${query.toString()}`);
 }
+
+// Métodos de Contabilidad P2P (Libro Diario y Libro Mayor - SPEC-017)
+export interface JournalEntryItem {
+  id?: number | null;
+  entry_number: number;
+  date_time: string;
+  account_code: string;
+  account_name: string;
+  debit: number;
+  credit: number;
+  reference: string;
+  description: string;
+  voucher_id?: number | null;
+  order_number?: string | null;
+  entry_hash: string;
+}
+
+export interface LedgerSummaryItem {
+  account_code: string;
+  account_name: string;
+  year: number;
+  month: number;
+  initial_balance: number;
+  total_debit: number;
+  total_credit: number;
+  final_balance: number;
+  entries_count: number;
+}
+
+export interface UploadVoucherResponse {
+  voucher_id: number;
+  bank_name: string;
+  reference_number: string;
+  amount_ves: number;
+  bank_fee_ves: number;
+  payment_method: string;
+  verification_status: string;
+  matched_order_number?: string | null;
+}
+
+export async function getJournalEntries(
+  startDate?: string,
+  endDate?: string,
+  accountCode?: string
+): Promise<JournalEntryItem[]> {
+  const query = new URLSearchParams();
+  if (startDate) query.set("start_date", startDate);
+  if (endDate) query.set("end_date", endDate);
+  if (accountCode) query.set("account_code", accountCode);
+  return apiRequest<JournalEntryItem[]>(`/api/accounting/journal?${query.toString()}`);
+}
+
+export async function getLedgerSummaries(
+  year: number,
+  month: number,
+  accountCode?: string,
+  initialBalance?: number
+): Promise<LedgerSummaryItem[]> {
+  const query = new URLSearchParams();
+  query.set("year", year.toString());
+  query.set("month", month.toString());
+  if (accountCode) query.set("account_code", accountCode);
+  if (initialBalance !== undefined) query.set("initial_balance", initialBalance.toString());
+  return apiRequest<LedgerSummaryItem[]>(`/api/accounting/ledger?${query.toString()}`);
+}
+
+export function getExportAccountingExcelUrl(year: number, month: number): string {
+  const token = getToken();
+  return `${API_BASE_URL}/api/accounting/export/excel?year=${year}&month=${month}${token ? `&token=${token}` : ""}`;
+}
+
+export function getExportAccountingPdfUrl(year: number, month: number): string {
+  const token = getToken();
+  return `${API_BASE_URL}/api/accounting/export/pdf?year=${year}&month=${month}${token ? `&token=${token}` : ""}`;
+}
+
+export async function matchVoucherWithOrder(voucherId: number, orderNumber: string): Promise<any> {
+  return apiRequest(`/api/accounting/vouchers/${voucherId}/match`, {
+    method: "POST",
+    body: JSON.stringify({ order_number: orderNumber }),
+  });
+}
+
+export async function uploadVoucherFile(file: File): Promise<UploadVoucherResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE_URL}/api/accounting/vouchers/upload`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || "Error al subir comprobante");
+  }
+  return res.json();
+}

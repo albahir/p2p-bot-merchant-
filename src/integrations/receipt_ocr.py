@@ -25,13 +25,18 @@ logger = logging.getLogger("bank_receipt_ocr")
 OCR_SYSTEM_PROMPT = """Eres un asistente contable especializado en procesar comprobantes bancarios en Venezuela (Pago Móvil y Transferencias de Banco de Venezuela, Banesco, Mercantil, Provincial, Bancamiga, BNC, etc.).
 Analiza la imagen adjunta y extrae la información en un formato JSON estricto con las siguientes claves:
 {
-  "bank_name": "Nombre oficial del banco (ej. Banco de Venezuela, Banesco, Mercantil)",
+  "bank_name": "Nombre oficial del banco emisor u origen (ej. Banco de Venezuela, Banesco, Mercantil)",
+  "destination_bank": "Nombre oficial del banco destino si aparece (ej. Banesco, Banco de Venezuela)",
   "reference_number": "Número de referencia bancaria o número de confirmación",
   "amount_ves": 0.0,
+  "bank_fee_ves": 0.0,
   "sender_cedula": "Cédula o RIF del emisor si aparece (ej. V-12345678 o V12345678)",
   "sender_name": "Nombre del emisor o titular si aparece",
+  "sender_phone": "Teléfono del emisor o receptor si aparece (ej. 0414-1234567)",
+  "concept": "Concepto, motivo o descripción de la transferencia o pago móvil",
   "date_time": "Fecha y hora del pago (ej. YYYY-MM-DD HH:MM:SS)",
-  "payment_method": "PAGO_MOVIL o TRANSFERENCIA"
+  "payment_method": "PAGO_MOVIL o TRANSFERENCIA",
+  "movement_type": "DEBIT (si es envío/débito) o CREDIT (si es recepción/crédito)"
 }
 Si algún dato no aparece claramente en el comprobante, déjalo como null o cadena vacía. Solo responde con el bloque JSON."""
 
@@ -45,6 +50,11 @@ class ReceiptExtractionResult:
     sender_name: str | None = None
     date_time: str | None = None
     payment_method: str = "PAGO_MOVIL"
+    destination_bank: str | None = None
+    sender_phone: str | None = None
+    concept: str | None = None
+    bank_fee_ves: float = 0.0
+    movement_type: str = "DEBIT"
     raw_text: str | None = None
     is_valid: bool = False
     error_message: str | None = None
@@ -134,6 +144,24 @@ class BankReceiptOCR:
                             amount_ves = float(amount_raw) if amount_raw is not None else 0.0
                             ref_num = str(parsed.get("reference_number") or "").strip()
                             bank_name = str(parsed.get("bank_name") or "Banco Desconocido").strip()
+                            dest_bank_raw = parsed.get("destination_bank")
+                            destination_bank = str(dest_bank_raw).strip() if dest_bank_raw else None
+                            concept = str(parsed.get("concept") or "").strip() or None
+                            phone_raw = parsed.get("sender_phone") or parsed.get("phone_number")
+                            sender_phone = str(phone_raw).strip() if phone_raw else None
+                            payment_method = str(parsed.get("payment_method") or "PAGO_MOVIL").upper()
+                            movement_type = str(parsed.get("movement_type") or "DEBIT").upper()
+
+                            fee_raw = parsed.get("bank_fee_ves")
+                            bank_fee = float(fee_raw) if fee_raw is not None else 0.0
+
+                            if bank_fee <= 0.0 and movement_type == "DEBIT" and amount_ves > 0:
+                                if destination_bank and destination_bank.lower() != bank_name.lower():
+                                    bank_fee = round(amount_ves * 0.003, 2)
+                                else:
+                                    bank_fee = 0.0
+                            elif movement_type == "CREDIT":
+                                bank_fee = 0.0
 
                             return ReceiptExtractionResult(
                                 bank_name=bank_name,
@@ -142,7 +170,12 @@ class BankReceiptOCR:
                                 sender_cedula=parsed.get("sender_cedula"),
                                 sender_name=parsed.get("sender_name"),
                                 date_time=parsed.get("date_time"),
-                                payment_method=str(parsed.get("payment_method") or "PAGO_MOVIL").upper(),
+                                payment_method=payment_method,
+                                destination_bank=destination_bank,
+                                sender_phone=sender_phone,
+                                concept=concept,
+                                bank_fee_ves=bank_fee,
+                                movement_type=movement_type,
                                 raw_text=raw_text,
                                 is_valid=bool(ref_num and amount_ves > 0),
                             )
@@ -225,13 +258,25 @@ class BankReceiptOCR:
             except ValueError:
                 voucher_date = datetime.now(UTC)
 
+        total_debited = (
+            round(extracted.amount_ves + extracted.bank_fee_ves, 2)
+            if extracted.movement_type == "DEBIT"
+            else extracted.amount_ves
+        )
+
         voucher = BankVoucher(
             bank_name=extracted.bank_name or "Banco Desconocido",
+            destination_bank=extracted.destination_bank,
             reference_number=extracted.reference_number or f"REF-{int(datetime.now(UTC).timestamp())}",
             amount_ves=extracted.amount_ves,
+            bank_fee_ves=extracted.bank_fee_ves,
+            total_debited_ves=total_debited,
             sender_id=extracted.sender_cedula,
             sender_name=extracted.sender_name,
+            sender_phone=extracted.sender_phone,
+            concept=extracted.concept,
             payment_method=extracted.payment_method,
+            movement_type=extracted.movement_type,
             associated_order_number=matched_order.order_number if matched_order else None,
             verification_status="MATCHED" if matched_order else "UNMATCHED",
             voucher_date=voucher_date or datetime.now(UTC),

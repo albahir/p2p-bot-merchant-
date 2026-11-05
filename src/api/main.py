@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from config.settings import Settings
-from src.api.routes import auth, bot, fiscal, orders, spreads, users, websockets
+from src.api.routes import accounting, auth, bot, fiscal, orders, spreads, users, websockets
 from src.api.routes import settings as settings_route
 from src.data.database import SessionLocal, init_db
 from src.security.auth_service import AuthService
@@ -73,6 +73,7 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
     app.include_router(spreads.router)
     app.include_router(orders.router)
     app.include_router(fiscal.router)
+    app.include_router(accounting.router)
     app.include_router(users.router)
     app.include_router(settings_route.router)
     app.include_router(bot.router)

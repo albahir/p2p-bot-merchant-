@@ -69,12 +69,21 @@ export default function FiscalReconciliationPage() {
     <div className="w-full max-w-7xl mx-auto space-y-5 font-sans pb-16">
       {/* Barra de Navegación y Retorno */}
       <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800 text-xs">
-        <a
-          href="/"
-          className="inline-flex items-center space-x-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors"
-        >
-          <span>← Volver a la Terminal Principal</span>
-        </a>
+        <div className="flex items-center space-x-4">
+          <a
+            href="/"
+            className="inline-flex items-center space-x-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors"
+          >
+            <span>← Terminal Principal</span>
+          </a>
+          <span className="text-slate-400 dark:text-slate-600">|</span>
+          <a
+            href="/accounting"
+            className="inline-flex items-center space-x-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors"
+          >
+            <span>Libro Diario & Mayor (Partida Doble) →</span>
+          </a>
+        </div>
         <div className="flex items-center space-x-2 text-slate-500 font-mono text-[11px]">
           <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
           <span>Cumplimiento SENIAT // Ecuación de 6 Piezas</span>

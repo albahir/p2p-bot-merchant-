@@ -199,6 +199,9 @@ export default function CryptoAppDashboard() {
           <a href="/fiscal" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
             Fiscal SENIAT
           </a>
+          <a href="/accounting" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
+            Libro Diario
+          </a>
           {user?.role === "ADMIN" && (
             <a href="/admin" className="px-2.5 py-1 rounded-lg text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
               Usuarios

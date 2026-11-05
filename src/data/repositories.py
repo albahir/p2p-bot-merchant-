@@ -1,14 +1,17 @@
 """Repositorios de datos siguiendo el patrón Repository para acceso seguro y desacoplado."""
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import cast
 
 from sqlalchemy.orm import Session
 
 from src.data.models import (
     BankVoucher,
+    BCVRateHistory,
     EncryptedSecret,
     FiscalPeriodSnapshot,
     IdentityCache,
+    JournalEntry,
     Order,
     SecurityEvent,
     User,
@@ -189,6 +192,22 @@ class BankVoucherRepository:
             self.db.refresh(voucher)
             return voucher
         return None
+
+    def get_by_id(self, voucher_id: int) -> BankVoucher | None:
+        return self.db.query(BankVoucher).filter(BankVoucher.id == voucher_id).first()
+
+    def update(self, voucher: BankVoucher) -> BankVoucher:
+        self.db.commit()
+        self.db.refresh(voucher)
+        return voucher
+
+    def list_all(self, limit: int = 500) -> list[BankVoucher]:
+        return (
+            self.db.query(BankVoucher)
+            .order_by(BankVoucher.created_at.desc())
+            .limit(limit)
+            .all()
+        )
 
 
 class FiscalSnapshotRepository:
@@ -375,5 +394,108 @@ class IdentityRepository:
 
     def count(self) -> int:
         return self.db.query(IdentityCache).count()
+
+
+class BCVHistoryRepository:
+    """Acceso persistente y consulta de tasas oficiales del BCV indexadas por Fecha Valor."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_rate_by_date(self, fecha_valor: date) -> BCVRateHistory | None:
+        """Obtiene la tasa oficial registrada para una Fecha Valor específica."""
+        return (
+            self.db.query(BCVRateHistory)
+            .filter(BCVRateHistory.fecha_valor == fecha_valor)
+            .first()
+        )
+
+    def upsert_rate(self, rate_item: BCVRateHistory) -> BCVRateHistory:
+        """Inserta o actualiza la tasa oficial para la fecha valor dada (idempotente)."""
+        existing = self.get_rate_by_date(cast(date, rate_item.fecha_valor))
+        if existing:
+            existing.usd_rate = rate_item.usd_rate  # type: ignore[assignment]
+            existing.eur_rate = rate_item.eur_rate  # type: ignore[assignment]
+            existing.source = rate_item.source  # type: ignore[assignment]
+            self.db.commit()
+            self.db.refresh(existing)
+            return existing
+
+        self.db.add(rate_item)
+        self.db.commit()
+        self.db.refresh(rate_item)
+        return rate_item
+
+    def list_rates(self, start_date: date, end_date: date) -> list[BCVRateHistory]:
+        """Lista las tasas registradas en un rango de fechas ordenadas cronológicamente."""
+        return (
+            self.db.query(BCVRateHistory)
+            .filter(
+                BCVRateHistory.fecha_valor >= start_date,  # type: ignore[arg-type]
+                BCVRateHistory.fecha_valor <= end_date,  # type: ignore[arg-type]
+            )
+            .order_by(BCVRateHistory.fecha_valor.asc())
+            .all()
+        )
+
+    def get_latest_rate(self) -> BCVRateHistory | None:
+        """Retorna la última tasa registrada en el sistema."""
+        return (
+            self.db.query(BCVRateHistory)
+            .order_by(BCVRateHistory.fecha_valor.desc())
+            .first()
+        )
+
+
+class JournalEntryRepository:
+    """Gestor de asientos contables del Libro Diario con trazabilidad y encadenamiento criptográfico."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_entry(self, entry: JournalEntry) -> JournalEntry:
+        """Persiste un asiento contable en el Libro Diario."""
+        self.db.add(entry)
+        self.db.commit()
+        self.db.refresh(entry)
+        return entry
+
+    def get_next_entry_number(self) -> int:
+        """Retorna el siguiente número consecutivo de asiento."""
+        last = self.get_last_entry()
+        return int(last.entry_number + 1) if last else 1
+
+    def get_last_entry(self) -> JournalEntry | None:
+        """Retorna el último asiento asentado en el Libro Diario."""
+        return (
+            self.db.query(JournalEntry)
+            .order_by(JournalEntry.entry_number.desc())
+            .first()
+        )
+
+    def list_entries(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        account_code: str | None = None,
+    ) -> list[JournalEntry]:
+        """Consulta asientos del Libro Diario dentro de un rango temporal opcional."""
+        query = self.db.query(JournalEntry)
+        if start_date:
+            query = query.filter(JournalEntry.date_time >= start_date)  # type: ignore[arg-type]
+        if end_date:
+            query = query.filter(JournalEntry.date_time <= end_date)  # type: ignore[arg-type]
+        if account_code:
+            query = query.filter(JournalEntry.account_code == account_code)  # type: ignore[arg-type]
+        return query.order_by(JournalEntry.entry_number.asc(), JournalEntry.id.asc()).all()
+
+    def get_by_reference(self, reference: str) -> list[JournalEntry]:
+        """Busca asientos asociados a una referencia bancaria específica."""
+        return (
+            self.db.query(JournalEntry)
+            .filter(JournalEntry.reference == reference)
+            .all()
+        )
+
 
 

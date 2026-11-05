@@ -58,6 +58,18 @@
   - `BankReceiptOCR`: Extracción inteligente multimodal con Gemini Vision aprovechando `AIKeyPool` (3 claves API con rotación round-robin) y auto-matching con órdenes P2P ($\pm 24\text{ h}$, tolerancia $\pm 0.05\text{ VES}$).
   - `FiscalReconciler`: ejecuta la ecuación patrimonial de 6 piezas ($\text{Saldo Inicial} + \text{Entradas} - \text{Salidas} - \text{Comisiones} = \text{Saldo Final Teórico}$), detecta mermas/discrepancias e integra `FIFOCostMethod` extendido con inventario inicial valorado a tasa BCV.
   - Exportación multi-pestaña auditada en `ExcelReporter` y `SheetsExporter`: genera las 4 pestañas *Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*.
+
+- [x] **Paquete 017 (Sistema Contable P2P: Libro Diario, Libro Mayor, Conciliación Multi-Factorial y Régimen Histórico BCV)**:
+  - Capa de Normalización y Sanitización de Datos (`src/reporting/normalizers.py`): Limpieza robusta de texto sucio, bancos venezolanos, cédulas/RIFs, teléfonos, números de referencia y análisis monetario tolerante a comas/puntos decimales.
+  - Modelos y Repositorios Contables (`src/data/models.py`, `src/data/repositories.py`): Enriquecimiento de `BankVoucher` (concepto, teléfono, comisiones bancarias, tipo de movimiento, score), `Order` (`completed_at`, `payment_method`), nuevo `BCVRateHistory` y `JournalEntry` con hash encadenado SHA-256 inmutable.
+  - Motor de Tasas BCV con Fecha Valor y Backfill Histórico (`src/reporting/bcv_history_service.py`): Control estricto de hora local venezolana (UTC-4), tasa de fin de semana al viernes previo, bloqueo de activación de la tasa vespertina del día siguiente antes de las 00:00:00, y auto-backfill masivo para historiales de 6 meses de Binance donde la tasa viene vacía.
+  - OCR Adaptativo Multimodal (`src/integrations/receipt_ocr.py`): Clasificación automática de Pago Móvil vs Transferencia bancaria, extracción de concepto y teléfono, y auto-cálculo de comisión bancaria (0% mismo banco, 0.30% interbancario emitido en compras, 0% recibido en ventas).
+  - Motor de Conciliación Multi-Factorial P2P (`src/reporting/reconciliation_engine.py`): Filtros duros de flujo (`DEBIT == BUY`, `CREDIT == SELL`) y ventanas horarias (30 min Pago Móvil, 48 h Transferencias), matriz de scoring 0-100% (monto exacto + céntimos, banco, referencia en chat, contraparte) y clasificación semáforo (Verde $\ge 90\%$, Amarillo $60-89\%$, Gris $<60\%$).
+  - Motor Contable de Partida Doble (`src/reporting/accounting_engine.py`): Generación de asientos contables cronológicos donde `Total DEBE == Total HABER`, hash criptográfico SHA-256 encadenado y consolidación mensual de Libro Mayor con Saldo Inicial y Final para Banco Nacional VES (`1.1.01`), Activos USDT (`1.1.05`) y Comisiones (`5.2.01`).
+  - Exportadores Contables (`src/reporting/excel_reporter.py`, `src/reporting/pdf_reporter.py`, `src/reporting/sheets_exporter.py`): Generación de Excel multi-pestaña (Libro Diario, Libro Mayor, Conciliación Bancaria, Liquidación SENIAT), PDF formal 1.4 con membrete fiscal SENIAT sin librerías externas, y sincronización en vivo con Google Sheets.
+  - API REST FastAPI (`src/api/routes/accounting.py`, `src/api/main.py`): Rutas `GET /journal`, `GET /ledger`, `GET /export/excel`, `GET /export/pdf`, `POST /vouchers/{id}/match`, `POST /vouchers/upload`.
+  - Frontend Next.js 14 (`frontend/src/app/accounting/page.tsx`): Vista interactiva con selector de mes, tarjetas de saldos, tabla de Libro Diario con filtros y verificación de balance, visor de Libro Mayor, zona de arrastre (Dropzone) de comprobantes y enlaces de exportación.
+  - Suite de pruebas unitarias e integración (31 tests en verde, 100% cobertura de SPEC-017, 0 errores de TypeScript, 0 errores de Ruff y Mypy).
   - Panel interactivo en Streamlit (`fiscal_reconstruction_view.py`) con subida drag-and-drop de archivos de Binance y fotos de comprobantes bancarios, tarjetas de 6 piezas, liquidación ISLR y descarga directa.
   - Integración con Telegram: comando `/conciliacion` y soporte para fotos de comprobantes bancarios vía OCR en tiempo real.
   - Suite completa de 84 tests pasando al 100% (64 previos + 20 nuevos).
@@ -603,6 +615,31 @@
       - `pytest`: **167/167 tests pasando al 100%**.
       - `mypy src/`: **0 errores en 69 archivos**.
       - `ruff check .`: **0 advertencias**.
+
+52. **Sistema Contable P2P: Libro Diario, Libro Mayor, Conciliación Probatoria y Régimen de Fecha Valor BCV (ADR 052 / SPEC-017)**:
+    - **Contexto**:
+      - En Venezuela, Binance P2P opera con seudónimos comerciales y no proporciona la cédula de identidad, el RIF ni el nombre legal de las contrapartes. Además, en los extractos de 6 meses exportados desde Binance, la columna de tasa oficial del BCV viene vacía.
+      - En las instituciones bancarias y ante el SENIAT, el comprobante bancario (capture de Pago Móvil o Transferencia) es el soporte probatorio legal primario.
+      - Los comprobantes bancarios tienen naturalezas distintas: **Pago Móvil** incluye cédula y teléfono, mientras que las **Transferencias** entre bancos no reflejan cédula ni teléfono, requiriendo conciliación por referencia, céntimos impares y ventana horaria.
+      - La publicación vespertina de tasas del BCV (3:00 PM a 6:00 PM UTC-4) tiene *Fecha Valor* del día hábil siguiente; aplicarla antes de la medianoche altera indebidamente los costos y márgenes de las operaciones del día en curso.
+    - **Decisiones de Arquitectura**:
+      1. **Capa de Normalización Inmutable (`src/reporting/normalizers.py`)**: Sanitización estricta de nombres bancarios oficiales, cédulas con prefijo oficial (`V-`, `E-`, `J-`, o `S/C`), teléfonos venezolanos (`04XX-XXXXXXX` o `N/A`), y extracción numérica de montos monetarios tolerante a comas y puntos.
+      2. **Régimen Estricto de Fecha Valor BCV & Backfill Histórico (`src/reporting/bcv_history_service.py`)**: Conversión a hora local venezolana (UTC-4), asignación estricta de tasa según la fecha valor efectiva (fines de semana al viernes previo, y bloqueo de activación de la tasa vespertina del día siguiente antes de las 00:00:00). Auto-población masiva retroactiva para órdenes históricas de Binance con tasa vacía (`bcv_rate <= 0`).
+      3. **OCR Multimodal Inteligente y Clasificación Bancaria (`src/integrations/receipt_ocr.py`)**: Distinción automática de Pago Móvil vs Transferencia, extracción de concepto y teléfono, y cálculo automático de comisiones: 0% en mismo banco, 0.30% en interbancario emitido (compras USDT), y 0% en transferencias recibidas (ventas USDT).
+      4. **Motor de Conciliación Multi-Factorial P2P (`src/reporting/reconciliation_engine.py`)**: Filtros excluyentes fail-closed (dirección de fondos: `DEBIT == BUY`, `CREDIT == SELL`; ventana de 30 min para Pago Móvil y 48h para Transferencias). Matriz de scoring (monto exacto 30% + 5% céntimos, banco 30%, referencia 40%, titular 15%) y clasificación por semáforo (Verde $\ge 90\%$ auto-match, Amarillo $60-89\%$ sugerido, Gris $<60\%$ no emparejado).
+      5. **Motor Contable de Partida Doble (`src/reporting/accounting_engine.py`)**: Generación de asientos contables donde `Total DEBE == Total HABER`, con encadenamiento criptográfico SHA-256 (`prev_hash -> entry_hash`). Consolidación mensual del Libro Mayor para Banco Nacional VES (`1.1.01`), Activos USDT (`1.1.05`) y Comisiones (`5.2.01`), asegurando que el Saldo Final del mes $M$ sea idéntico al Saldo Inicial del mes $M+1$.
+      6. **Exportadores Contables Integrales**:
+         - Excel (.xlsx) con 4 pestañas: *Libro Diario*, *Libro Mayor*, *Conciliación Bancaria*, *Liquidación Fiscal SENIAT*.
+         - PDF 1.4 legal nativo en Python puro (`src/reporting/pdf_reporter.py`) con membrete fiscal SENIAT y cuadros contables oficiales sin dependencias C complejas.
+         - Sincronización en vivo a Google Sheets (`src/reporting/sheets_exporter.py`).
+      7. **Endpoints REST FastAPI (`src/api/routes/accounting.py`) & Frontend Next.js 14 (`frontend/src/app/accounting/page.tsx`)**:
+         - Rutas REST `/journal`, `/ledger`, `/export/excel`, `/export/pdf`, `/vouchers/upload`, `/vouchers/{id}/match`.
+         - Vista interactiva Next.js 14 con selector de período, tarjetas de saldos, visor de Libro Mayor, tabla interactiva de Libro Diario con filtros y verificación de cuadre, y Dropzone para arrastre de comprobantes.
+    - **Verificación**:
+      - 31 pruebas unitarias e integración de SPEC-017 pasando al 100%.
+      - 0 errores de TypeScript (`tsc -p frontend/tsconfig.json --noEmit`).
+      - 0 errores en `mypy` (12 archivos fuente).
+      - 0 advertencias de `ruff check`.
 
 ---
 
