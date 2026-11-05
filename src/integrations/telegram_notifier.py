@@ -834,25 +834,41 @@ class TelegramNotifier:
             db.close()
 
     def _handle_sheets_link(self, user_id: int | str | None, command: str) -> str:
-
         """Permite al trader vincular su Google Sheet personal con /sheets_id <enlace_o_id>."""
-
+        import os
         import re
 
+        from config.settings import Settings
         from src.data.database import SessionLocal
         from src.data.repositories import UserRepository
         from src.reporting.sheets_exporter import SheetsExporter
 
+        creds_json: str | None = None
+        creds_file: str = "config/google_credentials.json"
+        try:
+            settings = Settings()
+            creds_json = settings.GOOGLE_SERVICE_ACCOUNT_JSON
+            creds_file = settings.GOOGLE_CREDENTIALS_FILE
+        except (ValueError, KeyError, OSError, RuntimeError):
+            creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+            creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "config/google_credentials.json")
+
+        exporter = SheetsExporter(credentials_path=creds_file, credentials_json=creds_json)
+        system_email = exporter.client_email or "bot-p2p@iam.gserviceaccount.com"
+
         parts = command.strip().split(maxsplit=1)
         if len(parts) < 2:
             return (
-                "⚠️ *Uso del comando*:\n\n"
-                "`/sheets_id <ID_o_Enlace_de_Google_Sheets>`\n\n"
-                "📌 *Instrucciones*:\n"
-                "1. Abre [sheets.new](https://sheets.new) en tu navegador.\n"
-                "2. Pulsa en **Compartir** y otorga permisos de **Editor** al correo del sistema.\n"
-                "3. Copia el enlace o el ID y envíalo aquí: `/sheets_id https://docs.google.com/spreadsheets/d/...`"
+                "📊 *Vincular mi Google Sheet Personal*\n\n"
+                "Sigue estos 3 pasos rápidos:\n"
+                "1️⃣ Crea una hoja en blanco en [sheets.new](https://sheets.new).\n"
+                "2️⃣ Pulsa el botón **Compartir** y añade este correo como **Editor** (tócalo para copiar):\n"
+                f"`{system_email}`\n"
+                "3️⃣ Envía el comando con el enlace de tu hoja:\n"
+                "`/sheets_id https://docs.google.com/spreadsheets/d/...`\n\n"
+                "💡 *¿Prefieres 1 Clic?* También puedes vincularte con tu cuenta de Google Drive desde tu panel en la Web."
             )
+
 
         raw_input = parts[1].strip()
         match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", raw_input)
@@ -864,8 +880,8 @@ class TelegramNotifier:
             user = repo.get_by_telegram_id(str(user_id)) if user_id else None
             if not user:
                 return (
-                    f"⛔ Tu usuario de Telegram (`{user_id}`) no está vinculado a una cuenta de Trader en el sistema.\n"
-                    "Inicia sesión en la plataforma Web y vincula tu Telegram ID primero."
+                    f"⛔ Tu Telegram ID (`{user_id}`) no está vinculado a una cuenta de Trader.\n\n"
+                    "👉 Inicia sesión en la plataforma Web y coloca tu Telegram ID en tu Perfil."
                 )
 
             user.google_sheet_id = sheet_id  # type: ignore[assignment]
@@ -874,12 +890,13 @@ class TelegramNotifier:
 
             sheet_url = SheetsExporter.get_sheet_url(sheet_id)
             return (
-                f"✅ *Google Sheet Personal Vinculado Exitosamente*\n\n"
-                f"• Usuario: *{user.username}*\n"
+                f"✅ *Google Sheet Vinculado Exitosamente*\n\n"
+                f"• Trader: *{user.username}*\n"
                 f"• Sheet ID: `{sheet_id}`\n\n"
                 f"Cada comprobante que envíes por foto se registrará automáticamente en tu Libro Diario.\n\n"
                 f"🔗 [Abrir mi Google Sheet]({sheet_url})"
             )
+
         except (SQLAlchemyError, OSError, ValueError, TypeError, KeyError) as e:
             logger.error(f"Error vinculando Google Sheet por Telegram: {e}")
             return f"❌ Error guardando el ID del documento: {e}"
@@ -923,10 +940,17 @@ class TelegramNotifier:
                     sheet_id = u.google_sheet_id
 
             if not sheet_id:
+                exporter = SheetsExporter(credentials_path=creds_file, credentials_json=creds_json)
+                system_email = exporter.client_email or "bot-p2p@iam.gserviceaccount.com"
                 return (
-                    "⚠️ *Google Sheets no está configurado*.\n\n"
-                    "Para vincular tu propia hoja envía:\n`/sheets_id <enlace_de_tu_hoja>`"
+                    "⚠️ *Aún no has vinculado tu Google Sheet personal*\n\n"
+                    "Para vincularlo en 1 minuto:\n"
+                    "1️⃣ Abre [sheets.new](https://sheets.new) y pulsa **Compartir** con:\n"
+                    f"`{system_email}`\n"
+                    "2️⃣ Envía el comando con el enlace:\n"
+                    "`/sheets_id https://docs.google.com/spreadsheets/d/...`"
                 )
+
 
             repo = OrderRepository(db)
             completed_orders = repo.list_completed()
@@ -1027,13 +1051,12 @@ class TelegramNotifier:
             info = service.lookup(nationality=nat, cedula=num)
             if info.is_valid:
                 return (
-                    f"👤 *Identidad Verificada y Guardada*:\n\n"
+                    f"👤 *Identidad Verificada*:\n\n"
                     f"• Cédula: `{info.nationality}-{info.cedula}`\n"
-                    f"• Titular: *{info.full_name}*\n"
-                    f"• Fuente: `{info.source}`\n"
-                    f"• Estado: 💾 Almacenada permanentemente en base de datos"
+                    f"• Titular: *{info.full_name}*"
                 )
             else:
+
                 return f"❌ No se encontró registro para `{nat}-{num}`: {info.error_message}"
         finally:
             db.close()
@@ -1050,10 +1073,11 @@ class TelegramNotifier:
             if not records:
                 return "ℹ️ Aún no hay cédulas consultadas o guardadas en la base de datos."
 
-            lines = [f"📋 *Directorio de Cédulas en Base de Datos* ({len(records)} registros):\n"]
+            lines = [f"📋 *Directorio de Cédulas Guardadas* ({len(records)}):\n"]
             for r in records:
                 date_str = r.created_at.strftime("%Y-%m-%d") if r.created_at else "-"
-                lines.append(f"• `{r.nationality}-{r.cedula}`: *{r.full_name}* (`{r.source}` - {date_str})")
+                lines.append(f"• `{r.nationality}-{r.cedula}`: *{r.full_name}* ({date_str})")
+
             lines.append("\n💡 Consulta una nueva cédula con `/cedula V12345678`.")
             return "\n".join(lines)
         except (SQLAlchemyError, RuntimeError, OSError) as e:
