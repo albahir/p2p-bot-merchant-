@@ -38,3 +38,20 @@ class VerifyBinanceResponse(BaseModel):
     is_weight_safe: bool
     server_time_utc: datetime | None = None
     message: str
+
+
+class GoogleSheetsConfigResponse(BaseModel):
+    """Configuración actual de sincronización con Google Sheets para el usuario."""
+    google_sheet_id: str | None = None
+    google_sheet_url: str | None = None
+    google_auth_type: str = "SERVICE_ACCOUNT"  # SERVICE_ACCOUNT | OAUTH2
+    service_account_email: str | None = None
+    is_connected: bool = False
+    message: str = ""
+
+
+class UpdateGoogleSheetsConfigRequest(BaseModel):
+    """Solicitud para actualizar el ID de la hoja o método de sincronización."""
+    google_sheet_id: str | None = Field(None, description="ID o URL completa del Google Sheet")
+    google_auth_type: Literal["SERVICE_ACCOUNT", "OAUTH2"] = "SERVICE_ACCOUNT"
+

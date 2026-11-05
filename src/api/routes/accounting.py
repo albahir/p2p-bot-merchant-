@@ -56,7 +56,75 @@ class MatchVoucherRequest(BaseModel):
     order_number: str = Field(..., description="Número de orden P2P a vincular con el comprobante")
 
 
+class BankBalanceItemResponse(BaseModel):
+    bank_name: str
+    initial_ves: float
+    inflows_ves: float
+    outflows_ves: float
+    theoretical_ves: float
+
+
+class LiveBalanceResponse(BaseModel):
+    year: int
+    month: int
+    initial_usdt: float
+    inflow_usdt: float
+    outflow_usdt: float
+    theoretical_usdt: float
+    total_initial_ves: float
+    total_inflows_ves: float
+    total_outflows_ves: float
+    total_theoretical_ves: float
+    bank_breakdown: list[BankBalanceItemResponse]
+
+
+
+@router.get("/balances/live", response_model=LiveBalanceResponse)
+def get_live_balance(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    year: Annotated[int, Query()] = 2026,
+    month: Annotated[int, Query()] = 11,
+    initial_usdt: Annotated[float, Query()] = 0.0,
+    initial_ves: Annotated[float, Query()] = 0.0,
+) -> LiveBalanceResponse:
+    """Calcula el saldo teórico en tiempo real (Inflow - Outflow) sin forzar un saldo final manual."""
+    engine = AccountingEngine(db=db)
+    summary = engine.get_live_theoretical_balance(
+        year=year,
+        month=month,
+        initial_balances={
+            "crypto_usdt": initial_usdt,
+            "total_ves": initial_ves,
+        },
+    )
+
+    return LiveBalanceResponse(
+        year=summary.year,
+        month=summary.month,
+        initial_usdt=summary.initial_usdt,
+        inflow_usdt=summary.inflow_usdt,
+        outflow_usdt=summary.outflow_usdt,
+        theoretical_usdt=summary.theoretical_usdt,
+        total_initial_ves=summary.total_initial_ves,
+        total_inflows_ves=summary.total_inflows_ves,
+        total_outflows_ves=summary.total_outflows_ves,
+        total_theoretical_ves=summary.total_theoretical_ves,
+        bank_breakdown=[
+            BankBalanceItemResponse(
+                bank_name=b.bank_name,
+                initial_ves=b.initial_ves,
+                inflows_ves=b.inflows_ves,
+                outflows_ves=b.outflows_ves,
+                theoretical_ves=b.theoretical_ves,
+            )
+            for b in summary.bank_breakdown
+        ],
+    )
+
+
 @router.get("/journal", response_model=list[JournalEntryResponse])
+
 def get_journal_entries(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_trader)],
@@ -264,7 +332,24 @@ def match_voucher_with_order(
     }
 
 
+@router.post("/vouchers/reconcile-orphans")
+def reconcile_orphan_vouchers_endpoint(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    tolerance_hours: Annotated[int, Query()] = 48,
+) -> dict[str, Any]:
+    """Auto-concilia en lote comprobantes rezagados o huérfanos con órdenes de Binance."""
+    ocr = BankReceiptOCR()
+    count = ocr.reconcile_orphan_vouchers(db=db, tolerance_hours=tolerance_hours)
+    return {
+        "status": "SUCCESS",
+        "reconciled_count": count,
+        "message": f"Se auto-conciliaron {count} comprobantes huérfanos exitosamente.",
+    }
+
+
 @router.post("/vouchers/upload")
+
 async def upload_voucher(
     file: Annotated[UploadFile, File()],
     db: Annotated[Session, Depends(get_db)] = None,  # type: ignore[assignment]
@@ -290,7 +375,42 @@ async def upload_voucher(
         engine = AccountingEngine(db=db)
         engine.record_p2p_trade(order=matched_order, voucher=voucher)
 
+
+    # Si el usuario tiene una hoja personal de Google Sheets vinculada, registrar la fila
+    user_sheet_id = getattr(current_user, "google_sheet_id", None)
+    if user_sheet_id:
+        try:
+            from config.settings import Settings
+            from src.reporting.sheets_exporter import SheetsExporter
+
+            app_settings = Settings()
+            exporter = SheetsExporter(
+                credentials_path=app_settings.GOOGLE_CREDENTIALS_FILE,
+                credentials_json=app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+            )
+            dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
+            exporter.append_voucher_entry(
+                sheet_id=user_sheet_id,
+                date_time_str=dt_str,
+                bank_name=voucher.bank_name,
+                reference_number=voucher.reference_number,
+                amount_ves=voucher.amount_ves,
+                sender_id=voucher.sender_id,
+                sender_name=voucher.sender_name,
+                payment_method=voucher.payment_method,
+                order_number=matched_order.order_number if matched_order else None,
+                status=voucher.verification_status,
+                bank_fee_ves=voucher.bank_fee_ves,
+                concept=voucher.concept,
+            )
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            # Comportamiento fail-safe: no tumbar la subida si Google Sheets falla
+            import logging
+            logging.getLogger("accounting_route").warning(f"Error sincronizando comprobante a Google Sheet de usuario: {e}")
+
+
     return {
+
         "voucher_id": voucher.id,
         "bank_name": voucher.bank_name,
         "reference_number": voucher.reference_number,

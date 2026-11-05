@@ -13,10 +13,13 @@ from config.settings import Settings
 from src.api.deps import get_db, get_settings, require_admin, require_authenticated
 from src.api.schemas.settings import (
     BinanceStatusResponse,
+    GoogleSheetsConfigResponse,
     SaveBinanceKeysRequest,
+    UpdateGoogleSheetsConfigRequest,
     VerifyBinanceResponse,
 )
 from src.data.models import User
+from src.reporting.sheets_exporter import SheetsExporter
 from src.security.api_key_manager import ApiKeyManager
 
 logger = logging.getLogger("settings_route")
@@ -209,3 +212,74 @@ def verify_binance_connection(
             server_time_utc=None,
             message=f"Error al verificar conexión con Binance: {exc}",
         )
+
+
+def _extract_sheet_id(raw_input: str | None) -> str | None:
+    """Extrae el Sheet ID ya sea que el usuario haya pegado el ID o la URL completa de Google Sheets."""
+    if not raw_input:
+        return None
+    cleaned = raw_input.strip()
+    import re
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", cleaned)
+    if match:
+        return match.group(1)
+    return cleaned
+
+
+@router.get("/sheets", response_model=GoogleSheetsConfigResponse)
+def get_user_sheets_config(
+    current_user: Annotated[User, Depends(require_authenticated)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> GoogleSheetsConfigResponse:
+    """Retorna la configuración de Google Sheets personal del usuario autenticado."""
+    exporter = SheetsExporter(
+        credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
+        credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+    )
+    user_sheet_id = current_user.google_sheet_id or settings.GOOGLE_SHEET_ID
+    is_connected = bool(user_sheet_id)
+    sheet_url = SheetsExporter.get_sheet_url(user_sheet_id) if user_sheet_id else None
+
+    return GoogleSheetsConfigResponse(
+        google_sheet_id=user_sheet_id,
+        google_sheet_url=sheet_url,
+        google_auth_type=current_user.google_auth_type or "SERVICE_ACCOUNT",
+        service_account_email=exporter.client_email,
+        is_connected=is_connected,
+        message=(
+            "Google Sheets sincronizado y listo para recibir asientos."
+            if is_connected
+            else "No has vinculado tu Google Sheet personal todavía."
+        ),
+    )
+
+
+@router.post("/sheets", response_model=GoogleSheetsConfigResponse)
+def update_user_sheets_config(
+    payload: UpdateGoogleSheetsConfigRequest,
+    current_user: Annotated[User, Depends(require_authenticated)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GoogleSheetsConfigResponse:
+    """Actualiza la hoja personal de Google Sheets o método de vinculación para el usuario."""
+    sheet_id = _extract_sheet_id(payload.google_sheet_id)
+    current_user.google_sheet_id = sheet_id  # type: ignore[assignment]
+    current_user.google_auth_type = payload.google_auth_type  # type: ignore[assignment]
+    db.commit()
+    db.refresh(current_user)
+
+    exporter = SheetsExporter(
+        credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
+        credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+    )
+    sheet_url = SheetsExporter.get_sheet_url(sheet_id) if sheet_id else None
+
+    return GoogleSheetsConfigResponse(
+        google_sheet_id=sheet_id,
+        google_sheet_url=sheet_url,
+        google_auth_type=current_user.google_auth_type or "SERVICE_ACCOUNT",
+        service_account_email=exporter.client_email,
+        is_connected=bool(sheet_id),
+        message="Configuración de Google Sheets guardada exitosamente.",
+    )
+

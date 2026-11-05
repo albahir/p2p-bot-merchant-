@@ -305,6 +305,64 @@ class BankReceiptOCR:
 
         return saved_voucher, matched_order
 
+    def reconcile_orphan_vouchers(
+        self,
+        db: Session,
+        tolerance_hours: int = 48,
+    ) -> int:
+        """Busca comprobantes UNMATCHED y los empareja con órdenes existentes dentro de una ventana temporal."""
+        voucher_repo = BankVoucherRepository(db)
+        order_repo = OrderRepository(db)
+
+        unmatched_vouchers = (
+            db.query(BankVoucher)
+            .filter(
+                BankVoucher.verification_status == "UNMATCHED",
+                BankVoucher.associated_order_number.is_(None),
+            )
+            .all()
+        )
+
+        if not unmatched_vouchers:
+            return 0
+
+        # Obtener todas las órdenes completadas para cotejar
+        completed_orders = order_repo.list_completed()
+        reconciled_count = 0
+
+        from src.reporting.accounting_engine import AccountingEngine
+
+        acct_engine = AccountingEngine(db=db)
+
+        for v in unmatched_vouchers:
+            v_date = v.voucher_date or datetime.now(UTC)
+            for o in completed_orders:
+                # Comprobar monto idéntico en VES
+                if abs(float(o.fiat_amount) - float(v.amount_ves)) < 0.05:
+                    # Comprobar ventana de tiempo si la orden tiene fecha
+                    if o.created_at:
+                        diff = abs((v_date - o.created_at).total_seconds())
+                        if diff > (tolerance_hours * 3600):
+                            continue
+
+                    # Conciliado
+                    v.associated_order_number = o.order_number  # type: ignore[assignment]
+                    v.verification_status = "MATCHED"  # type: ignore[assignment]
+                    voucher_repo.update(v)
+
+                    # Registrar en el Libro Diario formal
+                    try:
+                        acct_engine.record_p2p_trade(order=o, voucher=v)
+                    except (SQLAlchemyError, ValueError, TypeError, KeyError) as e:
+                        logger.warning(f"Error generando asiento contable al auto-conciliar huérfano: {e}")
+
+
+                    reconciled_count += 1
+                    break
+
+        return reconciled_count
+
+
 
 
 def process_and_save_voucher(
