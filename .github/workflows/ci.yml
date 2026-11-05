@@ -61,6 +61,11 @@ jobs:
           pip install -e .
 
       - name: Run Pytest Suite with JUnit Report
+        env:
+          MASTER_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          JWT_SECRET_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          TELEGRAM_BOT_TOKEN: "123456:fake_token_for_ci_tests"
+          DATABASE_URL: "sqlite:///:memory:"
         run: |
           mkdir -p test-results
           pytest -v --maxfail=1 --junitxml=test-results/junit.xml tests/

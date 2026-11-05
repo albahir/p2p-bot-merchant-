@@ -58,6 +58,18 @@
   - `BankReceiptOCR`: Extracción inteligente multimodal con Gemini Vision aprovechando `AIKeyPool` (3 claves API con rotación round-robin) y auto-matching con órdenes P2P ($\pm 24\text{ h}$, tolerancia $\pm 0.05\text{ VES}$).
   - `FiscalReconciler`: ejecuta la ecuación patrimonial de 6 piezas ($\text{Saldo Inicial} + \text{Entradas} - \text{Salidas} - \text{Comisiones} = \text{Saldo Final Teórico}$), detecta mermas/discrepancias e integra `FIFOCostMethod` extendido con inventario inicial valorado a tasa BCV.
   - Exportación multi-pestaña auditada en `ExcelReporter` y `SheetsExporter`: genera las 4 pestañas *Resumen Fiscal*, *Detalle P2P*, *Depósitos y Retiros*, y *Conciliación Bancaria*.
+
+- [x] **Paquete 017 (Sistema Contable P2P: Libro Diario, Libro Mayor, Conciliación Multi-Factorial y Régimen Histórico BCV)**:
+  - Capa de Normalización y Sanitización de Datos (`src/reporting/normalizers.py`): Limpieza robusta de texto sucio, bancos venezolanos, cédulas/RIFs, teléfonos, números de referencia y análisis monetario tolerante a comas/puntos decimales.
+  - Modelos y Repositorios Contables (`src/data/models.py`, `src/data/repositories.py`): Enriquecimiento de `BankVoucher` (concepto, teléfono, comisiones bancarias, tipo de movimiento, score), `Order` (`completed_at`, `payment_method`), nuevo `BCVRateHistory` y `JournalEntry` con hash encadenado SHA-256 inmutable.
+  - Motor de Tasas BCV con Fecha Valor y Backfill Histórico (`src/reporting/bcv_history_service.py`): Control estricto de hora local venezolana (UTC-4), tasa de fin de semana al viernes previo, bloqueo de activación de la tasa vespertina del día siguiente antes de las 00:00:00, y auto-backfill masivo para historiales de 6 meses de Binance donde la tasa viene vacía.
+  - OCR Adaptativo Multimodal (`src/integrations/receipt_ocr.py`): Clasificación automática de Pago Móvil vs Transferencia bancaria, extracción de concepto y teléfono, y auto-cálculo de comisión bancaria (0% mismo banco, 0.30% interbancario emitido en compras, 0% recibido en ventas).
+  - Motor de Conciliación Multi-Factorial P2P (`src/reporting/reconciliation_engine.py`): Filtros duros de flujo (`DEBIT == BUY`, `CREDIT == SELL`) y ventanas horarias (30 min Pago Móvil, 48 h Transferencias), matriz de scoring 0-100% (monto exacto + céntimos, banco, referencia en chat, contraparte) y clasificación semáforo (Verde $\ge 90\%$, Amarillo $60-89\%$, Gris $<60\%$).
+  - Motor Contable de Partida Doble (`src/reporting/accounting_engine.py`): Generación de asientos contables cronológicos donde `Total DEBE == Total HABER`, hash criptográfico SHA-256 encadenado y consolidación mensual de Libro Mayor con Saldo Inicial y Final para Banco Nacional VES (`1.1.01`), Activos USDT (`1.1.05`) y Comisiones (`5.2.01`).
+  - Exportadores Contables (`src/reporting/excel_reporter.py`, `src/reporting/pdf_reporter.py`, `src/reporting/sheets_exporter.py`): Generación de Excel multi-pestaña (Libro Diario, Libro Mayor, Conciliación Bancaria, Liquidación SENIAT), PDF formal 1.4 con membrete fiscal SENIAT sin librerías externas, y sincronización en vivo con Google Sheets.
+  - API REST FastAPI (`src/api/routes/accounting.py`, `src/api/main.py`): Rutas `GET /journal`, `GET /ledger`, `GET /export/excel`, `GET /export/pdf`, `POST /vouchers/{id}/match`, `POST /vouchers/upload`.
+  - Frontend Next.js 14 (`frontend/src/app/accounting/page.tsx`): Vista interactiva con selector de mes, tarjetas de saldos, tabla de Libro Diario con filtros y verificación de balance, visor de Libro Mayor, zona de arrastre (Dropzone) de comprobantes y enlaces de exportación.
+  - Suite de pruebas unitarias e integración (31 tests en verde, 100% cobertura de SPEC-017, 0 errores de TypeScript, 0 errores de Ruff y Mypy).
   - Panel interactivo en Streamlit (`fiscal_reconstruction_view.py`) con subida drag-and-drop de archivos de Binance y fotos de comprobantes bancarios, tarjetas de 6 piezas, liquidación ISLR y descarga directa.
   - Integración con Telegram: comando `/conciliacion` y soporte para fotos de comprobantes bancarios vía OCR en tiempo real.
   - Suite completa de 84 tests pasando al 100% (64 previos + 20 nuevos).
@@ -533,18 +545,114 @@
       - Frontend alojable en Vercel o Cloudflare Pages con CDN global y HTTPS nativo gratuito.
       - Conexión al backend local mediante Cloudflare Tunnel (`cloudflared`), sin requerir apertura de puertos ni IP pública fija.
 
+48. **Solución a Inicialización en CI y Resiliencia de Configuración durante la Recolección de Pytest (ADR 048)**:
+    - **Causa Raíz Identificada**:
+      - `src/api/main.py` ejecutaba `app = create_app()` a nivel de módulo al ser importado.
+      - En entornos de CI (GitHub Actions), antes de que se ejecuten los fixtures de pytest, la fase de recolección (`pytest collection`) importa los módulos de test. Al no existir `.env` en el runner, `Settings()` lanzaba `ValidationError: FAIL-CLOSED: MASTER_ENCRYPTION_KEY debe tener al menos 32 caracteres`.
+    - **Solución Defensiva Multicapa**:
+      - `tests/conftest.py`: Establecidas variables de entorno seguras con `os.environ.setdefault()` inmediatamente al cargar el módulo, garantizando su disponibilidad antes de que cualquier archivo de prueba sea importado.
+      - `src/api/main.py`: `create_app(skip_lifespan, settings)` implementa captura de excepciones con inicialización segura de configuración de prueba si no existe `.env`, y la asignación `app = create_app()` a nivel de módulo está protegida contra fallos.
+      - `.github/workflows/ci.yml`: Añadido bloque `env:` en el paso de pruebas de GitHub Actions con valores de prueba válidos para `MASTER_ENCRYPTION_KEY`, `JWT_SECRET_KEY`, `TELEGRAM_BOT_TOKEN` y `DATABASE_URL`.
+
+49. **Interfaz Híbrida Adaptativa (Escritorio Multicolumna + Móvil Nativo TMA) e Integración Fiscal Completa (ADR 049)**:
+    - **Diseño Responsivo Híbrido**:
+      - En **Escritorio (PC, pantallas $\ge 1024\text{ px}$)**: Vista amplia con barra de telemetría de nodo, navegación superior a todos los módulos (`/`, `/orders`, `/fiscal`, `/admin`), 4 KPIs financieros, y cuadrícula de 12 columnas (8 cols para Matriz de Spreads y Profundidad Interbancaria + 4 cols para Panel de Ejecución de Arbitraje y accesos rápidos).
+      - En **Móvil / Telegram Mini App (pantallas $< 1024\text{ px}$)**: Formato compacto nativo con cabecera curvada en rojo carmesí (`rounded-b-[2.5rem]`), avatar, saldo dinámico en USDT, y barra inferior fija de 5 pestañas (*Mercado*, *Arbitraje*, *Órdenes*, *Fiscal*, *Ajustes*).
+    - **Nueva Vista de Reconstrucción Fiscal de 6 Piezas (`/fiscal`)**:
+      - Implementado endpoint REST `GET /api/fiscal/summary` y `POST /api/fiscal/reconcile` en `src/api/routes/fiscal.py` respaldado por `FiscalReconciler`.
+      - Página completa [`frontend/src/app/fiscal/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/fiscal/page.tsx): selector de período mensual (`YYYY-MM`), tarjetas de las 6 piezas patrimoniales, delta/discrepancia patrimonial, valoración a tasa oficial BCV y cálculo de renta gravable ISLR para el SENIAT.
+    - **Calidad y Verificación**:
+      - **163/163 pruebas unitarias y de integración pasando al 100%** en `pytest`.
+      - `mypy src/` limpio (**0 errores en 67 archivos fuente**).
+      - `ruff check .` limpio (**All checks passed!**).
+      - `npm run build` en Next.js genera las **8 rutas estáticas sin errores**.
+
+50. **Gestión Cifrada de API Keys de Binance, Diagnóstico en Caliente y Módulo de Autenticación Completo (Login, Registro y OTP) (ADR 050)**:
+    - **Módulo de Autenticación y Registro Multi-Usuario**:
+      - `POST /api/auth/register`: Registro de nuevas cuentas con hash PBKDF2-HMAC-SHA256 (100k iteraciones), asignación automática de rol `INVITADO` (o `ADMIN` si el Telegram ID figura en la whitelist de administradores) y despacho de alerta automática al bot de Telegram.
+      - `POST /api/auth/recover-password`: Generación de código OTP numérico de 6 dígitos con expiración de 15 minutos, enviado de forma privada al chat del usuario en Telegram.
+      - `POST /api/auth/reset-password`: Validación en tiempo constante del OTP y actualización segura de contraseña.
+      - Interfaz de Login renovada en `frontend/src/app/login/page.tsx`: Selector de pestañas reactivas `[Iniciar Sesión]` y `[Crear Cuenta]` alineado con las maquetas del diseño Stitch, modal interactivo de recuperación de contraseña con Telegram OTP, y soporte transparente para Telegram SSO y Telegram Mini Apps (`initData`).
+    - **Gestión Segura de API Keys de Binance & Diagnóstico en Caliente**:
+      - Rutas REST en `src/api/routes/settings.py` (`/api/settings/binance`):
+        - `GET /api/settings/binance`: Consulta enmascarada del estado de credenciales (`vm4P••••Xk9b`) sin exponer secretos.
+        - `POST /api/settings/binance`: Almacenamiento cifrado con `AES-256-GCM` en reposo a través de `ApiKeyManager`. Soporte para firmas HMAC-SHA256 y Ed25519/RSA PEM.
+        - `POST /api/settings/binance/verify`: Diagnóstico en caliente contra el servidor oficial de Binance (`/api/v3/time`). Mide latencia de red (Ping en ms), deriva horaria (Clock Drift) para prevenir el error -1021, y monitoreo del consumo de cuota API (`x-mbx-used-weight-1m` < 5000) bajo el principio constitucional Fail-Closed.
+      - Componente Frontend React `frontend/src/components/binance-settings-card.tsx`:
+        - Integrado tanto en la vista amplia de PC (columna derecha de escritorio) como en la app móvil (pestaña *Ajustes*).
+        - Botón "Verificar en Vivo" que consulta el estado real en tiempo real con tarjetas de telemetría y alertas reactivas.
+        - Formulario desplegable para ingresar o actualizar llaves con encriptación inmediata.
+    - **Garantía de Calidad y Verificación Integral**:
+      - **167/167 pruebas automatizadas pasando al 100%** en `pytest` (incluyendo `test_api_auth_routes.py`, `test_api_settings.py` y `test_api_fiscal.py`).
+      - `mypy src/` limpio (**0 errores en 69 archivos fuente analizados**).
+      - `ruff check .` limpio (**All checks passed!**).
+      - `npm run build` en Next.js genera las **8 rutas estáticas sin errores ni advertencias de tipo**.
+
+51. **Arquitectura de Despliegue 24/7 Sin Servidor Local, Corrección de Posicionamiento de Claves Binance y Erradicación de Estética IA (ADR 051)**:
+    - **Arquitectura de Despliegue en la Nube 24/7 (Cero Dependencia de Laptop)**:
+      - **Frontend (Edge CDN)**: Alojable en Vercel o Cloudflare Pages (100% gratuito), con renderizado híbrido Next.js 14, compilación estática global y SSL TLS 1.3 nativo.
+      - **Backend API & Engine (Región Frankfurt / Europa Obligatoria)**:
+        - *Restricción Geográfica Crítica de Binance*: Los servidores ubicados en EE.UU. son bloqueados por Binance con códigos HTTP 451 / 403. Por tanto, el backend debe desplegarse obligatoriamente en Europa (Frankfurt, Alemania o Ámsterdam).
+        - *Opciones Evaluadas*:
+          1. **Render.com** (Web Service, Frankfurt EU, $7/mes en Starter para 24/7 continuo).
+          2. **Railway.app** (Template Docker, Ámsterdam EU, $5/mes de crédito inicial).
+          3. **Hetzner Cloud VPS (CX22)** (€3.49/mes en Falkenstein/Frankfurt, con IP dedicada fija e ilimitada operación 24/7 con Docker Compose y systemd).
+      - **Base de Datos Gestionada**: Neon.tech Serverless PostgreSQL (región `eu-central-1` Frankfurt, 0.5 GB gratuitos para >500,000 órdenes) o Render Postgres.
+      - **Capa DNS & Protección**: Cloudflare Proxy WAF gestionando dominios `app.tudominio.com` y `api.tudominio.com` con enmascaramiento total de IPs y mitigación DDoS.
+    - **Reubicación de Claves Binance & Corrección de Desbordamiento de Interfaz**:
+      - Se retiró la tarjeta `BinanceSettingsCard` de la columna lateral estrecha (`lg:col-span-4`), resolviendo el colapso horizontal, solapamiento de textos (*"LatenciaSin / Ping: verificar"*) y botones comprimidos reportados en la captura de pantalla del usuario.
+      - Se implementó un disparador dedicado en la barra de navegación superior: **`[ 🔑 Claves Binance ]`**, que abre un diálogo modal espacioso (`max-w-2xl`) con diseño ergonómico para configurar credenciales, diagnosticar en caliente latencia y clock drift, y monitorear cuota API (`x-mbx-used-weight / 5000`).
+      - Accesible asimismo en móviles mediante el menú inferior flotante y en la sección de Ajustes.
+    - **Erradicación de Estética IA y Paleta Institucional Dual (Blanco Perla & Negro Azabache)**:
+      - Se eliminaron todos los colores saturados fluorescentes (rosa/magenta neón, cian hipereléctrico), sombras de color proyectadas (`shadow-rose-600/30`) y curvas falsas de ondas aleatorias.
+      - Se diseñó un gráfico de **Profundidad de Mercado y Spread Real** con cuadrícula discontinua sobria y marcas de precio institucionales (estilo terminal Bloomberg / TradingView).
+      - Se implementó `ThemeProvider` con persistencia en `localStorage` y selector rápido en la barra superior:
+        - **Modo Blanco Perla (`light`)**: Fondo `#F8F9FA`, tarjetas `#FFFFFF`, bordes `#E2E8F0`, textos `#0F172A`.
+        - **Modo Negro Azabache (`dark`)**: Fondo `#07090E`, tarjetas `#0E121A`, bordes `#1E2638`, textos `#F1F5F9`.
+      - Todas las páginas (`/`, `/orders`, `/fiscal`, `/admin`, `/login`) actualizadas con clases reactivas duales.
+    - **Verificación de Calidad y Compilación**:
+      - `npm run build` en Next.js: **8 rutas generadas con 0 errores** de sintaxis, tipos o estilos.
+      - `pytest`: **167/167 tests pasando al 100%**.
+      - `mypy src/`: **0 errores en 69 archivos**.
+      - `ruff check .`: **0 advertencias**.
+
+52. **Sistema Contable P2P: Libro Diario, Libro Mayor, Conciliación Probatoria y Régimen de Fecha Valor BCV (ADR 052 / SPEC-017)**:
+    - **Contexto**:
+      - En Venezuela, Binance P2P opera con seudónimos comerciales y no proporciona la cédula de identidad, el RIF ni el nombre legal de las contrapartes. Además, en los extractos de 6 meses exportados desde Binance, la columna de tasa oficial del BCV viene vacía.
+      - En las instituciones bancarias y ante el SENIAT, el comprobante bancario (capture de Pago Móvil o Transferencia) es el soporte probatorio legal primario.
+      - Los comprobantes bancarios tienen naturalezas distintas: **Pago Móvil** incluye cédula y teléfono, mientras que las **Transferencias** entre bancos no reflejan cédula ni teléfono, requiriendo conciliación por referencia, céntimos impares y ventana horaria.
+      - La publicación vespertina de tasas del BCV (3:00 PM a 6:00 PM UTC-4) tiene *Fecha Valor* del día hábil siguiente; aplicarla antes de la medianoche altera indebidamente los costos y márgenes de las operaciones del día en curso.
+    - **Decisiones de Arquitectura**:
+      1. **Capa de Normalización Inmutable (`src/reporting/normalizers.py`)**: Sanitización estricta de nombres bancarios oficiales, cédulas con prefijo oficial (`V-`, `E-`, `J-`, o `S/C`), teléfonos venezolanos (`04XX-XXXXXXX` o `N/A`), y extracción numérica de montos monetarios tolerante a comas y puntos.
+      2. **Régimen Estricto de Fecha Valor BCV & Backfill Histórico (`src/reporting/bcv_history_service.py`)**: Conversión a hora local venezolana (UTC-4), asignación estricta de tasa según la fecha valor efectiva (fines de semana al viernes previo, y bloqueo de activación de la tasa vespertina del día siguiente antes de las 00:00:00). Auto-población masiva retroactiva para órdenes históricas de Binance con tasa vacía (`bcv_rate <= 0`).
+      3. **OCR Multimodal Inteligente y Clasificación Bancaria (`src/integrations/receipt_ocr.py`)**: Distinción automática de Pago Móvil vs Transferencia, extracción de concepto y teléfono, y cálculo automático de comisiones: 0% en mismo banco, 0.30% en interbancario emitido (compras USDT), y 0% en transferencias recibidas (ventas USDT).
+      4. **Motor de Conciliación Multi-Factorial P2P (`src/reporting/reconciliation_engine.py`)**: Filtros excluyentes fail-closed (dirección de fondos: `DEBIT == BUY`, `CREDIT == SELL`; ventana de 30 min para Pago Móvil y 48h para Transferencias). Matriz de scoring (monto exacto 30% + 5% céntimos, banco 30%, referencia 40%, titular 15%) y clasificación por semáforo (Verde $\ge 90\%$ auto-match, Amarillo $60-89\%$ sugerido, Gris $<60\%$ no emparejado).
+      5. **Motor Contable de Partida Doble (`src/reporting/accounting_engine.py`)**: Generación de asientos contables donde `Total DEBE == Total HABER`, con encadenamiento criptográfico SHA-256 (`prev_hash -> entry_hash`). Consolidación mensual del Libro Mayor para Banco Nacional VES (`1.1.01`), Activos USDT (`1.1.05`) y Comisiones (`5.2.01`), asegurando que el Saldo Final del mes $M$ sea idéntico al Saldo Inicial del mes $M+1$.
+      6. **Exportadores Contables Integrales**:
+         - Excel (.xlsx) con 4 pestañas: *Libro Diario*, *Libro Mayor*, *Conciliación Bancaria*, *Liquidación Fiscal SENIAT*.
+         - PDF 1.4 legal nativo en Python puro (`src/reporting/pdf_reporter.py`) con membrete fiscal SENIAT y cuadros contables oficiales sin dependencias C complejas.
+         - Sincronización en vivo a Google Sheets (`src/reporting/sheets_exporter.py`).
+      7. **Endpoints REST FastAPI (`src/api/routes/accounting.py`) & Frontend Next.js 14 (`frontend/src/app/accounting/page.tsx`)**:
+         - Rutas REST `/journal`, `/ledger`, `/export/excel`, `/export/pdf`, `/vouchers/upload`, `/vouchers/{id}/match`.
+         - Vista interactiva Next.js 14 con selector de período, tarjetas de saldos, visor de Libro Mayor, tabla interactiva de Libro Diario con filtros y verificación de cuadre, y Dropzone para arrastre de comprobantes.
+    - **Verificación**:
+      - 31 pruebas unitarias e integración de SPEC-017 pasando al 100%.
+      - 0 errores de TypeScript (`tsc -p frontend/tsconfig.json --noEmit`).
+      - 0 errores en `mypy` (12 archivos fuente).
+      - 0 advertencias de `ruff check`.
+
 ---
 
 ## 🎯 Guía Operativa Actual
 
 1. **Frontend Moderno (Next.js 14)**:
    - Desarrollo: `cd frontend && npm run dev` (abre en `http://localhost:3000`).
-   - Compilación: `cd frontend && npm run build`.
+   - Compilación: `cd frontend && npm run build` (8 rutas compiladas con 0 errores).
 2. **API REST y WebSockets (FastAPI)**:
    - Iniciar API: `uvicorn src.api.main:app --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
 3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 4. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
-5. **Suite de Pruebas Automatizadas**: `pytest` (**161/161 tests pasando al 100%**).
+5. **Suite de Pruebas Automatizadas**: `pytest` (**167/167 tests pasando al 100%**).
 6. **Calidad y Verificación**:
-   - `mypy src/` (0 errores en 66 archivos fuente).
+   - `mypy src/` (0 errores en 69 archivos fuente).
    - `ruff check .` (0 errores de linting).

@@ -1,0 +1,343 @@
+"""Motor Contable Formal de Partida Doble: Libro Diario y Libro Mayor (SPEC-017).
+
+Implementa la generación de asientos contables cronológicos con hash encadenado SHA-256
+(prev_hash -> entry_hash) garantizando inmutabilidad y la ecuación contable (Total Debe = Total Haber),
+así como la consolidación mensual del Libro Mayor con saldos iniciales y finales.
+"""
+
+import calendar
+import hashlib
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, cast
+
+from sqlalchemy.orm import Session
+
+from src.data.models import BankVoucher, JournalEntry, Order
+from src.data.repositories import JournalEntryRepository
+
+
+@dataclass
+class LedgerSummary:
+    """Resumen consolidado mensual para una cuenta en el Libro Mayor."""
+
+    account_code: str
+    account_name: str
+    year: int
+    month: int
+    initial_balance: float
+    total_debit: float
+    total_credit: float
+    final_balance: float
+    entries_count: int
+
+
+class AccountingEngine:
+    """Motor contable de partida doble e inmutabilidad con SHA-256."""
+
+    ACCOUNT_BANCO_VES = "1.1.01"
+    ACCOUNT_USDT_ASSET = "1.1.05"
+    ACCOUNT_BANK_FEE = "5.2.01"
+    ACCOUNT_BINANCE_FEE = "5.1.02"
+    ACCOUNT_UNMATCHED_DEBIT = "5.2.02"
+    ACCOUNT_UNMATCHED_CREDIT = "2.1.09"
+
+    def __init__(self, db: Session):
+        self.db = db
+        self.journal_repo = JournalEntryRepository(db)
+
+    def _compute_hash(
+        self,
+        prev_hash: str,
+        entry_number: int,
+        date_time: datetime,
+        account_code: str,
+        debit: float,
+        credit: float,
+        reference: str,
+    ) -> str:
+        """Calcula el hash criptográfico SHA-256 encadenado del asiento contable."""
+        payload = (
+            f"{prev_hash}|{entry_number}|{date_time.isoformat()}|"
+            f"{account_code}|{debit:.2f}|{credit:.2f}|{reference}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def record_p2p_trade(
+        self,
+        order: Order,
+        voucher: BankVoucher,
+    ) -> list[JournalEntry]:
+        """Genera el asiento contable formal de partida doble para una orden P2P conciliada con su comprobante."""
+        entry_number = self.journal_repo.get_next_entry_number()
+        last_entry = self.journal_repo.get_last_entry()
+        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+
+        trade_type = str(order.trade_type or "BUY").upper()
+        amount_ves = float(voucher.amount_ves)
+        bank_fee = float(voucher.bank_fee_ves or 0.0)
+        dt = cast(datetime | None, voucher.voucher_date) or cast(datetime | None, order.created_at) or datetime.now(UTC)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(UTC).replace(tzinfo=None)
+
+        lines: list[dict[str, Any]] = []
+
+        if trade_type == "BUY":
+            # Compra USDT:
+            # 1. DEBE 1.1.05 Activos Cripto USDT (Entrada de USDT valorada en VES)
+            # 2. DEBE 5.2.01 Comisiones Bancarias (si hubo débito por transferencia interbancaria)
+            # 3. HABER 1.1.01 Bancos Nacionales VES (Egreso total del banco = monto + comisión)
+            lines.append({
+                "account_code": self.ACCOUNT_USDT_ASSET,
+                "account_name": "Activos Criptográficos - USDT",
+                "debit": amount_ves,
+                "credit": 0.0,
+                "reference": str(voucher.reference_number or order.order_number),
+                "description": (
+                    f"Compra P2P {order.crypto_amount} USDT - Orden {order.order_number} "
+                    f"- Ref {voucher.reference_number} - Titular: {voucher.sender_name or 'N/A'}"
+                ),
+            })
+
+            if bank_fee > 0.0:
+                lines.append({
+                    "account_code": self.ACCOUNT_BANK_FEE,
+                    "account_name": "Gastos Financieros - Comisiones Bancarias",
+                    "debit": bank_fee,
+                    "credit": 0.0,
+                    "reference": str(voucher.reference_number),
+                    "description": f"Comisión bancaria débito P2P - Ref {voucher.reference_number}",
+                })
+
+            lines.append({
+                "account_code": self.ACCOUNT_BANCO_VES,
+                "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}",
+                "debit": 0.0,
+                "credit": round(amount_ves + bank_fee, 2),
+                "reference": str(voucher.reference_number or order.order_number),
+                "description": (
+                    f"Egreso bancario compra P2P - Ref {voucher.reference_number} "
+                    f"- Banco: {voucher.bank_name or 'Desconocido'}"
+                ),
+            })
+
+        else:
+            # Venta USDT:
+            # 1. DEBE 1.1.01 Bancos Nacionales VES (Ingreso de fondos en banco)
+            # 2. HABER 1.1.05 Activos Cripto USDT (Salida de inventario de USDT)
+            lines.append({
+                "account_code": self.ACCOUNT_BANCO_VES,
+                "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}",
+                "debit": amount_ves,
+                "credit": 0.0,
+                "reference": str(voucher.reference_number or order.order_number),
+                "description": (
+                    f"Ingreso bancario venta P2P - Orden {order.order_number} "
+                    f"- Ref {voucher.reference_number} - De: {voucher.sender_name or 'N/A'}"
+                ),
+            })
+
+            lines.append({
+                "account_code": self.ACCOUNT_USDT_ASSET,
+                "account_name": "Activos Criptográficos - USDT",
+                "debit": 0.0,
+                "credit": amount_ves,
+                "reference": str(voucher.reference_number or order.order_number),
+                "description": (
+                    f"Venta P2P {order.crypto_amount} USDT - Orden {order.order_number} "
+                    f"- Ref {voucher.reference_number}"
+                ),
+            })
+
+        created_entries: list[JournalEntry] = []
+        for line in lines:
+            entry_hash = self._compute_hash(
+                prev_hash=current_prev_hash,
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                debit=line["debit"],
+                credit=line["credit"],
+                reference=line["reference"],
+            )
+
+            entry = JournalEntry(
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                account_name=line["account_name"],
+                debit=line["debit"],
+                credit=line["credit"],
+                reference=line["reference"],
+                description=line["description"],
+                voucher_id=voucher.id,
+                order_number=order.order_number,
+                prev_hash=current_prev_hash,
+                entry_hash=entry_hash,
+            )
+
+            saved = self.journal_repo.create_entry(entry)
+            created_entries.append(saved)
+            current_prev_hash = entry_hash
+
+        return created_entries
+
+    def record_unmatched_voucher(self, voucher: BankVoucher) -> list[JournalEntry]:
+        """Asienta un comprobante no conciliado como partida independiente sin forzar emparejamiento."""
+        entry_number = self.journal_repo.get_next_entry_number()
+        last_entry = self.journal_repo.get_last_entry()
+        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+
+        amount_ves = float(voucher.amount_ves)
+        bank_fee = float(voucher.bank_fee_ves or 0.0)
+        mov_type = str(voucher.movement_type or "DEBIT").upper()
+        dt = cast(datetime | None, voucher.voucher_date) or datetime.now(UTC)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(UTC).replace(tzinfo=None)
+
+        lines: list[dict[str, Any]] = []
+
+        if mov_type == "DEBIT":
+            lines.append({
+                "account_code": self.ACCOUNT_UNMATCHED_DEBIT,
+                "account_name": "Egresos Bancarios por Identificar / Partida no Conciliada",
+                "debit": amount_ves,
+                "credit": 0.0,
+                "reference": str(voucher.reference_number),
+                "description": f"Débito bancario no vinculado - Ref {voucher.reference_number}",
+            })
+            if bank_fee > 0.0:
+                lines.append({
+                    "account_code": self.ACCOUNT_BANK_FEE,
+                    "account_name": "Gastos Financieros - Comisiones Bancarias",
+                    "debit": bank_fee,
+                    "credit": 0.0,
+                    "reference": str(voucher.reference_number),
+                    "description": f"Comisión bancaria débito no conciliado - Ref {voucher.reference_number}",
+                })
+            lines.append({
+                "account_code": self.ACCOUNT_BANCO_VES,
+                "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}",
+                "debit": 0.0,
+                "credit": round(amount_ves + bank_fee, 2),
+                "reference": str(voucher.reference_number),
+                "description": f"Egreso bancario no vinculado - Ref {voucher.reference_number}",
+            })
+        else:
+            lines.append({
+                "account_code": self.ACCOUNT_BANCO_VES,
+                "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}",
+                "debit": amount_ves,
+                "credit": 0.0,
+                "reference": str(voucher.reference_number),
+                "description": f"Ingreso bancario no vinculado - Ref {voucher.reference_number}",
+            })
+            lines.append({
+                "account_code": self.ACCOUNT_UNMATCHED_CREDIT,
+                "account_name": "Pasivos / Ingresos por Identificar",
+                "debit": 0.0,
+                "credit": amount_ves,
+                "reference": str(voucher.reference_number),
+                "description": f"Depósito no conciliado P2P - Ref {voucher.reference_number}",
+            })
+
+        created: list[JournalEntry] = []
+        for line in lines:
+            entry_hash = self._compute_hash(
+                prev_hash=current_prev_hash,
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                debit=line["debit"],
+                credit=line["credit"],
+                reference=line["reference"],
+            )
+
+            entry = JournalEntry(
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                account_name=line["account_name"],
+                debit=line["debit"],
+                credit=line["credit"],
+                reference=line["reference"],
+                description=line["description"],
+                voucher_id=voucher.id,
+                prev_hash=current_prev_hash,
+                entry_hash=entry_hash,
+            )
+            saved = self.journal_repo.create_entry(entry)
+            created.append(saved)
+            current_prev_hash = entry_hash
+
+        return created
+
+    def calculate_ledger_for_account(
+        self,
+        account_code: str,
+        year: int,
+        month: int,
+        initial_balance: float = 0.0,
+    ) -> LedgerSummary:
+        """Consolida el Libro Mayor para una cuenta contable específica en el mes solicitado."""
+        _, last_day = calendar.monthrange(year, month)
+        start_date = datetime(year, month, 1, 0, 0, 0)
+        end_date = datetime(year, month, last_day, 23, 59, 59, 999999)
+
+        entries = self.journal_repo.list_entries(
+            start_date=start_date,
+            end_date=end_date,
+            account_code=account_code,
+        )
+
+        total_debit = sum(float(e.debit) for e in entries)
+        total_credit = sum(float(e.credit) for e in entries)
+
+        # Regla contable: Activos (1.) y Egresos/Gastos (5., 6.) aumentan por el Debe y disminuyen por el Haber
+        # Pasivos (2.), Patrimonio (3.) e Ingresos (4.) aumentan por el Haber y disminuyen por el Debe
+        if account_code.startswith(("1.", "5.", "6.")):
+            final_balance = initial_balance + total_debit - total_credit
+        else:
+            final_balance = initial_balance + total_credit - total_debit
+
+        account_name: str = str(entries[0].account_name) if entries else f"Cuenta {account_code}"
+
+        return LedgerSummary(
+            account_code=account_code,
+            account_name=account_name,
+            year=year,
+            month=month,
+            initial_balance=round(initial_balance, 2),
+            total_debit=round(total_debit, 2),
+            total_credit=round(total_credit, 2),
+            final_balance=round(final_balance, 2),
+            entries_count=len(entries),
+        )
+
+    def get_monthly_ledger_report(
+        self,
+        year: int,
+        month: int,
+        initial_balances: dict[str, float] | None = None,
+    ) -> list[LedgerSummary]:
+        """Genera el reporte consolidado de Libro Mayor para las principales cuentas del negocio."""
+        balances = initial_balances or {}
+        core_accounts = [
+            (self.ACCOUNT_BANCO_VES, "Banco Nacional VES"),
+            (self.ACCOUNT_USDT_ASSET, "Activos Criptográficos - USDT"),
+            (self.ACCOUNT_BANK_FEE, "Gastos Financieros - Comisiones Bancarias"),
+            (self.ACCOUNT_BINANCE_FEE, "Gastos Operativos - Comisiones Binance P2P"),
+        ]
+
+        summaries: list[LedgerSummary] = []
+        for code, _ in core_accounts:
+            init_bal = balances.get(code, 0.0)
+            summary = self.calculate_ledger_for_account(
+                account_code=code,
+                year=year,
+                month=month,
+                initial_balance=init_bal,
+            )
+            summaries.append(summary)
+
+        return summaries

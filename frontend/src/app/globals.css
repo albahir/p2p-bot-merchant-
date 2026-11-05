@@ -3,20 +3,33 @@
 @tailwind utilities;
 
 :root {
-  --background: #090d16;
-  --surface: #0e1524;
-  --surface-card: #131c2e;
-  --surface-elevated: #1a253c;
-  --border: #1e293b;
-  --border-bright: #2d3d59;
-  --emerald-main: #10b981;
-  --emerald-dim: #059669;
-  --cyan-main: #06b6d4;
-  --ruby-main: #f43f5e;
-  --amber-main: #f59e0b;
-  --text-primary: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  /* Modo Claro: Blanco Perla Suave (Pearl White) */
+  --background: #F8F9FA;
+  --surface: #FFFFFF;
+  --surface-card: #FFFFFF;
+  --surface-elevated: #F1F3F6;
+  --border: #E2E8F0;
+  --border-bright: #CBD5E1;
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-muted: #64748B;
+  --accent-red: #DC2626;
+  --accent-green: #16A34A;
+}
+
+.dark {
+  /* Modo Oscuro: Negro Azabache / Carbón Sólido (Deep Black) */
+  --background: #07090E;
+  --surface: #0E121A;
+  --surface-card: #131823;
+  --surface-elevated: #1A2130;
+  --border: #1E2638;
+  --border-bright: #2B354D;
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --accent-red: #E11D48;
+  --accent-green: #22C55E;
 }
 
 body {
@@ -27,33 +40,23 @@ body {
   letter-spacing: -0.01em;
 }
 
-/* Panel de cristal suave - descanso visual */
-.terminal-panel {
-  background: rgba(14, 21, 36, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
-  border-radius: 1rem;
+/* Tablas financieras con números tabulares para evitar saltos de ancho */
+.font-tabular {
+  font-variant-numeric: tabular-nums;
 }
 
-.terminal-panel-hover:hover {
-  background: rgba(19, 28, 46, 0.95);
-  border-color: rgba(16, 185, 129, 0.3);
-  transition: all 0.2s ease-in-out;
-}
-
-/* Scrollbar suave */
+/* Scrollbar sobrio y delgado */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: #090d16;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1e293b;
-  border-radius: 4px;
+  background: var(--border);
+  border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2d3d59;
+  background: var(--border-bright);
 }

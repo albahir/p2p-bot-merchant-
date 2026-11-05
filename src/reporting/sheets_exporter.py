@@ -6,6 +6,8 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from src.data.models import JournalEntry
+from src.reporting.accounting_engine import LedgerSummary
 from src.reporting.tax_engine import TradeResult
 
 try:
@@ -486,6 +488,84 @@ class SheetsExporter:
             else:
                 self.last_error = f"Error exportando Compliance a Google Sheets: {e}"
 
+            logger.error(self.last_error)
+            return False
+
+    def export_accounting(
+        self,
+        sheet_id: str,
+        journal_entries: list[JournalEntry],
+        ledger_summaries: list[LedgerSummary],
+    ) -> bool:
+        """Exporta el Libro Diario y Libro Mayor formal a Google Sheets."""
+        if not sheet_id:
+            self.last_error = "No se configuró 'GOOGLE_SHEET_ID' para la exportación contable."
+            logger.warning(self.last_error)
+            return False
+
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            sh = client.open_by_key(sheet_id)
+
+            # 1. Pestaña: Libro Diario
+            ws_diario = self._get_or_create_worksheet(
+                sh, "Libro Diario", rows=max(100, len(journal_entries) + 10), cols=12
+            )
+            headers_diario: list[Any] = [
+                "Asiento #", "Fecha y Hora", "Código Cuenta", "Nombre de Cuenta",
+                "Debe (VES)", "Haber (VES)", "Referencia", "Descripción / Glosa",
+                "Orden P2P", "Hash SHA-256",
+            ]
+            data_diario: list[list[Any]] = [headers_diario]
+            for e in journal_entries:
+                dt_str = e.date_time.strftime("%Y-%m-%d %H:%M:%S") if e.date_time else "-"
+                data_diario.append([
+                    int(e.entry_number),
+                    dt_str,
+                    str(e.account_code),
+                    str(e.account_name),
+                    float(e.debit),
+                    float(e.credit),
+                    str(e.reference),
+                    str(e.description),
+                    str(e.order_number or "-"),
+                    str(e.entry_hash),
+                ])
+            ws_diario.clear()
+            ws_diario.append_rows(data_diario)
+
+            # 2. Pestaña: Libro Mayor
+            ws_mayor = self._get_or_create_worksheet(
+                sh, "Libro Mayor", rows=max(30, len(ledger_summaries) + 10), cols=10
+            )
+            headers_mayor: list[Any] = [
+                "Código Cuenta", "Nombre de Cuenta", "Período",
+                "Saldo Inicial (VES)", "Total Debe (VES)", "Total Haber (VES)",
+                "Saldo Final (VES)", "N° Asientos",
+            ]
+            data_mayor: list[list[Any]] = [headers_mayor]
+            for s in ledger_summaries:
+                data_mayor.append([
+                    str(s.account_code),
+                    str(s.account_name),
+                    f"{s.year}-{s.month:02d}",
+                    float(s.initial_balance),
+                    float(s.total_debit),
+                    float(s.total_credit),
+                    float(s.final_balance),
+                    int(s.entries_count),
+                ])
+            ws_mayor.clear()
+            ws_mayor.append_rows(data_mayor)
+
+            logger.info(f"Google Sheets '{sheet_id}' sincronizado con Libro Diario y Libro Mayor.")
+            self.last_error = None
+            return True
+        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = f"Error exportando contabilidad a Google Sheets: {e}"
             logger.error(self.last_error)
             return False
 

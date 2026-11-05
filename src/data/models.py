@@ -4,7 +4,7 @@ Incluye modelos para eventos de seguridad (auditoría append-only), secretos cif
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
 
 from src.data.database import Base
 
@@ -59,6 +59,8 @@ class Order(Base):
     order_status = Column(String(30), nullable=False)  # COMPLETED, CANCELLED
     counterparty_name = Column(String(100), nullable=True)  # Nombre o apodo de la contraparte en Binance
     created_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)  # Momento exacto de finalización/liberación
+    payment_method = Column(String(50), nullable=True)  # Método o banco reportado por Binance (ej. Banesco, Pago Móvil)
 
 
 
@@ -98,13 +100,20 @@ class BankVoucher(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     bank_name = Column(String(100), nullable=False)     # Banco de Venezuela, Banesco, etc.
+    destination_bank = Column(String(100), nullable=True) # Banco receptor del pago
     reference_number = Column(String(50), index=True, nullable=False)
-    amount_ves = Column(Float, nullable=False)
-    sender_id = Column(String(20), nullable=True)       # Cédula V-12345678
+    amount_ves = Column(Float, nullable=False)          # Monto neto transferido
+    bank_fee_ves = Column(Float, default=0.0, nullable=False) # Comisión bancaria cobrada
+    total_debited_ves = Column(Float, default=0.0, nullable=False) # Total debitado de la cuenta (monto + comisión)
+    sender_id = Column(String(20), nullable=True)       # Cédula V-12345678 o S/C
     sender_name = Column(String(255), nullable=True)
-    payment_method = Column(String(30), default="PAGO_MOVIL", nullable=False)
+    sender_phone = Column(String(30), nullable=True)    # Teléfono del emisor/receptor
+    concept = Column(String(255), nullable=True)        # Motivo o concepto del comprobante
+    payment_method = Column(String(30), default="PAGO_MOVIL", nullable=False) # PAGO_MOVIL, TRANSFERENCIA
+    movement_type = Column(String(20), default="DEBIT", nullable=False)       # DEBIT (compra), CREDIT (venta)
     associated_order_number = Column(String(50), nullable=True, index=True)
     verification_status = Column(String(30), default="UNMATCHED", nullable=False)  # MATCHED, UNMATCHED, PENDING
+    reconciliation_score = Column(Float, default=0.0, nullable=False)          # Score de 0.0 a 100.0%
     voucher_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 
@@ -144,6 +153,37 @@ class User(Base):
     role = Column(String(20), default="INVITADO", nullable=False)  # ADMIN, TRADER, INVITADO
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
+class BCVRateHistory(Base):
+    """Histórico de tasas oficiales publicadas por el BCV indexadas por Fecha Valor."""
+    __tablename__ = "bcv_rates_history"
+
+    fecha_valor = Column(Date, primary_key=True, index=True, nullable=False)
+    usd_rate = Column(Float, nullable=False)
+    eur_rate = Column(Float, default=0.0, nullable=False)
+    source = Column(String(50), default="BCV_OFFICIAL", nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
+class JournalEntry(Base):
+    """Asiento contable del Libro Diario con partida doble inmutable y hash encadenado SHA-256."""
+    __tablename__ = "journal_entries"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    entry_number = Column(Integer, index=True, nullable=False)
+    date_time = Column(DateTime, index=True, nullable=False)
+    account_code = Column(String(30), nullable=False)   # 1.1.01, 1.1.05, 5.2.01, etc.
+    account_name = Column(String(100), nullable=False)
+    debit = Column(Float, default=0.0, nullable=False)
+    credit = Column(Float, default=0.0, nullable=False)
+    reference = Column(String(50), nullable=False)
+    description = Column(Text, nullable=False)
+    voucher_id = Column(Integer, nullable=True)
+    order_number = Column(String(50), nullable=True)
+    prev_hash = Column(String(64), nullable=True)
+    entry_hash = Column(String(64), nullable=False)
+
 
 
 
