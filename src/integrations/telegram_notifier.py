@@ -499,8 +499,11 @@ class TelegramNotifier:
         elif cmd in ("/bcv", "/tasa", "/dolar_bcv"):
             return self._handle_bcv_query()
         elif cmd in ("/sheets", "/sync_sheets", "/hojas"):
-            return self._handle_sheets_sync()
+            return self._handle_sheets_sync(user_id=user_id)
+        elif cmd in ("/sheets_id", "/link_sheet", "/vincular_sheet"):
+            return self._handle_sheets_link(user_id=user_id, command=clean_cmd_str)
         elif cmd in ("/sheets_compliance", "/compliance_sheets"):
+
             return self._handle_compliance_sheets_sync()
         elif cmd in ("/cierre", "/cierre_mensual"):
             return self._handle_monthly_close(clean_cmd_str)
@@ -721,7 +724,59 @@ class TelegramNotifier:
         finally:
             db.close()
 
-    def _handle_sheets_sync(self) -> str:
+    def _handle_sheets_link(self, user_id: int | str | None, command: str) -> str:
+        """Permite al trader vincular su Google Sheet personal con /sheets_id <enlace_o_id>."""
+        import re
+
+        from src.data.database import SessionLocal
+        from src.data.repositories import UserRepository
+        from src.reporting.sheets_exporter import SheetsExporter
+
+        parts = command.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            return (
+                "⚠️ *Uso del comando*:\n\n"
+                "`/sheets_id <ID_o_Enlace_de_Google_Sheets>`\n\n"
+                "📌 *Instrucciones*:\n"
+                "1. Abre [sheets.new](https://sheets.new) en tu navegador.\n"
+                "2. Pulsa en **Compartir** y otorga permisos de **Editor** al correo del sistema.\n"
+                "3. Copia el enlace o el ID y envíalo aquí: `/sheets_id https://docs.google.com/spreadsheets/d/...`"
+            )
+
+        raw_input = parts[1].strip()
+        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", raw_input)
+        sheet_id = match.group(1) if match else raw_input
+
+        db = SessionLocal()
+        try:
+            repo = UserRepository(db)
+            user = repo.get_by_telegram_id(str(user_id)) if user_id else None
+            if not user:
+                return (
+                    f"⛔ Tu usuario de Telegram (`{user_id}`) no está vinculado a una cuenta de Trader en el sistema.\n"
+                    "Inicia sesión en la plataforma Web y vincula tu Telegram ID primero."
+                )
+
+            user.google_sheet_id = sheet_id  # type: ignore[assignment]
+            user.google_auth_type = "SERVICE_ACCOUNT"  # type: ignore[assignment]
+            db.commit()
+
+            sheet_url = SheetsExporter.get_sheet_url(sheet_id)
+            return (
+                f"✅ *Google Sheet Personal Vinculado Exitosamente*\n\n"
+                f"• Usuario: *{user.username}*\n"
+                f"• Sheet ID: `{sheet_id}`\n\n"
+                f"Cada comprobante que envíes por foto se registrará automáticamente en tu Libro Diario.\n\n"
+                f"🔗 [Abrir mi Google Sheet]({sheet_url})"
+            )
+        except (SQLAlchemyError, OSError, ValueError, TypeError, KeyError) as e:
+            logger.error(f"Error vinculando Google Sheet por Telegram: {e}")
+            return f"❌ Error guardando el ID del documento: {e}"
+        finally:
+            db.close()
+
+
+    def _handle_sheets_sync(self, user_id: int | str | None = None) -> str:
         """Sincroniza el histórico fiscal con Google Sheets y retorna el estado con enlace directo."""
         import os
 
@@ -729,7 +784,7 @@ class TelegramNotifier:
 
         from config.settings import Settings
         from src.data.database import SessionLocal
-        from src.data.repositories import OrderRepository
+        from src.data.repositories import OrderRepository, UserRepository
         from src.reporting.sheets_exporter import SheetsExporter
         from src.reporting.tax_engine import FIFOCostMethod
 
@@ -747,14 +802,21 @@ class TelegramNotifier:
             creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
             creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "config/google_credentials.json")
 
-        if not sheet_id:
-            return (
-                "⚠️ *Google Sheets no está configurado*.\n\n"
-                "Para activarlo, define `GOOGLE_SHEET_ID` y las credenciales de servicio en `config/.env` o variables de entorno."
-            )
-
         db = SessionLocal()
         try:
+            # Si el usuario tiene una hoja personal configurada en su perfil, priorizarla
+            if user_id:
+                u_repo = UserRepository(db)
+                u = u_repo.get_by_telegram_id(str(user_id))
+                if u and u.google_sheet_id:
+                    sheet_id = u.google_sheet_id
+
+            if not sheet_id:
+                return (
+                    "⚠️ *Google Sheets no está configurado*.\n\n"
+                    "Para vincular tu propia hoja envía:\n`/sheets_id <enlace_de_tu_hoja>`"
+                )
+
             repo = OrderRepository(db)
             completed_orders = repo.list_completed()
             if not completed_orders:
@@ -1094,16 +1156,53 @@ class TelegramNotifier:
             logger.warning(f"Error descargando archivo {file_id} de Telegram: {e}")
         return None
 
-    def process_receipt_photo(self, image_bytes: bytes) -> str:
+    def process_receipt_photo(self, image_bytes: bytes, user_id: int | str | None = None) -> str:
         """Procesa una foto de comprobante bancario con Gemini OCR y la concilia en la base de datos."""
         from src.data.database import SessionLocal
+        from src.data.repositories import UserRepository
         from src.integrations.receipt_ocr import BankReceiptOCR, process_and_save_voucher
 
         db = SessionLocal()
         try:
             ocr = BankReceiptOCR()
-            voucher, _matched_order = process_and_save_voucher(image_bytes, db, ocr_service=ocr)
+            voucher, matched_order = process_and_save_voucher(image_bytes, db, ocr_service=ocr)
             if voucher:
+                # Si el usuario tiene una hoja vinculada, asentar el comprobante en vivo
+                sheet_notice = ""
+                if user_id:
+                    u_repo = UserRepository(db)
+                    u = u_repo.get_by_telegram_id(str(user_id))
+                    if u and u.google_sheet_id:
+                        try:
+                            from config.settings import Settings
+                            from src.reporting.sheets_exporter import SheetsExporter
+
+                            app_settings = Settings()
+                            exporter = SheetsExporter(
+                                credentials_path=app_settings.GOOGLE_CREDENTIALS_FILE,
+                                credentials_json=app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+                            )
+                            dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
+                            appended = exporter.append_voucher_entry(
+                                sheet_id=u.google_sheet_id,
+                                date_time_str=dt_str,
+                                bank_name=voucher.bank_name,
+                                reference_number=voucher.reference_number,
+                                amount_ves=voucher.amount_ves,
+                                sender_id=voucher.sender_id,
+                                sender_name=voucher.sender_name,
+                                payment_method=voucher.payment_method,
+                                order_number=matched_order.order_number if matched_order else None,
+                                status=voucher.verification_status,
+                                bank_fee_ves=voucher.bank_fee_ves,
+                                concept=voucher.concept,
+                            )
+                            if appended:
+                                sheet_notice = "\n• Google Sheet: 🟢 Asiento agregado a tu libro diario"
+                        except (OSError, ValueError, TypeError, KeyError) as e:
+                            logger.warning(f"Error sincronizando comprobante de Telegram a Google Sheet: {e}")
+
+
                 status_emoji = "🟢 VINCULADO" if voucher.verification_status == "MATCHED" else "🟡 REGISTRADO (Sin orden coincidente)"
                 order_info = f"\n• Orden P2P: `{voucher.associated_order_number}`" if voucher.associated_order_number else ""
                 sender_info = f"\n• Titular: {voucher.sender_name or '-'} ({voucher.sender_id or '-'})"
@@ -1115,6 +1214,7 @@ class TelegramNotifier:
                     f"{sender_info}"
                     f"{order_info}\n"
                     f"• Estado: {status_emoji}"
+                    f"{sheet_notice}"
                 )
             else:
                 return "⚠️ *No se pudo procesar el comprobante*: No se pudo extraer información clara del comprobante."
@@ -1123,6 +1223,7 @@ class TelegramNotifier:
             return f"❌ Error interno procesando el comprobante: {e}"
         finally:
             db.close()
+
 
     def _handle_fiscal_reconciliation(self, command: str) -> str:
         """Procesa /conciliacion [YYYY-MM] y devuelve las 6 piezas contables."""
@@ -1384,9 +1485,10 @@ class TelegramCommandPoller:
                         if file_id:
                             img_bytes = self.notifier.get_file_bytes(file_id)
                             if img_bytes:
-                                ocr_reply = self.notifier.process_receipt_photo(img_bytes)
+                                ocr_reply = self.notifier.process_receipt_photo(img_bytes, user_id=user_id)
                                 self.notifier.send_alert(ocr_reply, chat_id=chat_id)
                             else:
+
                                 self.notifier.send_alert("⚠️ No se pudo descargar la imagen del comprobante.", chat_id=chat_id)
                     processed += 1
                     continue

@@ -151,6 +151,9 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     telegram_id = Column(String(50), unique=True, index=True, nullable=True)
     role = Column(String(20), default="INVITADO", nullable=False)  # ADMIN, TRADER, INVITADO
+    google_sheet_id = Column(String(100), nullable=True)  # ID de la hoja personal en Google Sheets
+    google_refresh_token_enc = Column(Text, nullable=True)  # Refresh Token OAuth2 cifrado con AES-256-GCM
+    google_auth_type = Column(String(30), default="SERVICE_ACCOUNT", nullable=False)  # SERVICE_ACCOUNT | OAUTH2
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 

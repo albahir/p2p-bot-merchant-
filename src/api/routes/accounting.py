@@ -290,7 +290,41 @@ async def upload_voucher(
         engine = AccountingEngine(db=db)
         engine.record_p2p_trade(order=matched_order, voucher=voucher)
 
+    # Si el usuario tiene una hoja personal de Google Sheets vinculada, registrar la fila
+    user_sheet_id = getattr(current_user, "google_sheet_id", None)
+    if user_sheet_id:
+        try:
+            from config.settings import Settings
+            from src.reporting.sheets_exporter import SheetsExporter
+
+            app_settings = Settings()
+            exporter = SheetsExporter(
+                credentials_path=app_settings.GOOGLE_CREDENTIALS_FILE,
+                credentials_json=app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+            )
+            dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
+            exporter.append_voucher_entry(
+                sheet_id=user_sheet_id,
+                date_time_str=dt_str,
+                bank_name=voucher.bank_name,
+                reference_number=voucher.reference_number,
+                amount_ves=voucher.amount_ves,
+                sender_id=voucher.sender_id,
+                sender_name=voucher.sender_name,
+                payment_method=voucher.payment_method,
+                order_number=matched_order.order_number if matched_order else None,
+                status=voucher.verification_status,
+                bank_fee_ves=voucher.bank_fee_ves,
+                concept=voucher.concept,
+            )
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            # Comportamiento fail-safe: no tumbar la subida si Google Sheets falla
+            import logging
+            logging.getLogger("accounting_route").warning(f"Error sincronizando comprobante a Google Sheet de usuario: {e}")
+
+
     return {
+
         "voucher_id": voucher.id,
         "bank_name": voucher.bank_name,
         "reference_number": voucher.reference_number,

@@ -573,3 +573,74 @@ class SheetsExporter:
     def get_sheet_url(sheet_id: str) -> str:
         """Devuelve el enlace directo al documento en Google Sheets."""
         return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+
+    def append_voucher_entry(
+        self,
+        sheet_id: str,
+        date_time_str: str,
+        bank_name: str,
+        reference_number: str,
+        amount_ves: float,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        payment_method: str = "PAGO_MOVIL",
+        order_number: str | None = None,
+        status: str = "REGISTRADO",
+        bank_fee_ves: float = 0.0,
+        concept: str | None = None,
+    ) -> bool:
+        """Agrega un asiento de comprobante bancario escaneado en vivo a la hoja del usuario."""
+        if not sheet_id:
+            self.last_error = "No se configuró sheet_id para agregar comprobante."
+            logger.warning(self.last_error)
+            return False
+
+        client = self._get_client()
+        if client is None:
+            return False
+
+        try:
+            sh = client.open_by_key(sheet_id)
+            ws = self._get_or_create_worksheet(
+                sh, "Comprobantes y Diario", rows=500, cols=12
+            )
+
+            # Verificar si la hoja está recién creada y necesita encabezados
+            existing_values = ws.get_all_values()
+            if not existing_values or len(existing_values) == 0:
+                headers = [
+                    "Fecha y Hora",
+                    "Banco",
+                    "Referencia",
+                    "Monto (VES)",
+                    "Comisión (VES)",
+                    "Cédula / RIF",
+                    "Titular",
+                    "Método",
+                    "Concepto",
+                    "Orden P2P",
+                    "Estado Conciliación",
+                ]
+                ws.append_row(headers)
+
+            row = [
+                date_time_str,
+                str(bank_name),
+                str(reference_number),
+                float(amount_ves),
+                float(bank_fee_ves),
+                str(sender_id or "-"),
+                str(sender_name or "-"),
+                str(payment_method),
+                str(concept or "-"),
+                str(order_number or "-"),
+                str(status),
+            ]
+            ws.append_row(row)
+            self.last_error = None
+            return True
+        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = f"Error al agregar registro de comprobante en Google Sheets: {e}"
+            logger.error(self.last_error)
+            return False
+
