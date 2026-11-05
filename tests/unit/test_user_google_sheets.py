@@ -61,6 +61,7 @@ def test_update_user_google_sheet_settings():
 
 def test_sheets_exporter_append_single_voucher():
     from unittest.mock import MagicMock
+
     from src.reporting.sheets_exporter import SheetsExporter
 
     exporter = SheetsExporter(credentials_json={"dummy": "true"})
@@ -134,7 +135,6 @@ def test_api_sheets_settings_endpoints():
 
 
 def test_telegram_sheets_id_command():
-    from unittest.mock import MagicMock
     from src.integrations.telegram_notifier import TelegramNotifier
 
     db = setup_in_memory_db()

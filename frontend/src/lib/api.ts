@@ -451,7 +451,28 @@ export async function matchVoucherWithOrder(voucherId: number, orderNumber: stri
   });
 }
 
+export async function getLiveBalance(
+  year: number,
+  month: number,
+  initialUsdt: number = 0,
+  initialVes: number = 0
+): Promise<any> {
+  const query = new URLSearchParams();
+  query.set("year", year.toString());
+  query.set("month", month.toString());
+  query.set("initial_usdt", initialUsdt.toString());
+  query.set("initial_ves", initialVes.toString());
+  return apiRequest(`/api/accounting/balances/live?${query.toString()}`);
+}
+
+export async function reconcileOrphanVouchers(toleranceHours: number = 48): Promise<any> {
+  return apiRequest(`/api/accounting/vouchers/reconcile-orphans?tolerance_hours=${toleranceHours}`, {
+    method: "POST",
+  });
+}
+
 export async function uploadVoucherFile(file: File): Promise<UploadVoucherResponse> {
+
   const formData = new FormData();
   formData.append("file", file);
   const token = getToken();

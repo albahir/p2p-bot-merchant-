@@ -32,6 +32,35 @@ class LedgerSummary:
     entries_count: int
 
 
+@dataclass
+class BankBalanceItem:
+    """Desglose de saldo inicial y teórico para un banco específico."""
+
+    bank_name: str
+    initial_ves: float
+    inflows_ves: float
+    outflows_ves: float
+    theoretical_ves: float
+
+
+@dataclass
+class LiveBalanceSummary:
+    """Resumen de saldos dinámicos en tiempo real sin requerir saldo final manual."""
+
+    year: int
+    month: int
+    initial_usdt: float
+    inflow_usdt: float
+    outflow_usdt: float
+    theoretical_usdt: float
+    total_initial_ves: float
+    total_inflows_ves: float
+    total_outflows_ves: float
+    total_theoretical_ves: float
+    bank_breakdown: list[BankBalanceItem]
+
+
+
 class AccountingEngine:
     """Motor contable de partida doble e inmutabilidad con SHA-256."""
 
@@ -341,3 +370,125 @@ class AccountingEngine:
             summaries.append(summary)
 
         return summaries
+
+    def get_live_theoretical_balance(
+        self,
+        year: int,
+        month: int,
+        initial_balances: dict[str, Any] | None = None,
+    ) -> LiveBalanceSummary:
+        """Calcula el saldo teórico en tiempo real (Inflow - Outflow) desglosado por banco y USDT."""
+        cfg = initial_balances or {}
+        init_usdt = float(cfg.get("crypto_usdt", 0.0))
+        banks_cfg: dict[str, float] = cfg.get("banks", {})
+
+        # Si el usuario solo colocó un saldo general en bolívares sin desglose
+        if not banks_cfg and "total_ves" in cfg:
+            banks_cfg = {"Banco Principal": float(cfg["total_ves"])}
+        elif not banks_cfg and "1.1.01" in cfg:
+            banks_cfg = {"Banco Principal": float(cfg["1.1.01"])}
+
+        start_date = datetime(year, month, 1, 0, 0, 0, tzinfo=UTC)
+        days_in_month = calendar.monthrange(year, month)[1]
+        end_date = datetime(year, month, days_in_month, 23, 59, 59, tzinfo=UTC)
+
+        # 1. Movimientos Cripto (USDT) desde órdenes completadas
+        orders = (
+            self.db.query(Order)
+            .filter(
+                Order.order_status == "COMPLETED",
+                Order.created_at >= start_date,
+                Order.created_at <= end_date,
+            )
+            .all()
+        )
+
+        inflow_usdt = 0.0
+        outflow_usdt = 0.0
+        for o in orders:
+            t_type = getattr(o, "trade_type", getattr(o, "order_type", ""))
+            c_amount = float(getattr(o, "crypto_amount", getattr(o, "amount_crypto", 0.0)))
+            if t_type == "BUY":
+                inflow_usdt += c_amount
+            elif t_type == "SELL":
+                outflow_usdt += c_amount
+
+
+        theoretical_usdt = round(init_usdt + inflow_usdt - outflow_usdt, 2)
+
+        # 2. Movimientos Fiat (VES) por banco desde el Libro Diario o Comprobantes
+        # Inicializar estructura para los bancos configurados
+        bank_stats: dict[str, dict[str, float]] = {}
+        for b_name, b_init in banks_cfg.items():
+            bank_stats[b_name] = {
+                "initial": float(b_init),
+                "inflows": 0.0,
+                "outflows": 0.0,
+            }
+
+        entries = self.journal_repo.list_entries(
+            start_date=start_date,
+            end_date=end_date,
+            account_code=self.ACCOUNT_BANCO_VES,
+        )
+
+        for e in entries:
+            # Identificar a qué banco pertenece por descripción o voucher asociado
+            matched_bank = None
+            desc = (e.description or "").lower()
+            for b_name in bank_stats:
+                if b_name.lower() in desc:
+                    matched_bank = b_name
+                    break
+
+            if not matched_bank:
+                # Si solo hay un banco configurado, asignarlo a ese
+                if len(bank_stats) == 1:
+                    matched_bank = next(iter(bank_stats.keys()))
+                else:
+
+                    matched_bank = "Otros / No Especificado"
+                    if matched_bank not in bank_stats:
+                        bank_stats[matched_bank] = {"initial": 0.0, "inflows": 0.0, "outflows": 0.0}
+
+            # En cuenta de Activo (1.1.01): Debe = Entrada de dinero (Venta P2P recibida)
+            # Haber = Salida de dinero (Pago de Compra P2P)
+            bank_stats[matched_bank]["inflows"] += float(e.debit)
+            bank_stats[matched_bank]["outflows"] += float(e.credit)
+
+        bank_items: list[BankBalanceItem] = []
+        tot_init_ves = 0.0
+        tot_inflows_ves = 0.0
+        tot_outflows_ves = 0.0
+
+        for b_name, stats in bank_stats.items():
+            b_theo = round(stats["initial"] + stats["inflows"] - stats["outflows"], 2)
+            bank_items.append(
+                BankBalanceItem(
+                    bank_name=b_name,
+                    initial_ves=round(stats["initial"], 2),
+                    inflows_ves=round(stats["inflows"], 2),
+                    outflows_ves=round(stats["outflows"], 2),
+                    theoretical_ves=b_theo,
+                )
+            )
+            tot_init_ves += stats["initial"]
+            tot_inflows_ves += stats["inflows"]
+            tot_outflows_ves += stats["outflows"]
+
+        tot_theo_ves = round(tot_init_ves + tot_inflows_ves - tot_outflows_ves, 2)
+
+        return LiveBalanceSummary(
+            year=year,
+            month=month,
+            initial_usdt=round(init_usdt, 2),
+            inflow_usdt=round(inflow_usdt, 2),
+            outflow_usdt=round(outflow_usdt, 2),
+            theoretical_usdt=theoretical_usdt,
+            total_initial_ves=round(tot_init_ves, 2),
+            total_inflows_ves=round(tot_inflows_ves, 2),
+            total_outflows_ves=round(tot_outflows_ves, 2),
+            total_theoretical_ves=tot_theo_ves,
+            bank_breakdown=bank_items,
+        )
+
