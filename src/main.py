@@ -24,7 +24,7 @@ from src.core.binance_client import (
 from src.core.binance_mock import MockBinanceP2PClient
 from src.core.history_ingestor import HistoryIngestor
 from src.core.rate_alert_service import RateAlertService
-from src.data.database import Base, SessionLocal, engine
+from src.data.database import DATABASE_URL, SessionLocal, init_db, seed_env_operators
 from src.integrations.ai_assistant import TelegramAIAgent
 from src.integrations.telegram_notifier import (
     TelegramCommandPoller,
@@ -107,8 +107,8 @@ class P2PBotEngine:
         self.is_running = True
         logger.info("==> Inicializando p2p-bot-merchant...")
 
-        # 1. Asegurar tablas creadas
-        Base.metadata.create_all(bind=engine)
+        # 1. Asegurar tablas y migraciones creadas
+        init_db()
 
         # 2. Cargar configuración con validación fail-closed
         try:
@@ -117,6 +117,21 @@ class P2PBotEngine:
         except (ValueError, RuntimeError) as e:
             logger.critical(f"FAIL-CLOSED: Error cargando configuración: {e}")
             sys.exit(1)
+
+        # Sincronizar inmediatamente en BD los operadores blindados en .env (Render / Docker)
+        self.seeded_counts = {"admins": 0, "traders": 0}
+        db_seed = SessionLocal()
+        try:
+            self.seeded_counts = seed_env_operators(db_seed, self.settings)
+            logger.info(
+                "Operadores blindados sincronizados en arranque: %s Admin(s), %s Trader(s).",
+                self.seeded_counts["admins"],
+                self.seeded_counts["traders"],
+            )
+        except (ValueError, RuntimeError, OSError) as seed_err:
+            logger.warning(f"Aviso al sincronizar operadores de entorno en BD: {seed_err}")
+        finally:
+            db_seed.close()
 
         # Determinar si opera en modo Sandbox o Real
         if use_sandbox is not None:
@@ -148,9 +163,10 @@ class P2PBotEngine:
             bot_token=self.settings.TELEGRAM_BOT_TOKEN,
             default_chat_id=self.settings.TELEGRAM_ALERT_CHAT_ID,
             allowed_user_ids=self.settings.telegram_allowed_users,
+            trader_user_ids=self.settings.telegram_trader_users,
             proxy_url=self.settings.TELEGRAM_PROXY_URL,
             api_base_url=self.settings.TELEGRAM_API_BASE_URL,
-            use_sandbox=self.use_sandbox
+            use_sandbox=self.use_sandbox,
         )
         self.dispatcher = TelegramQueueDispatcher(self.notifier)
         self.dispatcher.start()
@@ -181,10 +197,13 @@ class P2PBotEngine:
             status="SUCCESS"
         )
         mode_label = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN"
+        db_label = "🐘 PostgreSQL Persistente" if DATABASE_URL.startswith("postgresql") else "📁 SQLite Local"
         self.instance_tag = f"[`{socket.gethostname()[:8]}` | pid:{os.getpid()}]"
         self.dispatcher.queue_alert(
             f"🟢 *Bot P2P Merchant iniciado exitosamente* {self.instance_tag}\n"
             f"Modo: {mode_label}\n"
+            f"Base de Datos: {db_label}\n"
+            f"👥 Operadores blindados activos: `{self.seeded_counts['admins']}` Admin | `{self.seeded_counts['traders']}` Traders\n"
             f"Monitoreo y escucha de comandos activos.",
             reply_markup=self.notifier.get_quick_actions_markup(),
         )

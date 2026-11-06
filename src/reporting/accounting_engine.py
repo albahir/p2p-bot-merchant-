@@ -397,8 +397,7 @@ class AccountingEngine:
             self.db.query(Order)
             .filter(
                 Order.order_status == "COMPLETED",
-                Order.created_at >= start_date,
-                Order.created_at <= end_date,
+                Order.created_at.between(start_date, end_date),
             )
             .all()
         )

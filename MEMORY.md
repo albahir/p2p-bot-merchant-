@@ -671,6 +671,9 @@
       - Redirección limpia de rutas heredadas (`/admin` → `/settings`, `/fiscal` → `/accounting`) preservando compatibilidad con marcadores previos.
     - **Extensión de API FastAPI con TDD**:
       - Nuevos endpoints: `POST /api/users/authorize-telegram`, `PATCH /api/users/{id}/sheet`, `GET /api/settings/telegram`, `POST /api/settings/telegram/test` y `POST /api/settings/sheets/sync`, además de `permission_source` en `GET /api/users` y `google_sheet_id` opcional en `POST /api/auth/register`.
+    - **Corrección de Tipado Estático CI (`mypy src/ scripts/`) y Visibilidad de Usuarios Render en `/usuarios`**:
+      - Resueltos los 35 errores de tipado SQLAlchemy `Column[...]` reportados por GitHub Actions en [`src/reporting/accounting_engine.py`](file:///c:/p2p-bot-merchant/src/reporting/accounting_engine.py) (`Order.created_at.between(...)`), [`src/integrations/telegram_notifier.py`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py) y [`src/api/routes/accounting.py`](file:///c:/p2p-bot-merchant/src/api/routes/accounting.py) (`Success: no issues found in 82 source files`).
+      - Mejorado [`TelegramNotifier._handle_admin_list_users`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py) (`/usuarios`), [`seed_env_operators`](file:///c:/p2p-bot-merchant/src/data/database.py) e inicialización en [`src/main.py`](file:///c:/p2p-bot-merchant/src/main.py) y [`src/api/main.py`](file:///c:/p2p-bot-merchant/src/api/main.py) para insertar automáticamente en BD desde el segundo 0 del arranque todos los operadores de `TELEGRAM_ALLOWED_USERS` y `TELEGRAM_TRADER_USERS`, reportar el conteo en el mensaje de inicio de Telegram y soportar PostgreSQL externo (`psycopg2-binary` + normalización `postgres://` → `postgresql://` + `pool_pre_ping=True`).
 
 ---
 

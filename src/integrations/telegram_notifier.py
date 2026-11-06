@@ -613,27 +613,89 @@ class TelegramNotifier:
             return f"❓ Comando no reconocido: {command}. Usa /ayuda para ver los disponibles."
 
     def _handle_admin_list_users(self) -> str:
-        """Lista todos los usuarios registrados y sus roles en la base de datos."""
+        """Lista todos los usuarios activos combinando variables de entorno (.env / Render) y Base de Datos."""
         sf = self.session_factory
         if sf is None:
             try:
                 from src.data.database import SessionLocal
                 sf = SessionLocal
             except (ImportError, SQLAlchemyError, RuntimeError, OSError):
-                return "⚠️ Base de datos no disponible para listar usuarios."
+                sf = None
+
+        static_admins: set[str] = {str(uid).strip() for uid in self.allowed_user_ids if str(uid).strip()}
+        if self.default_chat_id and self.default_chat_id.strip():
+            static_admins.add(self.default_chat_id.strip())
+        static_traders: set[str] = {
+            str(uid).strip()
+            for uid in getattr(self, "trader_user_ids", [])
+            if str(uid).strip() and str(uid).strip() not in static_admins
+        }
+
+        if sf is None:
+            if not static_admins and not static_traders:
+                return "⚠️ Base de datos no disponible y sin usuarios en variables de entorno."
+            lines = ["👥 *Operadores Activos (Entorno .env)*:\n"]
+            for admin_id in sorted(static_admins):
+                lines.append(f"• *admin_{admin_id}* (ID: `{admin_id}`) | Rol: `ADMIN` | 🟢 Activo | 🛡️ Blindado (.env)")
+            for trader_id in sorted(static_traders):
+                lines.append(f"• *tg_{trader_id}* (ID: `{trader_id}`) | Rol: `TRADER` | 🟢 Activo | 🛡️ Blindado (.env)")
+            return "\n".join(lines)
 
         db = sf()
         try:
             from src.data.repositories import UserRepository
+            from src.security.auth_service import AuthService
+
             repo = UserRepository(db)
+
+            # Sincronizar automáticamente en BD los IDs blindados en .env tras reinicios de contenedor
+            for admin_id in sorted(static_admins):
+                if not repo.get_by_telegram_id(admin_id):
+                    uname = "admin" if not repo.get_by_username("admin") else f"admin_{admin_id}"
+                    repo.create_user(
+                        username=uname,
+                        password_hash=AuthService.hash_password(f"env_{admin_id}"),
+                        role="ADMIN",
+                        telegram_id=admin_id,
+                        is_active=True,
+                    )
+
+            for trader_id in sorted(static_traders):
+                existing = repo.get_by_telegram_id(trader_id)
+                if not existing:
+                    uname = f"tg_{trader_id}"
+                    if repo.get_by_username(uname):
+                        uname = f"trader_{trader_id}"
+                    repo.create_user(
+                        username=uname,
+                        password_hash=AuthService.hash_password(f"env_{trader_id}"),
+                        role="TRADER",
+                        telegram_id=trader_id,
+                        is_active=True,
+                    )
+                elif str(existing.role).upper() not in ("ADMIN", "TRADER"):
+                    repo.update_role(cast(int, existing.id), "TRADER")
+
             users = repo.list_all()
             if not users:
-                return "👥 No hay usuarios registrados en la base de datos."
+                return "👥 No hay usuarios registrados en la base de datos ni en variables de entorno."
+
             lines = ["👥 *Usuarios Registrados en el Sistema*:\n"]
             for u in users:
                 status = "🟢 Activo" if u.is_active else "🔴 Inactivo"
-                tg = f"`{u.telegram_id}`" if u.telegram_id else "Sin Telegram"
-                lines.append(f"• *{u.username}* (ID: {tg}) | Rol: `{u.role}` | {status}")
+                tg_raw = str(u.telegram_id).strip() if u.telegram_id else ""
+                tg = f"`{tg_raw}`" if tg_raw else "Sin Telegram"
+                origin = (
+                    "🛡️ Blindado (.env)"
+                    if tg_raw and (tg_raw in static_admins or tg_raw in static_traders)
+                    else "💾 Solo BD"
+                )
+                effective_role = (
+                    "ADMIN"
+                    if tg_raw in static_admins
+                    else ("TRADER" if tg_raw in static_traders and str(u.role) == "INVITADO" else str(u.role))
+                )
+                lines.append(f"• *{u.username}* (ID: {tg}) | Rol: `{effective_role}` | {status} | {origin}")
             return "\n".join(lines)
         except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
             logger.error(f"Error listando usuarios: {e}")
@@ -821,18 +883,18 @@ class TelegramNotifier:
                         )
                         dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
                         exporter.append_voucher_entry(
-                            sheet_id=u.google_sheet_id,
+                            sheet_id=str(u.google_sheet_id),
                             date_time_str=dt_str,
-                            bank_name=voucher.bank_name,
-                            reference_number=voucher.reference_number,
-                            amount_ves=voucher.amount_ves,
-                            sender_id=voucher.sender_id,
-                            sender_name=voucher.sender_name,
-                            payment_method=voucher.payment_method,
-                            order_number=voucher.associated_order_number,
+                            bank_name=str(voucher.bank_name),
+                            reference_number=str(voucher.reference_number),
+                            amount_ves=float(cast(float, voucher.amount_ves) or 0.0),
+                            sender_id=str(voucher.sender_id) if voucher.sender_id else None,
+                            sender_name=str(voucher.sender_name) if voucher.sender_name else None,
+                            payment_method=str(voucher.payment_method),
+                            order_number=str(voucher.associated_order_number) if voucher.associated_order_number else None,
                             status=f"{voucher.verification_status} ({action})",
-                            bank_fee_ves=voucher.bank_fee_ves,
-                            concept=voucher.concept,
+                            bank_fee_ves=float(cast(float, voucher.bank_fee_ves) or 0.0),
+                            concept=str(voucher.concept) if voucher.concept else None,
                         )
                         sheet_notice = "\n• Google Sheet: 🟢 Fila sincronizada exitosamente."
                     except (OSError, ValueError, TypeError, KeyError) as e:
@@ -956,7 +1018,7 @@ class TelegramNotifier:
                 u_repo = UserRepository(db)
                 u = u_repo.get_by_telegram_id(str(user_id))
                 if u and u.google_sheet_id:
-                    sheet_id = u.google_sheet_id
+                    sheet_id = str(u.google_sheet_id)
 
             if not sheet_id:
                 exporter = SheetsExporter(credentials_path=creds_file, credentials_json=creds_json)
@@ -1342,18 +1404,18 @@ class TelegramNotifier:
                             )
                             dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
                             appended = exporter.append_voucher_entry(
-                                sheet_id=u.google_sheet_id,
+                                sheet_id=str(u.google_sheet_id),
                                 date_time_str=dt_str,
-                                bank_name=voucher.bank_name,
-                                reference_number=voucher.reference_number,
-                                amount_ves=voucher.amount_ves,
-                                sender_id=voucher.sender_id,
-                                sender_name=voucher.sender_name,
-                                payment_method=voucher.payment_method,
-                                order_number=matched_order.order_number if matched_order else None,
-                                status=voucher.verification_status,
-                                bank_fee_ves=voucher.bank_fee_ves,
-                                concept=voucher.concept,
+                                bank_name=str(voucher.bank_name),
+                                reference_number=str(voucher.reference_number),
+                                amount_ves=float(cast(float, voucher.amount_ves) or 0.0),
+                                sender_id=str(voucher.sender_id) if voucher.sender_id else None,
+                                sender_name=str(voucher.sender_name) if voucher.sender_name else None,
+                                payment_method=str(voucher.payment_method),
+                                order_number=str(matched_order.order_number) if matched_order and matched_order.order_number else None,
+                                status=str(voucher.verification_status),
+                                bank_fee_ves=float(cast(float, voucher.bank_fee_ves) or 0.0),
+                                concept=str(voucher.concept) if voucher.concept else None,
                             )
                             if appended:
                                 sheet_notice = "\n• Google Sheet: 🟢 Asiento agregado a tu libro diario"
@@ -1373,7 +1435,8 @@ class TelegramNotifier:
                     f"• Estado: {status_emoji}"
                     f"{sheet_notice}"
                 )
-                return text_msg, voucher.id
+                voucher_id_int = int(cast(int, voucher.id)) if voucher.id is not None else None
+                return text_msg, voucher_id_int
             else:
                 return "⚠️ *No se pudo procesar el comprobante*: No se pudo extraer información clara del comprobante.", None
         except (ValueError, KeyError, RuntimeError, OSError) as e:
