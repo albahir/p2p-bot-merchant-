@@ -45,12 +45,13 @@ class TelegramNotifier:
         bot_token: str = "",
         default_chat_id: str = "",
         allowed_user_ids: list[int] | None = None,
+        trader_user_ids: list[int] | None = None,
         proxy_url: str | None = None,
         api_base_url: str = "https://api.telegram.org",
         use_sandbox: bool = True,
         session_factory: Any = None,
     ):
-        if not bot_token or not default_chat_id:
+        if not bot_token or not default_chat_id or trader_user_ids is None:
             try:
                 from config.settings import Settings
                 settings = Settings()
@@ -58,6 +59,8 @@ class TelegramNotifier:
                 default_chat_id = default_chat_id or settings.TELEGRAM_ALERT_CHAT_ID
                 if allowed_user_ids is None:
                     allowed_user_ids = settings.telegram_allowed_users
+                if trader_user_ids is None:
+                    trader_user_ids = settings.telegram_trader_users
                 proxy_url = proxy_url or settings.TELEGRAM_PROXY_URL
                 api_base_url = api_base_url or settings.TELEGRAM_API_BASE_URL
             except (ValueError, KeyError, OSError, RuntimeError, TypeError) as e:
@@ -66,6 +69,7 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.default_chat_id = default_chat_id
         self.allowed_user_ids = allowed_user_ids or []
+        self.trader_user_ids = trader_user_ids or []
         self.proxy_url = proxy_url
         self.api_base_url = api_base_url.rstrip("/")
         self.base_url = f"{self.api_base_url}/bot{bot_token}"
@@ -91,7 +95,17 @@ class TelegramNotifier:
 
         user_str = str(user_id).strip()
 
-        # 1. Consultar en la base de datos de usuarios
+        # Prioridad 0: Si está configurado estáticamente como ADMIN
+        if self.default_chat_id and user_str == self.default_chat_id.strip():
+            return "ADMIN"
+        for allowed in self.allowed_user_ids:
+            if str(allowed).strip() == user_str:
+                return "ADMIN"
+
+        # Prioridad 1: Si está configurado estáticamente como TRADER en .env
+        is_static_trader = any(str(trader).strip() == user_str for trader in getattr(self, "trader_user_ids", []))
+
+        # 2. Consultar en la base de datos de usuarios
         sf = self.session_factory
         if sf is None:
             try:
@@ -108,18 +122,23 @@ class TelegramNotifier:
                     repo = UserRepository(db)
                     user = repo.get_by_telegram_id(user_str)
                     if user and user.is_active:
-                        return str(user.role).upper()
+                        db_role = str(user.role).upper()
+                        # Si está en la lista fija de traders y en DB tenía INVITADO, proteger su rol de TRADER
+                        if is_static_trader and db_role not in ("ADMIN", "TRADER"):
+                            try:
+                                repo.update_role(int(user.id), "TRADER")
+                            except (SQLAlchemyError, RuntimeError, OSError):
+                                pass
+                            return "TRADER"
+                        return db_role
                 finally:
                     db.close()
             except (SQLAlchemyError, RuntimeError, OSError) as e:
                 logger.debug(f"Error consultando rol de usuario en DB: {e}")
 
-        # 2. Fallback estático con allowed_user_ids y default_chat_id como ADMIN
-        if self.default_chat_id and user_str == self.default_chat_id.strip():
-            return "ADMIN"
-        for allowed in self.allowed_user_ids:
-            if str(allowed).strip() == user_str:
-                return "ADMIN"
+        # 3. Fallback estático para TRADER si no existía en DB
+        if is_static_trader:
+            return "TRADER"
 
         return "NONE"
 

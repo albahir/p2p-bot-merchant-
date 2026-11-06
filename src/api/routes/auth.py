@@ -81,16 +81,19 @@ def register(
             detail=f"El nombre de usuario '{req.username}' ya está registrado.",
         )
 
-    # Evaluar si el Telegram ID está en la whitelist de administradores
+    # Evaluar si el Telegram ID está en la whitelist de administradores o traders
     is_admin = False
+    is_trader = False
     tg_id_str = str(req.telegram_id).strip() if req.telegram_id else None
     if tg_id_str:
         try:
-            is_admin = int(tg_id_str) in settings.telegram_allowed_users
+            tg_int = int(tg_id_str)
+            is_admin = tg_int in settings.telegram_allowed_users
+            is_trader = tg_int in settings.telegram_trader_users
         except (ValueError, TypeError):
             pass
 
-    assigned_role = "ADMIN" if is_admin else "INVITADO"
+    assigned_role = "ADMIN" if is_admin else ("TRADER" if is_trader else "INVITADO")
     password_hash = AuthService.hash_password(req.password)
 
     new_user = user_repo.create_user(
@@ -100,6 +103,14 @@ def register(
         telegram_id=tg_id_str,
         is_active=True,
     )
+
+    if req.google_sheet_id and req.google_sheet_id.strip():
+        import re
+        raw_sheet = req.google_sheet_id.strip()
+        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", raw_sheet)
+        new_user.google_sheet_id = match.group(1) if match else raw_sheet  # type: ignore[assignment]
+        db.commit()
+        db.refresh(new_user)
 
     # Notificar al administrador por Telegram si está disponible
     try:
@@ -252,16 +263,19 @@ def login_telegram(
     telegram_id_str = str(data.id)
     user = user_repo.get_by_telegram_id(telegram_id_str)
 
-    # Evaluar si el ID de Telegram está en la lista de administradores autorizados
+    # Evaluar si el ID de Telegram está en la lista de administradores o traders autorizados
     is_admin_allowed = False
+    is_trader_allowed = False
     try:
-        is_admin_allowed = int(data.id) in settings.telegram_allowed_users
+        tg_int = int(data.id)
+        is_admin_allowed = tg_int in settings.telegram_allowed_users
+        is_trader_allowed = tg_int in settings.telegram_trader_users
     except (ValueError, TypeError):
         pass
 
     if not user:
         # Registrar nuevo usuario con rol según whitelist
-        assigned_role = "ADMIN" if is_admin_allowed else "INVITADO"
+        assigned_role = "ADMIN" if is_admin_allowed else ("TRADER" if is_trader_allowed else "INVITADO")
         username = data.username or f"tg_{data.id}"
         # Generar hash aleatorio para contraseñas de cuentas SSO puras
         random_pass = AuthService.hash_password(f"sso_{data.id}_{data.auth_date}")
@@ -274,6 +288,9 @@ def login_telegram(
         )
     elif is_admin_allowed and user.role != "ADMIN":
         user_repo.update_role(int(user.id), "ADMIN")
+        user = user_repo.get_by_id(int(user.id))
+    elif is_trader_allowed and user.role not in ("ADMIN", "TRADER"):
+        user_repo.update_role(int(user.id), "TRADER")
         user = user_repo.get_by_id(int(user.id))
 
     if not user or not user.is_active:
@@ -322,13 +339,16 @@ def login_telegram_webapp(
     user = user_repo.get_by_telegram_id(tg_id)
 
     is_admin_allowed = False
+    is_trader_allowed = False
     try:
-        is_admin_allowed = int(tg_id) in settings.telegram_allowed_users
+        tg_int = int(tg_id)
+        is_admin_allowed = tg_int in settings.telegram_allowed_users
+        is_trader_allowed = tg_int in settings.telegram_trader_users
     except (ValueError, TypeError):
         pass
 
     if not user:
-        assigned_role = "ADMIN" if is_admin_allowed else "INVITADO"
+        assigned_role = "ADMIN" if is_admin_allowed else ("TRADER" if is_trader_allowed else "INVITADO")
         random_pass = AuthService.hash_password(f"tma_{tg_id}")
         user = user_repo.create_user(
             username=username,
@@ -339,6 +359,9 @@ def login_telegram_webapp(
         )
     elif is_admin_allowed and user.role != "ADMIN":
         user_repo.update_role(int(user.id), "ADMIN")
+        user = user_repo.get_by_id(int(user.id))
+    elif is_trader_allowed and user.role not in ("ADMIN", "TRADER"):
+        user_repo.update_role(int(user.id), "TRADER")
         user = user_repo.get_by_id(int(user.id))
 
     if not user or not user.is_active:

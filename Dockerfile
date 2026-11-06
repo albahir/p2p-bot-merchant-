@@ -23,8 +23,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY . .
 
-# Asegurar permisos para SQLite y logs
-RUN chown -R appuser:appgroup /app
+# Asegurar permisos para SQLite, data persistente y logs
+RUN mkdir -p /app/data && chown -R appuser:appgroup /app
+VOLUME ["/app/data"]
 
 USER appuser
 

@@ -44,12 +44,49 @@ def init_db() -> None:
     ModelsBase.metadata.create_all(bind=engine)
 
 
-    # Migración ligera para evolución de esquema en SQLite
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN counterparty_name VARCHAR(100)"))
-            conn.commit()
-    except SQLAlchemyError as err:
-        logging.getLogger("database").debug("Verificación de columna counterparty_name: %s", err)
+    # Migración ligera para evolución de esquema en SQLite (orders)
+    for col_def in [
+        "counterparty_name VARCHAR(100)",
+        "completed_at DATETIME",
+        "payment_method VARCHAR(50)",
+    ]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE orders ADD COLUMN {col_def}"))
+                conn.commit()
+        except SQLAlchemyError as err:
+            logging.getLogger("database").debug("Verificación de columna orders %s: %s", col_def, err)
+
+    # Migración ligera para campos de Google Sheets en app_users
+    for col_def in [
+        "google_sheet_id VARCHAR(100)",
+        "google_refresh_token_enc TEXT",
+        "google_auth_type VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'",
+    ]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE app_users ADD COLUMN {col_def}"))
+                conn.commit()
+        except SQLAlchemyError as err:
+            logging.getLogger("database").debug("Verificación de columna %s: %s", col_def, err)
+
+    # Migración ligera para campos de OCR y conciliación bancaria en bank_vouchers
+    for col_def in [
+        "destination_bank VARCHAR(100)",
+        "bank_fee_ves FLOAT DEFAULT 0.0",
+        "total_debited_ves FLOAT DEFAULT 0.0",
+        "sender_phone VARCHAR(30)",
+        "concept VARCHAR(255)",
+        "movement_type VARCHAR(20) DEFAULT 'DEBIT'",
+        "reconciliation_score FLOAT DEFAULT 0.0",
+    ]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE bank_vouchers ADD COLUMN {col_def}"))
+                conn.commit()
+        except SQLAlchemyError as err:
+            logging.getLogger("database").debug("Verificación de columna bank_vouchers %s: %s", col_def, err)
+
+
 
 

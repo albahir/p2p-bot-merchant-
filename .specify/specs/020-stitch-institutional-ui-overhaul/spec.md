@@ -1,0 +1,14 @@
+# SPEC-020: Migración Integral a Interfaz Institucional "P2P Merchant OS" (8 Vistas Stitch)
+
+## 1. Objetivo
+Reemplazar por completo la interfaz web anterior de Next.js (`ARBITEX` / Blanco Perla) por la nueva terminal institucional de 8 pantallas **P2P Merchant OS ("Institutional Arbitrage Engine")**, corrigiendo todos los defectos detectados en la auditoría visual de los prototipos HTML de Stitch y conectando cada vista en tiempo real con la API FastAPI bajo arquitectura *Fail-Closed* y *Cero Secretos*.
+
+## 2. Correcciones Aplicadas sobre los Prototipos de Stitch
+1. **Seguridad Cero Secretos (`Configuración API & Seg`)**: Erradicada la exposición de llaves API en `value` o `navigator.clipboard.writeText` del HTML prototipo; solo se muestra versión enmascarada (`8F9a••••8F9A`) y entradas write-only cifradas con AES-256-GCM.
+2. **Navegación Unificada (`AppShell`)**: Barra lateral fija (`w-64` en escritorio + cajón móvil) con las 6 rutas operativas siempre presentes (restaurando *Calculadora de Ciclos* en *Sheets*), selector global `[OSCURO | ATENUADO]`, telemetría en vivo (`BCV`, `USDT/VES`, `API Weight`, `Motor Activo`) y roles reales RBAC (`ADMIN`, `TRADER`, `INVITADO`).
+3. **Login & Registro (`/login`, `/register`)**: Ocultada la alerta fija de intentos fallidos cuando no hay error; agregado flujo de recuperación OTP vía Telegram, soporte Telegram WebApp SSO, medidor real de contraseña y vinculación opcional de `Google Sheet ID` desde el registro.
+4. **Matriz de Spreads (`/`)**: Eliminada píldora cian vacía y criptos irrelevantes; añadidos chips de filtrado bancario rápido, cálculo real de retorno descontando comisión de Pago Móvil interbancario (`0.3%`) y envío de rutas con 1 clic a `/calculator`.
+5. **Calculadora de Ciclos (`/calculator`)**: Corregido título erróneo `"Ruta de Venta"` -> `"Ganancia Neta por Ciclo"`; eliminadas menciones a `Bybit` e `IGTF`; añadido selector de comisión bancaria venezolana (`0% Mismo Banco` vs `0.3% Pago Móvil Interbancario`).
+6. **Ganancias & Órdenes (`/orders`)**: Eliminados botones `[CSV] [Excel]` triplicados; restaurados buscador de órdenes, filtros de compra/venta, selector fiscal (`FIFO` / `Costo Promedio`) y barra de progreso visible únicamente durante sincronización activa.
+7. **Contabilidad & Libro Diario (`/accounting`)**: Corregido error de *copy-paste* en desglose de saldo inicial (`BDV`, `Banesco`, `Mercantil` dinámicos en lugar de repetir `"Saldo Inicial del Mes"`); eliminada mención a `IGTF` y código duplicado `#pane-sheets`; integrados Libro Mayor, ecuación fiscal de 6 piezas, OCR de recibos y modal *Fail-Closed* de cierre mensual.
+8. **Sincronización Google Sheets (`/sheets`)**: Conectada a endpoints reales de vinculación y disparo manual de exportación (`POST /api/settings/sheets/sync`) con diagnóstico explícito de permisos de cuenta de servicio.

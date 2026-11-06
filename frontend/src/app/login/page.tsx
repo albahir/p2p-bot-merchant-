@@ -1,565 +1,476 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  Lock,
-  User as UserIcon,
-  Send,
-  ShieldCheck,
-  AlertCircle,
-  CheckCircle2,
-  KeyRound,
-  UserPlus,
-  LogIn,
-  HelpCircle,
-  ArrowLeft,
-  Sun,
-  Moon,
-} from "lucide-react";
-import {
   login,
+  loginTelegram,
   loginTelegramWebApp,
-  registerUser,
   recoverPassword,
   resetPassword,
 } from "@/lib/api";
 import { useTheme } from "@/lib/theme-context";
 
-declare global {
-  interface Window {
-    Telegram?: {
-      WebApp?: {
-        initData: string;
-        ready: () => void;
-        expand: () => void;
-      };
-    };
-  }
-}
-
-type AuthTab = "login" | "register" | "recovery";
+type AuthMode = "login" | "recover_request" | "recover_reset";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { theme, toggleTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState<AuthTab>("login");
+  const { theme, setTheme } = useTheme();
+  const telegramWidgetRef = useRef<HTMLDivElement>(null);
 
-  // Campos de formulario
+  const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [telegramId, setTelegramId] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
 
-  // Campos de recuperación
-  const [recoveryCode, setRecoveryCode] = useState("");
+  // Recuperación vía OTP Telegram
+  const [resetCode, setResetCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
-  const [recoveryStep, setRecoveryStep] = useState<1 | 2>(1);
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
 
-  // Estados de interfaz
-  const [isLoading, setIsLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [hasTelegramMiniApp, setHasTelegramMiniApp] = useState(false);
 
-  // Auto-detección si se abre dentro de Telegram Mini App (TMA)
   useEffect(() => {
-    if (typeof window !== "undefined" && window.Telegram?.WebApp?.initData) {
-      const initData = window.Telegram.WebApp.initData;
-      if (initData) {
-        setIsLoading(true);
-        window.Telegram.WebApp.ready();
-        window.Telegram.WebApp.expand();
-        loginTelegramWebApp(initData)
-          .then(() => {
-            router.push("/");
-          })
-          .catch((err: any) => {
-            setErrorMsg(`Fallo de login TMA: ${err.message}`);
-          })
-          .finally(() => {
-            setIsLoading(false);
-          });
-      }
+    if (typeof window === "undefined") return;
+
+    const tg = (window as any).Telegram?.WebApp;
+    if (tg?.initData) {
+      setHasTelegramMiniApp(true);
     }
-  }, [router]);
 
-  function resetFormFeedback() {
-    setErrorMsg(null);
-    setSuccessMsg(null);
-  }
+    // Widget oficial de Telegram SSO si está configurado el username del bot
+    const botUsername = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME;
+    if (botUsername && telegramWidgetRef.current && mode === "login") {
+      (window as any).onTelegramAuth = async (tgUser: Record<string, any>) => {
+        setError(null);
+        setLoading(true);
+        try {
+          await loginTelegram(tgUser);
+          router.push("/");
+        } catch (err: any) {
+          setError(err.message || "No se pudo autenticar con Telegram.");
+        } finally {
+          setLoading(false);
+        }
+      };
 
-  // 1. Manejo de Inicio de Sesión
-  async function handleLogin(e: React.FormEvent) {
+      telegramWidgetRef.current.innerHTML = "";
+      const script = document.createElement("script");
+      script.src = "https://telegram.org/js/telegram-widget.js?22";
+      script.async = true;
+      script.setAttribute("data-telegram-login", botUsername);
+      script.setAttribute("data-size", "large");
+      script.setAttribute("data-radius", "8");
+      script.setAttribute("data-onauth", "onTelegramAuth(user)");
+      script.setAttribute("data-request-access", "write");
+      telegramWidgetRef.current.appendChild(script);
+    }
+  }, [mode, router]);
+
+  async function handleLoginSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setIsLoading(true);
-    resetFormFeedback();
+    setError(null);
+    setInfoMessage(null);
+
+    if (!username.trim() || !password) {
+      setError("Ingresa tu alias de operador y contraseña.");
+      return;
+    }
+
+    setLoading(true);
     try {
       await login(username.trim(), password);
       router.push("/");
     } catch (err: any) {
-      setErrorMsg(err.message || "Usuario o contraseña incorrectos.");
+      setError(err.message || "Credenciales inválidas o cuenta suspendida.");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
-  // 2. Manejo de Registro de Usuario
-  async function handleRegister(e: React.FormEvent) {
-    e.preventDefault();
-    resetFormFeedback();
-
-    if (password.length < 8) {
-      setErrorMsg("La contraseña debe contener al menos 8 caracteres.");
-      return;
-    }
-    if (password !== confirmPassword) {
-      setErrorMsg("Las contraseñas ingresadas no coinciden.");
-      return;
-    }
-
-    setIsLoading(true);
+  async function handleTelegramMiniAppLogin() {
+    const tg = (window as any).Telegram?.WebApp;
+    if (!tg?.initData) return;
+    setError(null);
+    setLoading(true);
     try {
-      await registerUser({
-        username: username.trim(),
-        password,
-        telegram_id: telegramId.trim() || undefined,
-      });
-      setSuccessMsg("¡Cuenta creada exitosamente! Ingresando al panel...");
-      setTimeout(() => {
-        router.push("/");
-      }, 1000);
+      await loginTelegramWebApp(tg.initData);
+      router.push("/");
     } catch (err: any) {
-      setErrorMsg(err.message || "Error al crear la cuenta. Verifica los datos.");
+      setError(err.message || "Error verificando firma HMAC de Telegram Mini App.");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
-  // 3. Manejo de Envío de Código OTP
-  async function handleRequestRecoveryOtp(e: React.FormEvent) {
+  async function handleRequestOtp(e: React.FormEvent) {
     e.preventDefault();
-    resetFormFeedback();
+    setError(null);
+    setInfoMessage(null);
+
     if (!username.trim()) {
-      setErrorMsg("Ingresa tu nombre de usuario o Telegram ID.");
+      setError("Ingresa tu alias de operador para enviar el código por Telegram.");
       return;
     }
 
-    setIsLoading(true);
+    setLoading(true);
     try {
       const res = await recoverPassword(username.trim());
-      setSuccessMsg(res.message);
-      if (res.debug_code) {
-        // En desarrollo local o sin bot configurado
-        setRecoveryCode(res.debug_code);
-      }
-      setRecoveryStep(2);
+      setInfoMessage(
+        res.message ||
+          "Si el usuario tiene Telegram vinculado, se envió un código OTP de 6 dígitos."
+      );
+      setMode("recover_reset");
     } catch (err: any) {
-      setErrorMsg(err.message || "No se pudo despachar el código de recuperación.");
+      setError(err.message || "No fue posible solicitar la recuperación.");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
-  // 4. Manejo de Confirmación de Nueva Contraseña con OTP
   async function handleResetPassword(e: React.FormEvent) {
     e.preventDefault();
-    resetFormFeedback();
+    setError(null);
+    setInfoMessage(null);
 
-    if (newPassword.length < 8) {
-      setErrorMsg("La nueva contraseña debe tener al menos 8 caracteres.");
+    if (!resetCode.trim() || newPassword.length < 8) {
+      setError("Ingresa el código OTP de 6 dígitos y una contraseña de al menos 8 caracteres.");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setError("Las nuevas contraseñas no coinciden.");
       return;
     }
 
-    setIsLoading(true);
+    setLoading(true);
     try {
-      const res = await resetPassword(username.trim(), recoveryCode.trim(), newPassword);
-      setSuccessMsg(res.message);
-      setTimeout(() => {
-        setActiveTab("login");
-        setRecoveryStep(1);
-        setPassword("");
-        resetFormFeedback();
-      }, 1500);
+      const res = await resetPassword(username.trim(), resetCode.trim(), newPassword);
+      setInfoMessage(res.message || "Contraseña actualizada exitosamente. Inicia sesión.");
+      setPassword("");
+      setResetCode("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setMode("login");
     } catch (err: any) {
-      setErrorMsg(err.message || "Código inválido o expirado.");
+      setError(err.message || "Código OTP inválido o expirado.");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
   return (
-    <div className="min-h-[85vh] flex items-center justify-center px-4 py-8">
-      <div className="w-full max-w-md bg-white dark:bg-[#0E121A] border border-slate-200 dark:border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-6">
-        {/* Cabecera superior con retorno y selector de tema */}
-        <div className="flex justify-between items-center pb-2 border-b border-slate-200 dark:border-slate-800/80">
-          <a
-            href="/"
-            className="inline-flex items-center space-x-1.5 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:opacity-80 transition-opacity"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            <span>Volver a la Terminal</span>
-          </a>
+    <div className="min-h-screen bg-background text-on-surface flex flex-col justify-between relative overflow-hidden">
+      {/* Resplandor ambiental sutil Obsidian */}
+      <div className="pointer-events-none absolute -top-40 left-1/2 -translate-x-1/2 w-[680px] h-[340px] rounded-full bg-primary-container/8 blur-[130px]" />
 
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={toggleTheme}
-              aria-label="Cambiar tema de color"
-              className="p-1 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors"
-            >
-              {theme === "dark" ? (
-                <Sun className="h-3.5 w-3.5 text-amber-400" />
-              ) : (
-                <Moon className="h-3.5 w-3.5 text-slate-700" />
-              )}
-            </button>
-            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-widest">
-              v2.0 P2P Bot
+      {/* Barra Superior */}
+      <header className="relative z-10 h-16 px-5 lg:px-10 flex items-center justify-between border-b border-[#1e2430] bg-surface/80 backdrop-blur-md">
+        <Link href="/" className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-primary-container/15 border border-primary-container/30 flex items-center justify-center text-primary-container">
+            <span className="material-symbols-outlined text-[18px]">bolt</span>
+          </div>
+          <div>
+            <span className="text-sm font-bold text-white tracking-tight">
+              P2P Merchant OS
+            </span>
+            <span className="hidden sm:inline ml-2 text-[10px] font-mono uppercase tracking-widest text-slate-400">
+              Institutional Arbitrage Engine
             </span>
           </div>
-        </div>
+        </Link>
 
-        {/* Título e Icono */}
-        <div className="text-center space-y-2">
-          <div className="inline-flex p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 mb-1 shadow-inner">
-            <ShieldCheck className="h-8 w-8" />
-          </div>
-          <h1 className="text-xl font-bold font-mono tracking-wide text-slate-900 dark:text-slate-100">
-            SISTEMA P2P MERCHANT
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 font-sans">
-            Autenticación segura multi-usuario con arquitectura Fail-Closed
-          </p>
-        </div>
-
-        {/* Switcher de Pestañas: Iniciar Sesión / Crear Cuenta */}
-        {activeTab !== "recovery" && (
-          <div className="grid grid-cols-2 p-1 bg-slate-100 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded-2xl text-xs font-semibold">
+        <div className="flex items-center gap-3">
+          <Link
+            href="/"
+            className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors"
+          >
+            <span className="material-symbols-outlined text-[16px]">grid_view</span>
+            <span className="hidden sm:inline">Matriz Pública</span>
+          </Link>
+          <div className="p-0.5 rounded-lg bg-surface-container-low border border-[#1e2430] flex items-center text-[10px] font-mono">
             <button
               type="button"
-              onClick={() => {
-                setActiveTab("login");
-                resetFormFeedback();
-              }}
-              className={`py-2.5 rounded-xl transition-all flex items-center justify-center space-x-2 ${
-                activeTab === "login"
-                  ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm font-bold border border-slate-200 dark:border-transparent"
-                  : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
+              onClick={() => setTheme("dark")}
+              className={`px-2 py-1 rounded-md transition-colors ${
+                theme === "dark"
+                  ? "bg-primary-container text-on-primary font-bold"
+                  : "text-slate-400 hover:text-white"
               }`}
             >
-              <LogIn className="h-3.5 w-3.5" />
-              <span>Iniciar Sesión</span>
+              OSCURO
             </button>
             <button
               type="button"
-              onClick={() => {
-                setActiveTab("register");
-                resetFormFeedback();
-              }}
-              className={`py-2.5 rounded-xl transition-all flex items-center justify-center space-x-2 ${
-                activeTab === "register"
-                  ? "bg-white dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 shadow-sm font-bold border border-slate-200 dark:border-transparent"
-                  : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
+              onClick={() => setTheme("dim")}
+              className={`px-2 py-1 rounded-md transition-colors ${
+                theme === "dim"
+                  ? "bg-primary-container text-on-primary font-bold"
+                  : "text-slate-400 hover:text-white"
               }`}
             >
-              <UserPlus className="h-3.5 w-3.5" />
-              <span>Crear Cuenta</span>
+              ATENUADO
             </button>
           </div>
-        )}
+        </div>
+      </header>
 
-        {/* Notificaciones de Error o Éxito */}
-        {errorMsg && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-300 text-xs font-mono flex items-start space-x-2.5">
-            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-500" />
-            <span>{errorMsg}</span>
+      {/* Tarjeta Central de Autenticación */}
+      <main className="relative z-10 flex-1 flex items-center justify-center p-4 py-10">
+        <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-[#1e2430] shadow-2xl p-6 sm:p-8">
+          {/* Encabezado */}
+          <div className="mb-6">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-primary-container/10 border border-primary-container/25 text-[10px] font-mono font-semibold uppercase tracking-wider text-primary mb-3">
+              <span className="material-symbols-outlined text-[14px]">lock</span>
+              Terminal Segura RBAC
+            </div>
+            <h1 className="text-xl font-bold text-white tracking-tight">
+              {mode === "login"
+                ? "Acceso a la Mesa Operativa"
+                : "Recuperación vía Telegram OTP"}
+            </h1>
+            <p className="text-xs text-slate-400 mt-1">
+              {mode === "login"
+                ? "Ingresa tus credenciales de operador para gestionar spreads, órdenes y contabilidad SENIAT."
+                : "Recibe un código temporal de un solo uso en tu Telegram vinculado."}
+            </p>
           </div>
-        )}
 
-        {successMsg && (
-          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-300 text-xs font-mono flex items-start space-x-2.5">
-            <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-500" />
-            <span>{successMsg}</span>
-          </div>
-        )}
-
-        {/* TAB 1: FORMULARIO INICIAR SESIÓN */}
-        {activeTab === "login" && (
-          <form onSubmit={handleLogin} className="space-y-4 text-xs font-mono">
-            <div>
-              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                NOMBRE DE USUARIO
-              </label>
-              <div className="relative">
-                <UserIcon className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  required
-                  autoComplete="username"
-                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-                  placeholder="admin / trader"
-                />
-              </div>
+          {/* Alerta Condicional de Error (oculta por defecto salvo error real) */}
+          {error && (
+            <div className="mb-5 p-3 rounded-lg bg-error/10 border border-error/30 flex items-start gap-2.5 text-xs text-red-200">
+              <span className="material-symbols-outlined text-[18px] text-error shrink-0 mt-0.5">
+                gpp_maybe
+              </span>
+              <span>{error}</span>
             </div>
+          )}
 
-            <div>
-              <div className="flex justify-between items-center mb-1.5">
-                <label className="text-slate-700 dark:text-slate-300 font-semibold">CONTRASEÑA</label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab("recovery");
-                    resetFormFeedback();
-                  }}
-                  className="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline font-sans"
-                >
-                  ¿Olvidaste tu contraseña?
-                </button>
-              </div>
-              <div className="relative">
-                <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  autoComplete="current-password"
-                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-                  placeholder="••••••••••••"
-                />
-              </div>
+          {infoMessage && (
+            <div className="mb-5 p-3 rounded-lg bg-tertiary/10 border border-tertiary/30 flex items-start gap-2.5 text-xs text-emerald-200">
+              <span className="material-symbols-outlined text-[18px] text-tertiary shrink-0 mt-0.5">
+                check_circle
+              </span>
+              <span>{infoMessage}</span>
             </div>
+          )}
 
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 disabled:text-slate-400 font-bold font-mono text-xs transition-colors active:scale-[0.99]"
-            >
-              {isLoading ? "Validando credenciales..." : "Ingresar a la Terminal"}
-            </button>
-          </form>
-        )}
-
-        {/* TAB 2: FORMULARIO CREAR CUENTA (REGISTRO) */}
-        {activeTab === "register" && (
-          <form onSubmit={handleRegister} className="space-y-4 text-xs font-mono">
-            <div>
-              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                NUEVO USUARIO
-              </label>
-              <div className="relative">
-                <UserIcon className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  required
-                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-                  placeholder="Elige un alias (ej: trader_caracas)"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                CONTRASEÑA (MÍNIMO 8 CARACTERES)
-              </label>
-              <div className="relative">
-                <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-                  placeholder="••••••••••••"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                CONFIRMAR CONTRASEÑA
-              </label>
-              <div className="relative">
-                <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-                  placeholder="Repite la contraseña"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold flex justify-between">
-                <span>TELEGRAM ID NUMÉRICO (OPCIONAL)</span>
-                <span className="text-[10px] text-slate-500 font-normal">Para alertas y OTP</span>
-              </label>
-              <div className="relative">
-                <Send className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="text"
-                  value={telegramId}
-                  onChange={(e) => setTelegramId(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-                  placeholder="Ej: 123456789"
-                />
-              </div>
-              <p className="text-[10px] text-slate-500 mt-1 font-sans">
-                Si tu ID está en la lista de administradores, se te otorgará rol ADMIN automáticamente.
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 disabled:text-slate-400 font-bold font-mono text-xs transition-colors active:scale-[0.99]"
-            >
-              {isLoading ? "Creando cuenta..." : "Crear Cuenta de Usuario"}
-            </button>
-          </form>
-        )}
-
-        {/* TAB 3: RECUPERACIÓN DE CONTRASEÑA VÍA TELEGRAM OTP */}
-        {activeTab === "recovery" && (
-          <div className="space-y-4 text-xs font-mono">
-            <div className="p-3 bg-slate-100 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded-2xl flex items-center justify-between">
-              <span className="font-semibold text-slate-800 dark:text-slate-300">Recuperar Acceso</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("login");
-                  resetFormFeedback();
-                }}
-                className="text-[11px] text-slate-500 dark:text-slate-400 hover:underline"
-              >
-                Volver a Iniciar Sesión
-              </button>
-            </div>
-
-            {recoveryStep === 1 ? (
-              <form onSubmit={handleRequestRecoveryOtp} className="space-y-4">
-                <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans leading-relaxed">
-                  Ingresa tu nombre de usuario o tu ID numérico de Telegram vinculado. Te enviaremos un código de seguridad OTP de 6 dígitos.
-                </p>
-
+          {mode === "login" && (
+            <>
+              <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                    USUARIO O TELEGRAM ID
+                  <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                    Alias de Operador
                   </label>
                   <div className="relative">
-                    <UserIcon className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
+                    <span className="material-symbols-outlined text-[18px] text-slate-500 absolute left-3 top-1/2 -translate-y-1/2">
+                      person
+                    </span>
                     <input
                       type="text"
+                      autoComplete="username"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      required
-                      className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
-                      placeholder="Nombre de usuario o ID"
+                      placeholder="ej. admin o trader_p2p"
+                      className="w-full pl-10 pr-3 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white placeholder:text-slate-600 font-mono"
                     />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
+                      Contraseña
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setError(null);
+                        setInfoMessage(null);
+                        setMode("recover_request");
+                      }}
+                      className="text-[11px] text-primary hover:underline"
+                    >
+                      ¿Olvidaste tu contraseña?
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <span className="material-symbols-outlined text-[18px] text-slate-500 absolute left-3 top-1/2 -translate-y-1/2">
+                      key
+                    </span>
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••••••"
+                      className="w-full pl-10 pr-10 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white placeholder:text-slate-600 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                      aria-label="Mostrar u ocultar contraseña"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">
+                        {showPassword ? "visibility_off" : "visibility"}
+                      </span>
+                    </button>
                   </div>
                 </div>
 
                 <button
                   type="submit"
-                  disabled={isLoading}
-                  className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-white font-bold font-mono text-xs transition-colors"
+                  disabled={loading}
+                  className="w-full py-2.5 px-4 rounded-lg bg-primary-container text-on-primary font-bold text-sm hover:brightness-110 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary-container/10"
                 >
-                  {isLoading ? "Despachando código..." : "Enviar Código OTP a Telegram"}
+                  <span className="material-symbols-outlined text-[18px]">login</span>
+                  <span>{loading ? "Verificando..." : "Ingresar a la Terminal"}</span>
                 </button>
               </form>
-            ) : (
-              <form onSubmit={handleResetPassword} className="space-y-4">
-                <p className="text-[11px] text-slate-600 dark:text-slate-400 font-sans leading-relaxed">
-                  Ingresa el código OTP de 6 dígitos que recibiste y define tu nueva contraseña.
-                </p>
 
-                <div>
-                  <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                    CÓDIGO OTP (6 DÍGITOS)
-                  </label>
-                  <div className="relative">
-                    <KeyRound className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                    <input
-                      type="text"
-                      maxLength={6}
-                      value={recoveryCode}
-                      onChange={(e) => setRecoveryCode(e.target.value)}
-                      required
-                      className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 font-mono tracking-widest text-base focus:outline-none focus:border-emerald-500"
-                      placeholder="123456"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-slate-700 dark:text-slate-300 mb-1.5 font-semibold">
-                    NUEVA CONTRASEÑA
-                  </label>
-                  <div className="relative">
-                    <Lock className="h-4 w-4 text-slate-400 absolute left-3 top-3" />
-                    <input
-                      type="password"
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      required
-                      className="w-full bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-slate-900 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
-                      placeholder="••••••••••••"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex space-x-2">
+              {/* SSO con Telegram */}
+              {hasTelegramMiniApp && (
+                <div className="mt-4 pt-4 border-t border-[#1e2430]">
                   <button
                     type="button"
-                    onClick={() => setRecoveryStep(1)}
-                    className="w-1/3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 font-mono text-xs"
+                    onClick={handleTelegramMiniAppLogin}
+                    disabled={loading}
+                    className="w-full py-2.5 px-4 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary font-semibold text-xs hover:bg-secondary/25 transition-all flex items-center justify-center gap-2"
                   >
-                    Atrás
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isLoading}
-                    className="w-2/3 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 font-bold font-mono text-xs transition-colors"
-                  >
-                    {isLoading ? "Actualizando..." : "Restablecer"}
+                    <span className="material-symbols-outlined text-[18px]">send</span>
+                    <span>Acceso Instantáneo vía Telegram Mini App</span>
                   </button>
                 </div>
-              </form>
-            )}
-          </div>
-        )}
+              )}
 
-        {/* Separador */}
-        <div className="relative flex py-1 items-center">
-          <div className="flex-grow border-t border-slate-200 dark:border-slate-800"></div>
-          <span className="flex-shrink mx-4 text-slate-400 dark:text-slate-500 text-[10px] font-mono uppercase tracking-wider">
-            Canales de acceso seguro
-          </span>
-          <div className="flex-grow border-t border-slate-200 dark:border-slate-800"></div>
-        </div>
+              <div ref={telegramWidgetRef} className="mt-4 flex justify-center empty:hidden" />
 
-        {/* Banner de Telegram SSO y Bot */}
-        <div className="p-3.5 bg-sky-500/10 border border-sky-500/20 rounded-2xl flex items-center justify-between text-sky-600 dark:text-sky-400 text-xs font-mono">
-          <div className="flex items-center space-x-2.5">
-            <Send className="h-4 w-4 shrink-0" />
-            <div>
-              <p className="font-bold text-[11px]">Telegram SSO / Mini App</p>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 font-sans">
-                Acceso sin contraseña mediante el bot oficial
-              </p>
-            </div>
-          </div>
-          <span className="px-2 py-0.5 rounded-full bg-sky-500/20 border border-sky-500/40 text-[10px] font-bold text-sky-600 dark:text-sky-300">
-            EN LÍNEA
-          </span>
+              <div className="mt-6 pt-5 border-t border-[#1e2430] flex items-center justify-between text-xs">
+                <span className="text-slate-400">¿Nuevo operador en la mesa?</span>
+                <Link
+                  href="/register"
+                  className="font-semibold text-primary hover:underline flex items-center gap-1"
+                >
+                  <span>Crear Cuenta</span>
+                  <span className="material-symbols-outlined text-[15px]">arrow_forward</span>
+                </Link>
+              </div>
+            </>
+          )}
+
+          {mode === "recover_request" && (
+            <form onSubmit={handleRequestOtp} className="space-y-4">
+              <div>
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                  Alias de Operador Registrado
+                </label>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="Tu usuario en P2P Merchant OS"
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 px-4 rounded-lg bg-primary-container text-on-primary font-bold text-sm hover:brightness-110 disabled:opacity-50 transition-all"
+              >
+                {loading ? "Enviando OTP..." : "Enviar Código OTP por Telegram"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setMode("login");
+                }}
+                className="w-full py-2 text-xs text-slate-400 hover:text-white"
+              >
+                ← Volver al inicio de sesión
+              </button>
+            </form>
+          )}
+
+          {mode === "recover_reset" && (
+            <form onSubmit={handleResetPassword} className="space-y-4">
+              <div>
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                  Código OTP de 6 dígitos (Telegram)
+                </label>
+                <input
+                  type="text"
+                  maxLength={6}
+                  value={resetCode}
+                  onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ""))}
+                  placeholder="000000"
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-center tracking-[0.35em] text-base text-primary font-mono font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                  Nueva Contraseña
+                </label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Mínimo 8 caracteres"
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                  Confirmar Nueva Contraseña
+                </label>
+                <input
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  placeholder="Repite la nueva contraseña"
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 px-4 rounded-lg bg-tertiary text-on-tertiary font-bold text-sm hover:brightness-110 disabled:opacity-50 transition-all"
+              >
+                {loading ? "Actualizando..." : "Restablecer Contraseña"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMode("login")}
+                className="w-full py-2 text-xs text-slate-400 hover:text-white"
+              >
+                ← Cancelar y volver
+              </button>
+            </form>
+          )}
         </div>
-      </div>
+      </main>
+
+      {/* Pie Criptográfico */}
+      <footer className="relative z-10 py-4 px-6 border-t border-[#1e2430] bg-surface/60 flex flex-wrap items-center justify-center gap-4 text-[11px] font-mono text-slate-500">
+        <span className="flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-tertiary" />
+          AES-256-GCM Vault
+        </span>
+        <span>•</span>
+        <span>PBKDF2-HMAC-SHA256 (600k iter)</span>
+        <span>•</span>
+        <span>API Oficial Binance P2P</span>
+      </footer>
     </div>
   );
 }

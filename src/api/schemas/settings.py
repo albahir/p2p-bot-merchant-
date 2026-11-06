@@ -55,3 +55,26 @@ class UpdateGoogleSheetsConfigRequest(BaseModel):
     google_sheet_id: str | None = Field(None, description="ID o URL completa del Google Sheet")
     google_auth_type: Literal["SERVICE_ACCOUNT", "OAUTH2"] = "SERVICE_ACCOUNT"
 
+
+class GoogleSheetsSyncResponse(BaseModel):
+    """Resultado de sincronización manual hacia Google Sheets."""
+    success: bool
+    google_sheet_id: str | None = None
+    google_sheet_url: str | None = None
+    rows_exported: int = 0
+    journal_entries_exported: int = 0
+    service_account_email: str | None = None
+    message: str
+
+
+class TelegramStatusResponse(BaseModel):
+    """Estado sanitizado del Bot de Telegram (Cero Secretos en Texto Plano)."""
+    is_configured: bool
+    bot_token_masked: str
+    linked_chat_id: str | None = None
+    fail_closed_5xx_enabled: bool = True
+    weight_pause_enabled: bool = True
+    log_sanitization_enabled: bool = True
+    message: str
+
+

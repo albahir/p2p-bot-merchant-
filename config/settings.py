@@ -43,6 +43,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_USERS"),
         description="IDs de Telegram autorizados para comandos, separados por coma"
     )
+    TELEGRAM_TRADER_USER_IDS: str = Field(
+        default="",
+        validation_alias=AliasChoices("TELEGRAM_TRADER_USER_IDS", "TELEGRAM_TRADER_USERS"),
+        description="IDs de Telegram autorizados permanentemente con rol TRADER, separados por coma"
+    )
     TELEGRAM_PROXY_URL: str | None = Field(
         default=None,
         description="URL de proxy opcional para Telegram (ej. socks5://127.0.0.1:1080 o http://127.0.0.1:8080)"
@@ -128,6 +133,16 @@ class Settings(BaseSettings):
             clean_chat = self.TELEGRAM_ALERT_CHAT_ID.strip()
             if clean_chat.isdigit() and not clean_chat.startswith("-"):
                 users.append(int(clean_chat))
+        return users
+
+    @property
+    def telegram_trader_users(self) -> list[int]:
+        users: list[int] = []
+        if self.TELEGRAM_TRADER_USER_IDS:
+            for uid in self.TELEGRAM_TRADER_USER_IDS.split(","):
+                cleaned = uid.strip()
+                if cleaned.isdigit():
+                    users.append(int(cleaned))
         return users
 
     @property
