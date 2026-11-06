@@ -16,6 +16,7 @@ class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, description="Contraseña de al menos 8 caracteres")
     telegram_id: str | None = Field(default=None, description="ID numérico de Telegram para vincular cuenta")
+    google_sheet_id: str | None = Field(default=None, description="ID o URL de Google Sheets opcional")
 
 
 class PasswordRecoveryRequest(BaseModel):
@@ -54,6 +55,8 @@ class UserPublicResponse(BaseModel):
     username: str
     role: str
     telegram_id: str | None = None
+    google_sheet_id: str | None = None
+    permission_source: str = "Base de Datos"
     is_active: bool
     created_at: datetime
 
@@ -74,3 +77,15 @@ class RoleUpdateRequest(BaseModel):
 class StatusUpdateRequest(BaseModel):
     """Solicitud para activar o desactivar un usuario."""
     is_active: bool
+
+
+class AuthorizeTelegramRequest(BaseModel):
+    """Solicitud para autorizar o registrar un operador por ID de Telegram desde la web."""
+    telegram_id: str = Field(..., min_length=4, max_length=30)
+    username: str | None = Field(default=None, max_length=50)
+    role: str = Field(default="TRADER", pattern="^(ADMIN|TRADER|INVITADO)$")
+
+
+class UpdateUserSheetRequest(BaseModel):
+    """Solicitud de administrador para vincular/editar la hoja Google Sheets de un operador."""
+    google_sheet_id: str | None = Field(default=None, max_length=255)

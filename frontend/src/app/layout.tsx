@@ -3,8 +3,9 @@ import "./globals.css";
 import { ThemeProvider } from "@/lib/theme-context";
 
 export const metadata: Metadata = {
-  title: "P2P Merchant Workstation // Arbitraje & Control Fiscal",
-  description: "Terminal web y móvil de alta frecuencia para comercio P2P en Binance y control fiscal en Venezuela.",
+  title: "P2P Merchant OS — Mesa de Liquidez & Arbitraje Institucional",
+  description:
+    "Terminal institucional de arbitraje P2P en Binance, contabilidad SENIAT en partida doble y control Fail-Closed.",
 };
 
 export default function RootLayout({
@@ -18,17 +19,17 @@ export default function RootLayout({
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
-          href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+          rel="stylesheet"
+        />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
           rel="stylesheet"
         />
         <script src="https://telegram.org/js/telegram-web-app.js" async />
       </head>
-      <body className="bg-[#F8F9FA] dark:bg-[#07090E] text-slate-900 dark:text-slate-100 min-h-screen flex flex-col font-sans transition-colors duration-150">
-        <ThemeProvider>
-          <main className="flex-1 w-full mx-auto py-3 sm:py-5 px-2 sm:px-4">
-            {children}
-          </main>
-        </ThemeProvider>
+      <body className="bg-background text-on-surface antialiased selection:bg-[#f59e0b] selection:text-black min-h-screen flex flex-col">
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

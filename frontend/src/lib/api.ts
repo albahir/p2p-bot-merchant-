@@ -9,6 +9,8 @@ export interface User {
   username: string;
   role: "ADMIN" | "TRADER" | "INVITADO";
   telegram_id?: string | null;
+  google_sheet_id?: string | null;
+  permission_source?: string;
   is_active: boolean;
   created_at: string;
 }
@@ -219,6 +221,26 @@ export async function syncOrders(days = 30, trade_type?: string): Promise<any> {
   });
 }
 
+export async function uploadOrdersFile(file: File): Promise<any> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE_URL}/api/orders/upload`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || "Error al subir archivo de órdenes");
+  }
+  return res.json();
+}
+
+
 export function getExportOrdersUrl(format: "xlsx" | "csv_semicolon" | "csv_comma"): string {
   const token = getToken();
   return `${API_BASE_URL}/api/orders/export?format=${format}&token=${token || ""}`;
@@ -229,13 +251,19 @@ export interface RegisterData {
   username: string;
   password: string;
   telegram_id?: string;
+  google_sheet_id?: string;
 }
 
 export async function registerUser(data: RegisterData): Promise<AuthResponse> {
-  return apiRequest<AuthResponse>("/api/auth/register", {
+  const res = await apiRequest<AuthResponse>("/api/auth/register", {
     method: "POST",
     body: JSON.stringify(data),
   });
+  if (typeof window !== "undefined") {
+    localStorage.setItem("p2p_token", res.access_token);
+    localStorage.setItem("p2p_user", JSON.stringify(res.user));
+  }
+  return res;
 }
 
 export async function recoverPassword(username: string): Promise<{
@@ -331,6 +359,94 @@ export async function updateUserRole(userId: number, role: "ADMIN" | "TRADER" | 
   return apiRequest<User>(`/api/users/${userId}/role`, {
     method: "PATCH",
     body: JSON.stringify({ role }),
+  });
+}
+
+export async function updateUserStatus(userId: number, isActive: boolean): Promise<User> {
+  return apiRequest<User>(`/api/users/${userId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_active: isActive }),
+  });
+}
+
+export async function authorizeTelegramUser(data: {
+  telegram_id: string;
+  username?: string;
+  role?: "ADMIN" | "TRADER" | "INVITADO";
+}): Promise<User> {
+  return apiRequest<User>("/api/users/authorize-telegram", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateUserSheet(userId: number, googleSheetId: string | null): Promise<User> {
+  return apiRequest<User>(`/api/users/${userId}/sheet`, {
+    method: "PATCH",
+    body: JSON.stringify({ google_sheet_id: googleSheetId }),
+  });
+}
+
+// Métodos de Google Sheets y Telegram
+export interface GoogleSheetsConfigResponse {
+  google_sheet_id?: string | null;
+  google_sheet_url?: string | null;
+  google_auth_type: "SERVICE_ACCOUNT" | "OAUTH2" | string;
+  service_account_email?: string | null;
+  is_connected: boolean;
+  message: string;
+}
+
+export interface GoogleSheetsSyncResponse {
+  success: boolean;
+  google_sheet_id?: string | null;
+  google_sheet_url?: string | null;
+  rows_exported: number;
+  journal_entries_exported: number;
+  service_account_email?: string | null;
+  message: string;
+}
+
+export interface TelegramStatusResponse {
+  is_configured: boolean;
+  bot_token_masked: string;
+  linked_chat_id?: string | null;
+  fail_closed_5xx_enabled: boolean;
+  weight_pause_enabled: boolean;
+  log_sanitization_enabled: boolean;
+  message: string;
+}
+
+export async function getSheetsSettings(): Promise<GoogleSheetsConfigResponse> {
+  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets");
+}
+
+export async function saveSheetsSettings(data: {
+  google_sheet_id: string | null;
+  google_auth_type?: "SERVICE_ACCOUNT" | "OAUTH2";
+}): Promise<GoogleSheetsConfigResponse> {
+  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets", {
+    method: "POST",
+    body: JSON.stringify({
+      google_sheet_id: data.google_sheet_id,
+      google_auth_type: data.google_auth_type || "SERVICE_ACCOUNT",
+    }),
+  });
+}
+
+export async function syncSheetsNow(): Promise<GoogleSheetsSyncResponse> {
+  return apiRequest<GoogleSheetsSyncResponse>("/api/settings/sheets/sync", {
+    method: "POST",
+  });
+}
+
+export async function getTelegramSettings(): Promise<TelegramStatusResponse> {
+  return apiRequest<TelegramStatusResponse>("/api/settings/telegram");
+}
+
+export async function sendTelegramTestAlert(): Promise<{ success: boolean; message: string }> {
+  return apiRequest<{ success: boolean; message: string }>("/api/settings/telegram/test", {
+    method: "POST",
   });
 }
 

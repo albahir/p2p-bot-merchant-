@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from "react";
 
-export type Theme = "dark" | "light";
+export type Theme = "dark" | "dim";
 
 interface ThemeContextType {
   theme: Theme;
@@ -21,8 +21,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("p2p_theme") as Theme | null;
-      const initial = saved === "light" ? "light" : "dark";
+      const saved = localStorage.getItem("p2p_theme");
+      const initial: Theme = saved === "dim" ? "dim" : "dark";
       setThemeState(initial);
       applyTheme(initial);
     } catch {
@@ -33,13 +33,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   function applyTheme(t: Theme) {
     if (typeof document !== "undefined") {
       const root = document.documentElement;
-      if (t === "dark") {
-        root.classList.add("dark");
-        root.classList.remove("light");
-      } else {
-        root.classList.remove("dark");
-        root.classList.add("light");
-      }
+      root.classList.remove("dark", "dim", "light");
+      root.classList.add(t);
     }
   }
 
@@ -47,12 +42,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setThemeState(t);
     try {
       localStorage.setItem("p2p_theme", t);
-    } catch {}
+    } catch {
+      // Ignorar modo privado sin localStorage
+    }
     applyTheme(t);
   }
 
   function toggleTheme() {
-    setTheme(theme === "dark" ? "light" : "dark");
+    setTheme(theme === "dark" ? "dim" : "dark");
   }
 
   return (

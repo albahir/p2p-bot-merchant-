@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_db, require_authenticated, require_trader
@@ -17,6 +17,7 @@ from src.data.models import User
 from src.data.repositories import OrderRepository
 
 router = APIRouter(prefix="/api/orders", tags=["Órdenes P2P"])
+
 
 
 @router.get("", response_model=OrderListResponse)
@@ -95,6 +96,50 @@ def sync_binance_orders(
         total_volume_fiat=result.total_volume_fiat,
         message=f"Sincronización completada: {result.orders_inserted} nuevas órdenes guardadas.",
     )
+
+
+@router.post("/upload", response_model=SyncOrdersResponse)
+async def upload_orders_file(
+    file: Annotated[UploadFile, File()],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+) -> SyncOrdersResponse:
+    """Importa órdenes de Binance P2P directamente desde un archivo Excel (.xlsx) o CSV descargado."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El archivo subido está vacío.",
+        )
+
+    syncer = BinanceHistorySyncer()
+    result = syncer.import_orders_file(
+        file_bytes=content,
+        filename=file.filename or "orders.xlsx",
+        db=db,
+    )
+
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.error_message or "Error procesando archivo de órdenes.",
+        )
+
+    return SyncOrdersResponse(
+        success=True,
+        total_fetched=result.total_fetched,
+        orders_inserted=result.orders_inserted,
+        orders_existing=result.orders_existing,
+        buy_orders=result.buy_orders,
+        sell_orders=result.sell_orders,
+        total_volume_usdt=result.total_volume_usdt,
+        total_volume_fiat=result.total_volume_fiat,
+        message=(
+            f"Archivo importado exitosamente: {result.total_fetched} órdenes procesadas "
+            f"({result.orders_inserted} nuevas agregadas a la base de datos)."
+        ),
+    )
+
 
 
 @router.get("/export")

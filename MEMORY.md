@@ -18,6 +18,27 @@
   - `researcher.md`: Investigador Técnico & Especialista en Documentación (APIs, benchmarking y cloud).
 
 ### ✅ Paquetes Completados
+- [x] **Paquete 020 (Migración Integral a Interfaz Institucional "P2P Merchant OS" de 8 Pantallas — SPEC-020)**:
+  - Removida por completo la interfaz Next.js anterior (`ARBITEX` Blanco Perla / componentes obsoletos `terminal-header.tsx`, `telegram-mini-app-bar.tsx`, `binance-settings-card.tsx`) e implantado el sistema de diseño **Institutional Arbitrage Engine** (`#0a0e13` Obsidian / `#131922` Atenuado, `#f59e0b` Amber Gold, `#10b981` Emerald, `#4cd7f6` Cyan, `Inter` + `JetBrains Mono` con `tabular-nums`).
+  - Shell unificado en [`frontend/src/components/app-shell.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/app-shell.tsx) con las 6 rutas operativas, telemetría en tiempo real (`BCV`, `USDT/VES`, `x-mbx-used-weight`, `Motor Activo / Pausa Fail-Closed`), selector `[OSCURO | ATENUADO]` y badges reales RBAC (`ADMIN`, `TRADER`, `INVITADO`).
+  - Implementadas y conectadas al backend FastAPI las **8 pantallas corregidas**:
+    1. [`/login`](file:///c:/p2p-bot-merchant/frontend/src/app/login/page.tsx): Login Obsidian con alerta condicional de error, recuperación vía OTP Telegram y SSO Telegram Mini App / Login Widget.
+    2. [`/register`](file:///c:/p2p-bot-merchant/frontend/src/app/register/page.tsx): Registro de operador con medidor criptográfico de 4 niveles, validación numérica de Telegram ID y vinculación opcional de `Google Sheet ID`.
+    3. [`/`](file:///c:/p2p-bot-merchant/frontend/src/app/page.tsx): Matriz de Spreads & Bancos con toggle `[USD Paralelo Real | USD Legal BCV]`, chips bancarios, deducción interbancaria `0.3%` Pago Móvil y Top 3 rutas cruzadas enlazadas al simulador.
+    4. [`/calculator`](file:///c:/p2p-bot-merchant/frontend/src/app/calculator/page.tsx): Calculadora Instantánea de Ciclos P2P exclusivamente sobre Binance P2P (sin Bybit ni IGTF), con toggle `0% Mismo Banco` vs `0.3% Pago Móvil`, `Maker 0%` vs `Taker 0.1%`, punto de equilibrio (`Break-Even`) y proyección multiciclo (`1/3/5/8 Ciclos`).
+    5. [`/orders`](file:///c:/p2p-bot-merchant/frontend/src/app/orders/page.tsx): Ganancias Reales & Órdenes con exportación única CSV/Excel, sincronización API (`7d-365d`) con barra de progreso condicional, importación manual `.csv/.xlsx`, buscador y selector `FIFO / Costo Promedio`.
+    6. [`/accounting`](file:///c:/p2p-bot-merchant/frontend/src/app/accounting/page.tsx): Contabilidad SENIAT con desglose bancario real (`getLiveBalance`), OCR de recibos (`uploadVoucherFile`), `Auto-Conciliar` (`reconcileOrphanVouchers`), pestañas Libro Diario / Libro Mayor / Conciliación 6 Piezas y sello `CERRAR-MES`.
+    7. [`/sheets`](file:///c:/p2p-bot-merchant/frontend/src/app/sheets/page.tsx): Sincronización Google Sheets multi-usuario con correo `service_account_email` copiable, guardado de URL/ID y sincronización manual (`POST /api/settings/sheets/sync`).
+    8. [`/settings`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx): Configuración API, Seguridad Fail-Closed & Operadores RBAC cumpliendo **Cero Secretos en UI** (llaves Binance write-only en AES-256-GCM y tokens enmascarados), alerta de prueba Telegram y tabla RBAC con origen `.env` vs Base de Datos.
+  - Endpoints de soporte TDD verificados en [`tests/unit/test_stitch_ui_backend_endpoints.py`](file:///c:/p2p-bot-merchant/tests/unit/test_stitch_ui_backend_endpoints.py) y compilación `npm run build` limpia (13/13 páginas estáticas generadas con 0 errores).
+
+- [x] **Paquete 019 (Preservación de Roles de Traders y Persistencia Inmune a Reinicios)**:
+  - Implementado soporte para `TELEGRAM_TRADER_USERS` en [`Settings`](file:///c:/p2p-bot-merchant/config/settings.py).
+  - En [`TelegramNotifier.get_user_role`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py), los operadores configurados en esta lista estática mantienen permanentemente el rol `TRADER`, incluso si la base de datos se regenera tras un commit o reinicio de contenedor.
+  - En [`src/api/routes/auth.py`](file:///c:/p2p-bot-merchant/src/api/routes/auth.py), los registros y logins SSO/WebApp promueven automáticamente a los operadores incluidos en `TELEGRAM_TRADER_USERS` al rol `TRADER`.
+  - Configurado volumen persistente `/app/data` en [`Dockerfile`](file:///c:/p2p-bot-merchant/Dockerfile) y `botdata:/app/data` en [`docker/docker-compose.yml`](file:///c:/p2p-bot-merchant/docker/docker-compose.yml).
+  - Suite de 4 pruebas unitarias pasando al 100% en [`tests/unit/test_telegram_trader_users_fallback.py`](file:///c:/p2p-bot-merchant/tests/unit/test_telegram_trader_users_fallback.py).
+
 - [x] **Paquete 001 (Fundación de Seguridad)**: Cifrado AES-256-GCM, auditoría append-only SHA-256, permisos de IP y tests completos (9/9).
 - [x] **Paquete 002 (Conector Binance P2P)**: Cliente Ed25519, monitor de weight, límite de 30 días, anuncios e ingesta (10/10).
 - [x] **Paquete 005 (Motor Fiscal e Historial)**: FIFO y Promedio ponderado, tasa BCV, exportador Excel de dos pestañas (9/9).
@@ -641,13 +662,23 @@
       - 0 errores en `mypy` (12 archivos fuente).
       - 0 advertencias de `ruff check`.
 
+53. **Migración Integral a Interfaz Institucional "P2P Merchant OS" y Endurecimiento Zero-Secrets en UI (ADR 053 / SPEC-020)**:
+    - **Auditoría de Artefactos Stitch (Iteración 3 + Pantalla 8)**:
+      - Se detectó en la maqueta HTML de la 8va pantalla (`code (8) (1).html`) una violación a la Regla Constitucional #5 (*Cero Secretos en UI*): exposición de una API Key completa de 64 caracteres en `input value="..."` y `navigator.clipboard.writeText(...)`. Se reemplazó por visualización estrictamente enmascarada (`api_key_masked` y `bot_token_masked`) y formulario *write-only* que limpia la memoria del cliente tras cifrar en `AES-256-GCM`.
+      - Se corrigieron inconsistencias heredadas en las vistas generadas: subcajas bancarias duplicadas en Contabilidad, título duplicado en el KPI #3 de la Calculadora, barra de progreso fija al 100% y botones duplicados en Órdenes, omisión del enlace a Calculadora en el sidebar de Sheets, referencias a Bybit/IGTF y recorte de botones en la tabla de Operadores.
+    - **Arquitectura Frontend Consolidada (8 Rutas + 2 Redirecciones)**:
+      - Sistema de temas institucional dual `[OSCURO | ATENUADO]` (`#0a0e13` Obsidian vs `#131922` Slate Dimmed) gestionado por [`theme-context.tsx`](file:///c:/p2p-bot-merchant/frontend/src/lib/theme-context.tsx) y [`globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css).
+      - Redirección limpia de rutas heredadas (`/admin` → `/settings`, `/fiscal` → `/accounting`) preservando compatibilidad con marcadores previos.
+    - **Extensión de API FastAPI con TDD**:
+      - Nuevos endpoints: `POST /api/users/authorize-telegram`, `PATCH /api/users/{id}/sheet`, `GET /api/settings/telegram`, `POST /api/settings/telegram/test` y `POST /api/settings/sheets/sync`, además de `permission_source` en `GET /api/users` y `google_sheet_id` opcional en `POST /api/auth/register`.
+
 ---
 
 ## 🎯 Guía Operativa Actual
 
-1. **Frontend Moderno (Next.js 14)**:
+1. **Frontend Institucional "P2P Merchant OS" (Next.js 14)**:
    - Desarrollo: `cd frontend && npm run dev` (abre en `http://localhost:3000`).
-   - Compilación: `cd frontend && npm run build` (8 rutas compiladas con 0 errores).
+   - Compilación: `cd frontend && npm run build` (8 pantallas institucionales + redirecciones compiladas con 0 errores).
 2. **API REST y WebSockets (FastAPI)**:
    - Iniciar API: `uvicorn src.api.main:app --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
 3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.

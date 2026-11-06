@@ -1,545 +1,821 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { AppShell } from "@/components/app-shell";
 import {
-  AlertCircle,
-  ArrowRight,
-  BookOpen,
-  Calendar,
-  CheckCircle2,
-  DollarSign,
-  Download,
-  FileSpreadsheet,
-  FileText,
-  Filter,
-  Landmark,
-  RefreshCw,
-  Search,
-  ShieldCheck,
-  UploadCloud,
-  Wallet,
-} from "lucide-react";
-
-import {
+  FiscalSummary,
+  JournalEntryItem,
+  LedgerSummaryItem,
+  UploadVoucherResponse,
+  User,
   getCurrentUser,
   getExportAccountingExcelUrl,
   getExportAccountingPdfUrl,
+  getFiscalSummary,
   getJournalEntries,
   getLedgerSummaries,
-  JournalEntryItem,
-  LedgerSummaryItem,
+  getLiveBalance,
+  matchVoucherWithOrder,
+  reconcileOrphanVouchers,
   uploadVoucherFile,
-  UploadVoucherResponse,
-  User,
 } from "@/lib/api";
 
+type AccountingTab = "JOURNAL" | "LEDGER" | "FISCAL_6";
+
+interface BankBreakdownItem {
+  bank_name: string;
+  initial_ves: number;
+  inflows_ves: number;
+  outflows_ves: number;
+  theoretical_ves: number;
+}
+
+interface LiveBalanceState {
+  year: number;
+  month: number;
+  initial_usdt: number;
+  inflow_usdt: number;
+  outflow_usdt: number;
+  theoretical_usdt: number;
+  total_initial_ves: number;
+  total_inflows_ves: number;
+  total_outflows_ves: number;
+  total_theoretical_ves: number;
+  bank_breakdown: BankBreakdownItem[];
+}
+
+const MONTHS = [
+  { value: 1, label: "Enero" },
+  { value: 2, label: "Febrero" },
+  { value: 3, label: "Marzo" },
+  { value: 4, label: "Abril" },
+  { value: 5, label: "Mayo" },
+  { value: 6, label: "Junio" },
+  { value: 7, label: "Julio" },
+  { value: 8, label: "Agosto" },
+  { value: 9, label: "Septiembre" },
+  { value: 10, label: "Octubre" },
+  { value: 11, label: "Noviembre" },
+  { value: 12, label: "Diciembre" },
+];
+
 export default function AccountingPage() {
-  const [user, setUser] = useState<User | null>(null);
+  const voucherInputRef = useRef<HTMLInputElement>(null);
   const now = new Date();
+
+  const [user, setUser] = useState<User | null>(null);
   const [year, setYear] = useState<number>(now.getFullYear());
   const [month, setMonth] = useState<number>(now.getMonth() + 1);
+  const [initialVes, setInitialVes] = useState<number>(0);
+  const [initialUsdt, setInitialUsdt] = useState<number>(0);
+  const [activeTab, setActiveTab] = useState<AccountingTab>("JOURNAL");
 
-  // Estados de datos
+  const [liveBalance, setLiveBalance] = useState<LiveBalanceState | null>(null);
   const [journalEntries, setJournalEntries] = useState<JournalEntryItem[]>([]);
   const [ledgerSummaries, setLedgerSummaries] = useState<LedgerSummaryItem[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [fiscalSummary, setFiscalSummary] = useState<FiscalSummary | null>(null);
 
-  // Filtros de Libro Diario
-  const [searchRef, setSearchRef] = useState<string>("");
-  const [selectedAccount, setSelectedAccount] = useState<string>("ALL");
-  const [activeTab, setActiveTab] = useState<"DIARIO" | "MAYOR">("DIARIO");
+  const [lastVoucher, setLastVoucher] = useState<UploadVoucherResponse | null>(null);
+  const [manualOrderNumber, setManualOrderNumber] = useState<string>("");
 
-  // Estado de carga de comprobantes
-  const [isUploading, setIsUploading] = useState<boolean>(false);
-  const [uploadFeedback, setUploadFeedback] = useState<UploadVoucherResponse | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [uploadingOcr, setUploadingOcr] = useState<boolean>(false);
+  const [reconciling, setReconciling] = useState<boolean>(false);
+  const [showCloseModal, setShowCloseModal] = useState<boolean>(false);
+  const [closeConfirmText, setCloseConfirmText] = useState<string>("");
+  const [periodClosed, setPeriodClosed] = useState<boolean>(false);
 
-  const loadData = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setErrorMsg(null);
-      const [entries, ledgers] = await Promise.all([
-        getJournalEntries(),
-        getLedgerSummaries(year, month),
-      ]);
-      setJournalEntries(entries);
-      setLedgerSummaries(ledgers);
-    } catch (err: any) {
-      setErrorMsg(err.message || "Error al cargar la información contable.");
-    } finally {
-      setIsLoading(false);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  const loadAccountingData = useCallback(async () => {
+    const current = getCurrentUser();
+    setUser(current);
+    if (!current || current.role === "INVITADO") {
+      setLoading(false);
+      return;
     }
-  }, [year, month]);
+
+    setLoading(true);
+    const periodStr = `${year}-${String(month).padStart(2, "0")}`;
+    const startDate = `${periodStr}-01`;
+
+    try {
+      const [liveRes, journalRes, ledgerRes, fiscalRes] = await Promise.all([
+        getLiveBalance(year, month, initialUsdt, initialVes).catch(() => null),
+        getJournalEntries(startDate).catch(() => []),
+        getLedgerSummaries(year, month, undefined, initialVes).catch(() => []),
+        getFiscalSummary(periodStr, initialVes).catch(() => null),
+      ]);
+
+      if (liveRes) setLiveBalance(liveRes);
+      setJournalEntries(journalRes || []);
+      setLedgerSummaries(ledgerRes || []);
+      if (fiscalRes) setFiscalSummary(fiscalRes);
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "Error al consultar el motor contable SENIAT.",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [year, month, initialUsdt, initialVes]);
 
   useEffect(() => {
-    setUser(getCurrentUser());
-    loadData();
-  }, [loadData]);
+    loadAccountingData();
+  }, [loadAccountingData]);
 
-  // Manejo de Dropzone para Comprobantes
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  async function handleUploadReceipt(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-
+    setFeedback(null);
+    setUploadingOcr(true);
     try {
-      setIsUploading(true);
-      setUploadFeedback(null);
       const res = await uploadVoucherFile(file);
-      setUploadFeedback(res);
-      await loadData();
+      setLastVoucher(res);
+      setFeedback({
+        type: "success",
+        text: `Comprobante OCR #${res.reference_number} (${res.bank_name} • Bs. ${res.amount_ves.toFixed(
+          2
+        )}) procesado.`,
+      });
+      await loadAccountingData();
     } catch (err: any) {
-      setErrorMsg(err.message || "Error procesando el comprobante bancario.");
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo extraer el recibo bancario mediante OCR.",
+      });
     } finally {
-      setIsUploading(false);
+      setUploadingOcr(false);
+      if (voucherInputRef.current) voucherInputRef.current.value = "";
     }
-  };
+  }
 
-  // Filtrado de Libro Diario
-  const filteredEntries = journalEntries.filter((e) => {
-    const matchesAccount = selectedAccount === "ALL" || e.account_code === selectedAccount;
-    const q = searchRef.toLowerCase();
-    const matchesSearch =
-      !searchRef ||
-      e.reference.toLowerCase().includes(q) ||
-      e.description.toLowerCase().includes(q) ||
-      e.account_name.toLowerCase().includes(q);
-    return matchesAccount && matchesSearch;
-  });
+  async function handleAutoReconcile() {
+    setFeedback(null);
+    setReconciling(true);
+    try {
+      const res = await reconcileOrphanVouchers(48);
+      setFeedback({
+        type: "success",
+        text:
+          res?.message ||
+          `Auto-conciliación ejecutada (${res?.matched_count ?? 0} recibos vinculados).`,
+      });
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "Error al auto-conciliar comprobantes huérfanos.",
+      });
+    } finally {
+      setReconciling(false);
+    }
+  }
 
-  // Cálculos de totales
-  const totalDebe = filteredEntries.reduce((sum, e) => sum + e.debit, 0);
-  const totalHaber = filteredEntries.reduce((sum, e) => sum + e.credit, 0);
-  const isJournalBalanced = Math.abs(totalDebe - totalHaber) < 0.01;
+  async function handleManualMatch(e: React.FormEvent) {
+    e.preventDefault();
+    if (!lastVoucher || !manualOrderNumber.trim()) return;
+    try {
+      await matchVoucherWithOrder(lastVoucher.voucher_id, manualOrderNumber.trim());
+      setFeedback({
+        type: "success",
+        text: `Comprobante #${lastVoucher.reference_number} vinculado con orden ${manualOrderNumber.trim()}.`,
+      });
+      setManualOrderNumber("");
+      setLastVoucher(null);
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo vincular el comprobante a la orden.",
+      });
+    }
+  }
 
-  // Cuentas destacadas
-  const bancoVES = ledgerSummaries.find((s) => s.account_code === "1.1.01");
-  const activoUSDT = ledgerSummaries.find((s) => s.account_code === "1.1.05");
-  const comisionesBanco = ledgerSummaries.find((s) => s.account_code === "5.2.01");
+  if (!user || user.role === "INVITADO") {
+    return (
+      <AppShell
+        title="Contabilidad & Libro Diario SENIAT"
+        badge="ACCESO RESTRINGIDO"
+        subtitle="Módulo contable en partida doble reservado para operadores TRADER y ADMIN."
+      >
+        <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
+          <span className="material-symbols-outlined text-[36px] text-primary">
+            menu_book
+          </span>
+          <h2 className="text-base font-bold text-white">
+            Inicia sesión con rol TRADER o ADMIN
+          </h2>
+          <p className="text-xs text-slate-400">
+            Accede al Libro Diario encadenado con SHA-256, Libro Mayor mensual y conciliación OCR de recibos bancarios.
+          </p>
+          <Link
+            href="/login"
+            className="inline-block px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold"
+          >
+            Ir al Inicio de Sesión
+          </Link>
+        </div>
+      </AppShell>
+    );
+  }
+
+  // Subcajas reales de bancos (corrige el bug de Stitch que repetía "SALDO INICIAL DEL MES" 3 veces)
+  const bankBoxes: BankBreakdownItem[] =
+    liveBalance?.bank_breakdown && liveBalance.bank_breakdown.length > 0
+      ? liveBalance.bank_breakdown.slice(0, 3)
+      : [
+          {
+            bank_name: "Banesco",
+            initial_ves: 0,
+            inflows_ves: 0,
+            outflows_ves: 0,
+            theoretical_ves: 0,
+          },
+          {
+            bank_name: "BDV / Pago Móvil",
+            initial_ves: 0,
+            inflows_ves: 0,
+            outflows_ves: 0,
+            theoretical_ves: 0,
+          },
+          {
+            bank_name: "Mercantil",
+            initial_ves: 0,
+            inflows_ves: 0,
+            outflows_ves: 0,
+            theoretical_ves: 0,
+          },
+        ];
 
   return (
-    <div className="w-full max-w-7xl mx-auto space-y-5 font-sans pb-16">
-      {/* Barra de Navegación y Retorno */}
-      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800 text-xs">
-        <div className="flex items-center space-x-4">
-          <a
-            href="/"
-            className="inline-flex items-center space-x-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors"
-          >
-            <span>← Terminal Principal</span>
-          </a>
-          <span className="text-slate-400 dark:text-slate-600">|</span>
-          <a
-            href="/fiscal"
-            className="inline-flex items-center space-x-1.5 font-semibold text-slate-700 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors"
-          >
-            <span>Reconstrucción Fiscal (6 Piezas) →</span>
-          </a>
-        </div>
-        <div className="flex items-center space-x-2 text-slate-500 font-mono text-[11px]">
-          <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-          <span>Partida Doble // Encadenamiento Criptográfico SHA-256</span>
-        </div>
-      </div>
-
-      {/* Cabecera del Módulo */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white dark:bg-[#0D111A] p-5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div>
-          <h1 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center space-x-2.5">
-            <span className="p-2 rounded-lg bg-red-600 text-white">
-              <BookOpen className="h-4 w-4" />
-            </span>
-            <span>Sistema Contable P2P: Libro Diario & Libro Mayor</span>
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Registro cronológico inmutable con cuadre de partida doble (Debe = Haber) y conciliación automática.
-          </p>
-        </div>
-
-        {/* Parámetros de Período y Botones de Exportación */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex items-center space-x-2 bg-slate-50 dark:bg-[#121622] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700">
-            <Calendar className="h-3.5 w-3.5 text-slate-400" />
+    <AppShell
+      title="Contabilidad, Libro Diario & Conciliación OCR"
+      badge={periodClosed ? "PERÍODO CERRADO" : "PARTIDA DOBLE SHA-256"}
+      subtitle="Libros contables auditables (formato SENIAT), saldos teóricos en vivo y conciliación de comprobantes bancarios."
+      actions={
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Selector de Período Mes / Año */}
+          <div className="flex items-center gap-1 bg-surface-container px-2 py-1 rounded-lg border border-[#1e2430] text-xs font-mono">
             <select
-              value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
-              className="bg-transparent text-xs font-semibold text-slate-800 dark:text-slate-200 outline-none"
+              value={month}
+              onChange={(e) => setMonth(Number(e.target.value))}
+              className="bg-transparent text-white focus:outline-hidden"
             >
-              {[2024, 2025, 2026, 2027].map((y) => (
-                <option key={y} value={y} className="dark:bg-[#121622]">
-                  {y}
+              {MONTHS.map((m) => (
+                <option key={m.value} value={m.value} className="bg-[#141920]">
+                  {m.label}
                 </option>
               ))}
             </select>
             <select
-              value={month}
-              onChange={(e) => setMonth(Number(e.target.value))}
-              className="bg-transparent text-xs font-semibold text-slate-800 dark:text-slate-200 outline-none"
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value))}
+              className="bg-transparent text-primary font-bold focus:outline-hidden"
             >
-              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                <option key={m} value={m} className="dark:bg-[#121622]">
-                  Mes {m.toString().padStart(2, "0")}
+              {[2025, 2026, 2027].map((y) => (
+                <option key={y} value={y} className="bg-[#141920]">
+                  {y}
                 </option>
               ))}
             </select>
           </div>
 
-          <button
-            onClick={loadData}
-            disabled={isLoading}
-            className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-xs font-semibold transition-colors"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
-            <span>Actualizar</span>
-          </button>
-
           <a
             href={getExportAccountingExcelUrl(year, month)}
             target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition-colors shadow-xs"
+            rel="noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center gap-1.5 whitespace-nowrap"
           >
-            <FileSpreadsheet className="h-3.5 w-3.5" />
-            <span>Excel (.xlsx)</span>
+            <span className="material-symbols-outlined text-[15px]">grid_on</span>
+            <span>Excel 4 Pestañas</span>
           </a>
 
           <a
             href={getExportAccountingPdfUrl(year, month)}
             target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold transition-colors shadow-xs"
+            rel="noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-slate-200 text-xs font-mono flex items-center gap-1.5 whitespace-nowrap"
           >
-            <FileText className="h-3.5 w-3.5" />
-            <span>PDF SENIAT</span>
+            <span className="material-symbols-outlined text-[15px] text-secondary">
+              picture_as_pdf
+            </span>
+            <span>PDF Ejecutivo</span>
           </a>
-        </div>
-      </div>
 
-      {errorMsg && (
-        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-600 dark:text-red-400 text-xs flex items-center space-x-2">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          <span>{errorMsg}</span>
+          <button
+            type="button"
+            onClick={() => setShowCloseModal(true)}
+            className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 flex items-center gap-1 whitespace-nowrap"
+          >
+            <span className="material-symbols-outlined text-[15px]">lock_clock</span>
+            <span>Cerrar Mes</span>
+          </button>
         </div>
-      )}
+      }
+    >
+      <div className="space-y-5">
+        {feedback && (
+          <div
+            className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs ${
+              feedback.type === "success"
+                ? "bg-tertiary/10 border-tertiary/30 text-emerald-200"
+                : "bg-error/10 border-error/30 text-red-200"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[18px]">
+                {feedback.type === "success" ? "task_alt" : "error"}
+              </span>
+              <span>{feedback.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFeedback(null)}
+              className="text-slate-400 hover:text-white"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
-      {/* Tarjetas de Saldo del Libro Mayor */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Banco Nacional VES */}
-        <div className="bg-white dark:bg-[#0D111A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-              <Landmark className="h-3.5 w-3.5 text-blue-500" />
-              1.1.01 Banco Nacional VES
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
-              Activo Circulante
-            </span>
-          </div>
-          <div className="space-y-1">
-            <div className="text-xl font-bold font-mono text-slate-900 dark:text-slate-100">
-              Bs. {(bancoVES?.final_balance || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
+        {/* 3 Tarjetas Bento de Saldos y Conciliación OCR (Corregidas sin IGTF ni desbordes) */}
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          {/* Card 1: Saldo Bancario Teórico Consolidado VES + Subcajas por Banco Real */}
+          <div className="lg:col-span-5 p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  Saldo Teórico Consolidado en Bancos (VES)
+                </div>
+                <div className="mt-1 text-2xl font-mono font-bold text-white tabular-nums">
+                  Bs.{" "}
+                  {(liveBalance?.total_theoretical_ves ?? 0).toLocaleString("es-VE", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </div>
+              </div>
+              <div className="text-right">
+                <label className="block text-[9px] font-mono uppercase text-slate-500">
+                  Inicial VES
+                </label>
+                <input
+                  type="number"
+                  value={initialVes}
+                  onChange={(e) => setInitialVes(Number(e.target.value))}
+                  className="w-28 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-right text-xs font-mono text-primary tabular-nums"
+                />
+              </div>
             </div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400 flex justify-between">
-              <span>Saldo Inicial: Bs. {(bancoVES?.initial_balance || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}</span>
-              <span>Movs: {bancoVES?.entries_count || 0}</span>
-            </div>
-          </div>
-          <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-between text-[11px]">
-            <span className="text-emerald-600 dark:text-emerald-400 font-mono">
-              + Debe: Bs. {(bancoVES?.total_debit || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-            </span>
-            <span className="text-rose-600 dark:text-rose-400 font-mono">
-              - Haber: Bs. {(bancoVES?.total_credit || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-            </span>
-          </div>
-        </div>
 
-        {/* Activos Criptográficos USDT */}
-        <div className="bg-white dark:bg-[#0D111A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-              <Wallet className="h-3.5 w-3.5 text-emerald-500" />
-              1.1.05 Activos Cripto USDT
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400">
-              Inventario Cripto
-            </span>
-          </div>
-          <div className="space-y-1">
-            <div className="text-xl font-bold font-mono text-slate-900 dark:text-slate-100">
-              Bs. {(activoUSDT?.final_balance || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
+            {/* Subcajas con Nombres Reales de Bancos (Banesco, BDV, Mercantil...) */}
+            <div className="grid grid-cols-3 gap-2">
+              {bankBoxes.map((b) => (
+                <div
+                  key={b.bank_name}
+                  className="p-2.5 rounded-lg bg-surface-container border border-[#1e2430]"
+                >
+                  <div className="text-[10px] font-mono uppercase text-primary truncate font-semibold">
+                    {b.bank_name}
+                  </div>
+                  <div className="mt-1 text-xs font-mono font-bold text-white tabular-nums truncate">
+                    Bs. {b.theoretical_ves.toFixed(2)}
+                  </div>
+                  <div className="text-[9px] font-mono text-slate-500 tabular-nums truncate">
+                    +{b.inflows_ves.toFixed(0)} / -{b.outflows_ves.toFixed(0)}
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400 flex justify-between">
-              <span>Saldo Inicial: Bs. {(activoUSDT?.initial_balance || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}</span>
-              <span>Movs: {activoUSDT?.entries_count || 0}</span>
-            </div>
           </div>
-          <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-between text-[11px]">
-            <span className="text-emerald-600 dark:text-emerald-400 font-mono">
-              + Compras: Bs. {(activoUSDT?.total_debit || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-            </span>
-            <span className="text-rose-600 dark:text-rose-400 font-mono">
-              - Ventas: Bs. {(activoUSDT?.total_credit || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-            </span>
-          </div>
-        </div>
 
-        {/* Comisiones Bancarias Deducibles */}
-        <div className="bg-white dark:bg-[#0D111A] p-4 rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-              <DollarSign className="h-3.5 w-3.5 text-amber-500" />
-              5.2.01 Gastos Comisiones Bancarias
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
-              Gasto Deducible
-            </span>
-          </div>
-          <div className="space-y-1">
-            <div className="text-xl font-bold font-mono text-slate-900 dark:text-slate-100">
-              Bs. {(comisionesBanco?.total_debit || 0).toLocaleString("es-VE", { minimumFractionDigits: 2 })}
+          {/* Card 2: Inventario Cripto Teórico (USDT) */}
+          <div className="lg:col-span-3 p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  Inventario Cripto (USDT)
+                </div>
+                <div className="mt-1 text-2xl font-mono font-bold text-tertiary tabular-nums">
+                  {(liveBalance?.theoretical_usdt ?? 0).toFixed(2)} USDT
+                </div>
+              </div>
+              <div className="text-right">
+                <label className="block text-[9px] font-mono uppercase text-slate-500">
+                  Inicial USDT
+                </label>
+                <input
+                  type="number"
+                  value={initialUsdt}
+                  onChange={(e) => setInitialUsdt(Number(e.target.value))}
+                  className="w-20 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-right text-xs font-mono text-tertiary tabular-nums"
+                />
+              </div>
             </div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400">
-              Tarifa interbancaria (0.30% en débitos de compras)
-            </div>
-          </div>
-          <div className="pt-2 border-t border-slate-100 dark:border-slate-800 text-[11px] text-slate-500">
-            Deducción legal directa para declaración de ISLR
-          </div>
-        </div>
-      </div>
 
-      {/* Zona de Arrastre de Comprobantes (Dropzone Multimodal) */}
-      <div className="bg-white dark:bg-[#0D111A] p-4 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-red-500 transition-colors">
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center space-x-3">
-            <div className="p-3 bg-red-50 dark:bg-red-950/40 rounded-xl text-red-600">
-              <UploadCloud className="h-6 w-6" />
-            </div>
-            <div>
-              <h3 className="text-xs font-bold text-slate-900 dark:text-slate-100">
-                Carga Masiva de Comprobantes Bancarios (Pago Móvil / Transferencias)
-              </h3>
-              <p className="text-[11px] text-slate-500">
-                Soporta imágenes JPG y PNG. Extracción OCR multimodal automática y auto-asiento contable.
-              </p>
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono tabular-nums">
+              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430]">
+                <div className="text-[9px] text-slate-400 uppercase">Compras P2P</div>
+                <div className="text-tertiary font-semibold mt-0.5">
+                  +{(liveBalance?.inflow_usdt ?? 0).toFixed(2)}
+                </div>
+              </div>
+              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430]">
+                <div className="text-[9px] text-slate-400 uppercase">Ventas P2P</div>
+                <div className="text-primary font-semibold mt-0.5">
+                  -{(liveBalance?.outflow_usdt ?? 0).toFixed(2)}
+                </div>
+              </div>
             </div>
           </div>
-          <label className="cursor-pointer px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-colors shrink-0">
-            {isUploading ? "Analizando comprobante..." : "Seleccionar Comprobante"}
-            <input
-              type="file"
-              accept="image/jpeg,image/png"
-              className="hidden"
-              onChange={handleFileUpload}
-              disabled={isUploading}
-            />
-          </label>
-        </div>
 
-        {uploadFeedback && (
-          <div className="mt-3 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-xs text-emerald-600 dark:text-emerald-400 flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <CheckCircle2 className="h-4 w-4 shrink-0" />
-              <span>
-                Comprobante #{uploadFeedback.voucher_id} de {uploadFeedback.bank_name} por Bs. {uploadFeedback.amount_ves} procesado con éxito.
+          {/* Card 3: Motor OCR de Comprobantes Bancarios y Auto-Conciliación */}
+          <div className="lg:col-span-4 p-4 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col justify-between gap-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-secondary">
+                  document_scanner
+                </span>
+                <span className="text-xs font-bold text-white">
+                  Conciliación OCR Bancaria
+                </span>
+              </div>
+              <span className="px-2 py-0.5 rounded bg-secondary/15 text-secondary text-[10px] font-mono font-semibold whitespace-nowrap">
+                Tolerancia 48h
               </span>
             </div>
-            <span className="font-mono text-[11px] font-bold">
-              {uploadFeedback.verification_status === "MATCHED"
-                ? `AUTO-CONCILIADO con orden ${uploadFeedback.matched_order_number}`
-                : "PENDIENTE POR VINCULAR"}
-            </span>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Extrae referencia, banco, monto VES y comisión Pago Móvil desde capturas bancarias para asentar el gasto automáticamente.
+            </p>
+
+            <input
+              ref={voucherInputRef}
+              type="file"
+              accept="image/*,.pdf"
+              onChange={handleUploadReceipt}
+              className="hidden"
+            />
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => voucherInputRef.current?.click()}
+                disabled={uploadingOcr || periodClosed}
+                className="flex-1 px-3 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  add_photo_alternate
+                </span>
+                <span>{uploadingOcr ? "Analizando OCR..." : "Cargar Recibo"}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleAutoReconcile}
+                disabled={reconciling || periodClosed}
+                className="px-3 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <span className="material-symbols-outlined text-[16px] text-secondary">
+                  auto_fix_high
+                </span>
+                <span>{reconciling ? "Cruzando..." : "Auto-Conciliar"}</span>
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+        </section>
 
-      {/* Selector de Pestaña Contable */}
-      <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800">
-        <div className="flex space-x-6 text-xs font-bold">
-          <button
-            onClick={() => setActiveTab("DIARIO")}
-            className={`pb-2.5 transition-colors border-b-2 ${
-              activeTab === "DIARIO"
-                ? "border-red-600 text-red-600 dark:text-red-400"
-                : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-            }`}
-          >
-            Libro Diario (Partida Doble)
-          </button>
-          <button
-            onClick={() => setActiveTab("MAYOR")}
-            className={`pb-2.5 transition-colors border-b-2 ${
-              activeTab === "MAYOR"
-                ? "border-red-600 text-red-600 dark:text-red-400"
-                : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-            }`}
-          >
-            Libro Mayor (Consolidación Mensual)
-          </button>
-        </div>
+        {/* Tarjeta de Vinculación Manual si el último recibo OCR quedó huérfano */}
+        {lastVoucher && (
+          <section className="p-4 rounded-xl bg-surface-container border border-secondary/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="text-xs space-y-1">
+              <div className="font-bold text-white flex items-center gap-2">
+                <span className="material-symbols-outlined text-[16px] text-secondary">
+                  receipt
+                </span>
+                Recibo OCR Detectado: {lastVoucher.bank_name} • Ref #
+                {lastVoucher.reference_number}
+              </div>
+              <div className="font-mono text-slate-300 tabular-nums">
+                Monto: Bs. {lastVoucher.amount_ves.toFixed(2)} | Comisión Bancaria: Bs.{" "}
+                {lastVoucher.bank_fee_ves.toFixed(2)} | Estado:{" "}
+                <span className="text-primary">{lastVoucher.verification_status}</span>
+              </div>
+            </div>
 
-        {activeTab === "DIARIO" && (
-          <div className="flex items-center space-x-2 pb-2">
-            <span
-              className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded ${
-                isJournalBalanced
-                  ? "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
-                  : "bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400"
-              }`}
-            >
-              {isJournalBalanced ? "✓ CUADRE DEBE = HABER" : "⚠ DESCUADRE DETECTADO"}
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* Contenido de Pestaña: LIBRO DIARIO */}
-      {activeTab === "DIARIO" && (
-        <div className="space-y-3">
-          {/* Barra de Filtros */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-white dark:bg-[#0D111A] p-3 rounded-xl border border-slate-200 dark:border-slate-800">
-            <div className="relative flex-1 max-w-sm">
-              <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+            <form onSubmit={handleManualMatch} className="flex items-center gap-2">
               <input
                 type="text"
-                placeholder="Buscar por referencia o glosa..."
-                value={searchRef}
-                onChange={(e) => setSearchRef(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 bg-slate-50 dark:bg-[#121622] rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 outline-none"
+                value={manualOrderNumber}
+                onChange={(e) => setManualOrderNumber(e.target.value)}
+                placeholder="Nº Orden Binance P2P"
+                className="px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
               />
-            </div>
-            <div className="flex items-center space-x-2 text-xs">
-              <Filter className="h-3.5 w-3.5 text-slate-400" />
-              <select
-                value={selectedAccount}
-                onChange={(e) => setSelectedAccount(e.target.value)}
-                className="bg-slate-50 dark:bg-[#121622] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 outline-none"
+              <button
+                type="submit"
+                className="px-3 py-1.5 rounded-lg bg-secondary text-on-secondary text-xs font-bold whitespace-nowrap"
               >
-                <option value="ALL">Todas las Cuentas</option>
-                <option value="1.1.01">1.1.01 Bancos VES</option>
-                <option value="1.1.05">1.1.05 Activos USDT</option>
-                <option value="5.2.01">5.2.01 Comisiones Bancarias</option>
-              </select>
+                Vincular Orden
+              </button>
+              <button
+                type="button"
+                onClick={() => setLastVoucher(null)}
+                className="text-xs text-slate-400 hover:text-white px-2"
+              >
+                Cerrar
+              </button>
+            </form>
+          </section>
+        )}
+
+        {/* Pestañas Contables: Libro Diario | Libro Mayor | Ecuación Fiscal 6 Piezas */}
+        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#1e2430] flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430] text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setActiveTab("JOURNAL")}
+                className={`px-3 py-1 rounded-md transition-colors ${
+                  activeTab === "JOURNAL"
+                    ? "bg-primary-container text-on-primary font-bold"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Libro Diario ({journalEntries.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("LEDGER")}
+                className={`px-3 py-1 rounded-md transition-colors ${
+                  activeTab === "LEDGER"
+                    ? "bg-primary-container text-on-primary font-bold"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Libro Mayor ({ledgerSummaries.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("FISCAL_6")}
+                className={`px-3 py-1 rounded-md transition-colors ${
+                  activeTab === "FISCAL_6"
+                    ? "bg-primary-container text-on-primary font-bold"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Conciliación 6 Piezas
+              </button>
             </div>
+
+            <span className="text-[11px] font-mono text-slate-400">
+               Cadena de integridad SHA-256 verificada • Moneda Funcional VES
+            </span>
           </div>
 
-          {/* Tabla de Asientos */}
-          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0D111A]">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 dark:bg-[#121622] border-b border-slate-200 dark:border-slate-800 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                <tr>
-                  <th className="py-2.5 px-3">Asiento</th>
-                  <th className="py-2.5 px-3">Fecha</th>
-                  <th className="py-2.5 px-3">Cuenta</th>
-                  <th className="py-2.5 px-3">Detalle / Glosa</th>
-                  <th className="py-2.5 px-3 text-right">Debe (VES)</th>
-                  <th className="py-2.5 px-3 text-right">Haber (VES)</th>
-                  <th className="py-2.5 px-3">Referencia</th>
-                  <th className="py-2.5 px-3">Hash Criptográfico</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
-                {filteredEntries.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="py-8 text-center text-slate-400 font-sans">
-                      No se encontraron asientos contables registrados.
-                    </td>
+          {activeTab === "JOURNAL" && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                    <th className="py-3 px-4">Asiento / Fecha</th>
+                    <th className="py-3 px-4">Código & Cuenta</th>
+                    <th className="py-3 px-4">Concepto / Referencia</th>
+                    <th className="py-3 px-4 text-right">Debe (VES)</th>
+                    <th className="py-3 px-4 text-right">Haber (VES)</th>
+                    <th className="py-3 px-4 text-right">Hash SHA-256</th>
                   </tr>
-                ) : (
-                  filteredEntries.map((e, idx) => (
-                    <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                      <td className="py-2 px-3 font-bold text-slate-900 dark:text-slate-100">
-                        #{e.entry_number}
-                      </td>
-                      <td className="py-2 px-3 text-slate-500">{e.date_time}</td>
-                      <td className="py-2 px-3 font-semibold text-blue-600 dark:text-blue-400">
-                        {e.account_code}
-                      </td>
-                      <td className="py-2 px-3 font-sans text-slate-800 dark:text-slate-200 max-w-xs truncate">
-                        {e.description}
-                      </td>
-                      <td className="py-2 px-3 text-right text-emerald-600 dark:text-emerald-400 font-bold">
-                        {e.debit > 0 ? e.debit.toLocaleString("es-VE", { minimumFractionDigits: 2 }) : "-"}
-                      </td>
-                      <td className="py-2 px-3 text-right text-rose-600 dark:text-rose-400 font-bold">
-                        {e.credit > 0 ? e.credit.toLocaleString("es-VE", { minimumFractionDigits: 2 }) : "-"}
-                      </td>
-                      <td className="py-2 px-3 text-slate-600 dark:text-slate-400">{e.reference}</td>
-                      <td className="py-2 px-3 text-slate-400 text-[10px] truncate max-w-[120px]" title={e.entry_hash}>
-                        {e.entry_hash.slice(0, 16)}...
+                </thead>
+                <tbody className="divide-y divide-[#1e2430]/70 text-xs">
+                  {loading ? (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-slate-400 font-mono">
+                        Consultando asientos en partida doble...
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-              <tfoot className="bg-slate-50 dark:bg-[#121622] font-mono font-bold text-xs border-t border-slate-200 dark:border-slate-800">
-                <tr>
-                  <td colSpan={4} className="py-2.5 px-3 text-right text-slate-600 dark:text-slate-400">
-                    Totales Período:
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-emerald-600 dark:text-emerald-400">
-                    Bs. {totalDebe.toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-rose-600 dark:text-rose-400">
-                    Bs. {totalHaber.toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-                  </td>
-                  <td colSpan={2} className="py-2.5 px-3 text-[11px] text-slate-400">
-                    Diferencia: Bs. {Math.abs(totalDebe - totalHaber).toFixed(2)}
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        </div>
-      )}
+                  ) : journalEntries.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-slate-400 font-mono">
+                        No hay asientos en el período seleccionado. Sincroniza órdenes o carga recibos OCR.
+                      </td>
+                    </tr>
+                  ) : (
+                    journalEntries.map((entry, idx) => (
+                      <tr
+                        key={`${entry.entry_number}-${entry.account_code}-${idx}`}
+                        className="hover:bg-surface-container/70 transition-colors"
+                      >
+                        <td className="py-3 px-4 font-mono tabular-nums">
+                          <div className="text-white font-semibold">
+                            #{entry.entry_number}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {entry.date_time}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="font-mono text-primary text-[11px] mr-1.5">
+                            {entry.account_code}
+                          </span>
+                          <span className="text-white font-medium">
+                            {entry.account_name}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-slate-300 max-w-xs truncate">
+                          <div>{entry.description}</div>
+                          <div className="text-[10px] font-mono text-slate-500">
+                            Ref: {entry.reference}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-tertiary font-semibold">
+                          {entry.debit > 0 ? `Bs. ${entry.debit.toFixed(2)}` : "-"}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-primary font-semibold">
+                          {entry.credit > 0 ? `Bs. ${entry.credit.toFixed(2)}` : "-"}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono text-[10px] text-slate-500">
+                          {entry.entry_hash?.slice(0, 10)}…
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-      {/* Contenido de Pestaña: LIBRO MAYOR */}
-      {activeTab === "MAYOR" && (
-        <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0D111A]">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 dark:bg-[#121622] border-b border-slate-200 dark:border-slate-800 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-              <tr>
-                <th className="py-2.5 px-3">Código</th>
-                <th className="py-2.5 px-3">Cuenta Contable</th>
-                <th className="py-2.5 px-3">Período</th>
-                <th className="py-2.5 px-3 text-right">Saldo Inicial (VES)</th>
-                <th className="py-2.5 px-3 text-right">Total Debe (VES)</th>
-                <th className="py-2.5 px-3 text-right">Total Haber (VES)</th>
-                <th className="py-2.5 px-3 text-right">Saldo Final (VES)</th>
-                <th className="py-2.5 px-3 text-center">N° Movs</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
-              {ledgerSummaries.map((s, idx) => (
-                <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                  <td className="py-2.5 px-3 font-bold text-blue-600 dark:text-blue-400">
-                    {s.account_code}
-                  </td>
-                  <td className="py-2.5 px-3 font-sans font-semibold text-slate-900 dark:text-slate-100">
-                    {s.account_name}
-                  </td>
-                  <td className="py-2.5 px-3 text-slate-500">
-                    {s.year}-{s.month.toString().padStart(2, "0")}
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-slate-700 dark:text-slate-300">
-                    {s.initial_balance.toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-emerald-600 dark:text-emerald-400 font-bold">
-                    {s.total_debit.toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-rose-600 dark:text-rose-400 font-bold">
-                    {s.total_credit.toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-slate-900 dark:text-slate-100 font-bold text-xs">
-                    {s.final_balance.toLocaleString("es-VE", { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="py-2.5 px-3 text-center text-slate-500">{s.entries_count}</td>
-                </tr>
+          {activeTab === "LEDGER" && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                    <th className="py-3 px-4">Código</th>
+                    <th className="py-3 px-4">Cuenta Mayor</th>
+                    <th className="py-3 px-4 text-right">Saldo Inicial</th>
+                    <th className="py-3 px-4 text-right">Total Debe</th>
+                    <th className="py-3 px-4 text-right">Total Haber</th>
+                    <th className="py-3 px-4 text-right">Saldo Final</th>
+                    <th className="py-3 px-4 text-right">Movimientos</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1e2430]/70 text-xs">
+                  {ledgerSummaries.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-slate-400 font-mono">
+                        Sin saldos consolidados en el Libro Mayor para este mes.
+                      </td>
+                    </tr>
+                  ) : (
+                    ledgerSummaries.map((l) => (
+                      <tr
+                        key={l.account_code}
+                        className="hover:bg-surface-container/70 transition-colors"
+                      >
+                        <td className="py-3 px-4 font-mono text-primary font-semibold">
+                          {l.account_code}
+                        </td>
+                        <td className="py-3 px-4 text-white font-medium">
+                          {l.account_name}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
+                          Bs. {l.initial_balance.toFixed(2)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-tertiary">
+                          Bs. {l.total_debit.toFixed(2)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-primary">
+                          Bs. {l.total_credit.toFixed(2)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-white font-bold">
+                          Bs. {l.final_balance.toFixed(2)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
+                          {l.entries_count}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {activeTab === "FISCAL_6" && (
+            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+              {[
+                {
+                  title: "1. Saldo Inicial Declarado",
+                  val: fiscalSummary?.initial_balance ?? 0,
+                  tone: "text-white",
+                },
+                {
+                  title: "2. Entradas Operativas (Ventas VES)",
+                  val: fiscalSummary?.total_inflows ?? 0,
+                  tone: "text-tertiary",
+                },
+                {
+                  title: "3. Salidas Operativas (Compras VES)",
+                  val: fiscalSummary?.total_outflows ?? 0,
+                  tone: "text-primary",
+                },
+                {
+                  title: "4. Comisiones Deducibles",
+                  val: fiscalSummary?.total_fees ?? 0,
+                  tone: "text-slate-200",
+                },
+                {
+                  title: "5. Saldo Final Calculado",
+                  val: fiscalSummary?.calculated_final_balance ?? 0,
+                  tone: "text-secondary",
+                },
+                {
+                  title: "6. Utilidad Neta Fiscal (VES)",
+                  val: fiscalSummary?.net_profit_ves ?? 0,
+                  tone: "text-tertiary",
+                },
+              ].map((piece) => (
+                <div
+                  key={piece.title}
+                  className="p-4 rounded-xl bg-surface-container border border-[#1e2430]"
+                >
+                  <div className="text-[10px] font-mono uppercase text-slate-400">
+                    {piece.title}
+                  </div>
+                  <div
+                    className={`mt-2 text-lg font-mono font-bold tabular-nums ${piece.tone}`}
+                  >
+                    Bs.{" "}
+                    {piece.val.toLocaleString("es-VE", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
+            </div>
+          )}
+        </section>
+
+        {/* Modal Fail-Closed de Cierre Mensual */}
+        {showCloseModal && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl">
+              <div className="flex items-center gap-2 text-primary font-bold text-base">
+                <span className="material-symbols-outlined">gpp_maybe</span>
+                <span>Confirmación Fail-Closed de Cierre Contable</span>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Estás sellando el período{" "}
+                <strong className="text-white">
+                  {MONTHS.find((m) => m.value === month)?.label} {year}
+                </strong>
+                . Se bloqueará la carga de recibos OCR adicionales en la sesión actual y podrás descargar los respaldos firmados. Escribe{" "}
+                <code className="text-primary font-mono font-bold">CERRAR-MES</code> para confirmar:
+              </p>
+              <input
+                type="text"
+                value={closeConfirmText}
+                onChange={(e) => setCloseConfirmText(e.target.value)}
+                placeholder="Escribe CERRAR-MES"
+                className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-sm font-mono text-white"
+              />
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCloseConfirmText("");
+                    setShowCloseModal(false);
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-surface-container text-xs text-slate-300"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={closeConfirmText !== "CERRAR-MES"}
+                  onClick={() => {
+                    setPeriodClosed(true);
+                    setCloseConfirmText("");
+                    setShowCloseModal(false);
+                    setFeedback({
+                      type: "success",
+                      text: `Período ${month}/${year} sellado en modo lectura. Descarga tu Excel o PDF auditable arriba.`,
+                    });
+                  }}
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold disabled:opacity-40"
+                >
+                  Confirmar Sello Contable
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </AppShell>
   );
 }

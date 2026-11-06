@@ -1,327 +1,596 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
-import { 
-  FileSpreadsheet, 
-  Download, 
-  RefreshCw, 
-  Search, 
-  Filter, 
-  CheckCircle2, 
-  Clock, 
-  AlertCircle,
-  FileText,
-  Sun,
-  Moon
-} from "lucide-react";
-import { 
-  getOrders, 
-  syncOrders, 
-  getExportOrdersUrl, 
-  OrderItem, 
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { AppShell } from "@/components/app-shell";
+import {
+  FiscalSummary,
+  OrderItem,
+  User,
   getCurrentUser,
-  User 
+  getExportOrdersUrl,
+  getFiscalSummary,
+  getOrders,
+  syncOrders,
+  uploadOrdersFile,
 } from "@/lib/api";
-import { useTheme } from "@/lib/theme-context";
+
+type CostMethod = "FIFO" | "AVERAGE";
+type TradeFilter = "ALL" | "BUY" | "SELL";
+
+const SYNC_WINDOWS = [
+  { label: "7d", days: 7 },
+  { label: "30d", days: 30 },
+  { label: "90d", days: 90 },
+  { label: "180d", days: 180 },
+  { label: "365d", days: 365 },
+];
 
 export default function OrdersPage() {
-  const { theme, toggleTheme } = useTheme();
-  const [orders, setOrders] = useState<OrderItem[]>([]);
-  const [total, setTotal] = useState<number>(0);
-  const [page, setPage] = useState<number>(1);
-  const [tradeType, setTradeType] = useState<string>("");
-  const [search, setSearch] = useState<string>("");
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [syncDays, setSyncDays] = useState<number>(30);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [user, setUser] = useState<User | null>(null);
+  const [orders, setOrders] = useState<OrderItem[]>([]);
+  const [totalOrders, setTotalOrders] = useState<number>(0);
+  const [page, setPage] = useState<number>(1);
+  const pageSize = 20;
 
-  useEffect(() => {
-    setUser(getCurrentUser());
-  }, []);
+  const [tradeFilter, setTradeFilter] = useState<TradeFilter>("ALL");
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [costMethod, setCostMethod] = useState<CostMethod>("FIFO");
+  const [syncDays, setSyncDays] = useState<number>(30);
 
-  const loadOrders = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      const res = await getOrders({
-        page,
-        page_size: 25,
-        trade_type: tradeType || undefined,
-        search: search || undefined,
-      });
-      setOrders(res.items);
-      setTotal(res.total);
-    } catch (err: any) {
-      console.error(err);
-    } finally {
-      setIsLoading(false);
+  const [fiscalSummary, setFiscalSummary] = useState<FiscalSummary | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [feedback, setFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  const loadOrdersAndSummary = useCallback(async () => {
+    const current = getCurrentUser();
+    setUser(current);
+    if (!current || current.role === "INVITADO") {
+      setLoading(false);
+      return;
     }
-  }, [page, tradeType, search]);
+
+    setLoading(true);
+    try {
+      const [ordersRes, summaryRes] = await Promise.all([
+        getOrders({
+          page,
+          page_size: pageSize,
+          trade_type: tradeFilter === "ALL" ? undefined : tradeFilter,
+          search: searchQuery.trim() || undefined,
+        }),
+        getFiscalSummary().catch(() => null),
+      ]);
+      setOrders(ordersRes.items || []);
+      setTotalOrders(ordersRes.total || 0);
+      if (summaryRes) setFiscalSummary(summaryRes);
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "Error consultando historial de órdenes P2P.",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [page, tradeFilter, searchQuery]);
 
   useEffect(() => {
-    loadOrders();
-  }, [loadOrders]);
+    loadOrdersAndSummary();
+  }, [loadOrdersAndSummary]);
 
-  async function handleSync() {
+  async function handleSyncBinance() {
+    setFeedback(null);
     setIsSyncing(true);
-    setSyncMessage(null);
     try {
-      const res = await syncOrders(syncDays, tradeType || undefined);
-      setSyncMessage(res.message);
-      await loadOrders();
+      const res = await syncOrders(
+        syncDays,
+        tradeFilter === "ALL" ? undefined : tradeFilter
+      );
+      setFeedback({
+        type: "success",
+        text:
+          res?.message ||
+          `Sincronización oficial Binance (${syncDays} días) completada.`,
+      });
+      await loadOrdersAndSummary();
     } catch (err: any) {
-      setSyncMessage(`Error: ${err.message}`);
+      setFeedback({
+        type: "error",
+        text:
+          err.message ||
+          "Fallo en ingesta Binance P2P. Verifica tus API Keys en Configuración.",
+      });
     } finally {
       setIsSyncing(false);
     }
   }
 
-  return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      {/* Botón de regreso al Inicio y Selector de Tema */}
-      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800">
-        <div className="flex items-center space-x-3">
-          <a
-            href="/"
-            className="inline-flex items-center space-x-2 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:opacity-80 transition-opacity bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20"
-          >
-            <span>← Volver a la App Principal</span>
-          </a>
-          <span className="text-xs text-slate-500 dark:text-slate-400 font-mono">Modo Libro Completo</span>
-        </div>
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFeedback(null);
+    setIsUploading(true);
+    try {
+      const res = await uploadOrdersFile(file);
+      setFeedback({
+        type: "success",
+        text:
+          res?.message ||
+          `Archivo "${file.name}" importado exitosamente al motor fiscal.`,
+      });
+      await loadOrdersAndSummary();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "Error al importar archivo CSV/Excel de Binance.",
+      });
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
 
-        <button
-          onClick={toggleTheme}
-          aria-label="Cambiar tema de color"
-          className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors flex items-center space-x-1.5 text-xs font-mono"
-        >
-          {theme === "dark" ? (
-            <>
-              <Sun className="h-3.5 w-3.5 text-amber-400" />
-              <span className="hidden sm:inline">Blanco Perla</span>
-            </>
-          ) : (
-            <>
-              <Moon className="h-3.5 w-3.5 text-slate-700" />
-              <span className="hidden sm:inline">Negro Azabache</span>
-            </>
-          )}
-        </button>
-      </div>
+  const avgUnitPrice = useMemo(() => {
+    if (!orders.length) return 0;
+    const totalCrypto = orders.reduce((acc, o) => acc + (o.crypto_amount || 0), 0);
+    const totalFiat = orders.reduce((acc, o) => acc + (o.fiat_amount || 0), 0);
+    return totalCrypto > 0 ? totalFiat / totalCrypto : 0;
+  }, [orders]);
 
-      {/* Encabezado y Acciones de Exportación */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="font-mono text-xl font-bold text-slate-900 dark:text-slate-100 flex items-center space-x-2">
-            <FileSpreadsheet className="h-6 w-6 text-emerald-500 dark:text-emerald-400" />
-            <span>HISTORIAL DE ÓRDENES BINANCE P2P</span>
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 font-mono">
-            {total} órdenes registradas e ingestadas para reconciliación fiscal
+  const totalPages = Math.max(1, Math.ceil(totalOrders / pageSize));
+
+  if (!user || user.role === "INVITADO") {
+    return (
+      <AppShell
+        title="Ganancias Reales & Órdenes"
+        badge="ACCESO RESTRINGIDO"
+        subtitle="Módulo protegido por control RBAC para operadores TRADER y ADMIN."
+      >
+        <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
+          <span className="material-symbols-outlined text-[36px] text-primary">
+            lock
+          </span>
+          <h2 className="text-base font-bold text-white">
+            Se requiere sesión activa con rol TRADER o ADMIN
+          </h2>
+          <p className="text-xs text-slate-400">
+            Inicia sesión con tu cuenta autorizada para sincronizar órdenes de Binance P2P y auditar utilidades netas.
           </p>
+          <div className="flex justify-center gap-3 pt-2">
+            <Link
+              href="/login"
+              className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold"
+            >
+              Iniciar Sesión
+            </Link>
+            <Link
+              href="/register"
+              className="px-4 py-2 rounded-lg bg-surface-container border border-[#1e2430] text-xs text-slate-200"
+            >
+              Crear Cuenta
+            </Link>
+          </div>
         </div>
+      </AppShell>
+    );
+  }
 
-        {/* Botones de Descarga Directa */}
-        <div className="flex flex-wrap items-center gap-2">
-          <a
-            href={getExportOrdersUrl("xlsx")}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-mono font-bold transition-colors"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Descargar Excel (.xlsx)</span>
-          </a>
-
+  return (
+    <AppShell
+      title="Ganancias Reales & Órdenes"
+      badge={`MOTOR ${costMethod}`}
+      subtitle="Ingesta histórica oficial Binance C2C, importación manual y cálculo de utilidad neta realizada."
+      actions={
+        /* Grupo Único de Exportación (sin duplicados) */
+        <div className="flex items-center gap-2">
           <a
             href={getExportOrdersUrl("csv_semicolon")}
             target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-xs font-mono transition-colors"
+            rel="noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 transition-colors"
           >
-            <FileText className="h-3.5 w-3.5" />
-            <span>CSV (;)</span>
-          </a>
-
-          <a
-            href={getExportOrdersUrl("csv_comma")}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-xs font-mono transition-colors"
-          >
-            <FileText className="h-3.5 w-3.5" />
-            <span>CSV (,)</span>
-          </a>
-        </div>
-      </div>
-
-      {/* Panel de Extracción Directa desde Binance API (TRADER / ADMIN) */}
-      {(user?.role === "ADMIN" || user?.role === "TRADER") && (
-        <div className="glass-panel p-4 rounded-xl space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="font-mono text-xs font-bold text-slate-800 dark:text-slate-200 uppercase flex items-center space-x-2">
-              <RefreshCw className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400" />
-              <span>Sincronizador Automático Binance P2P API</span>
-            </h3>
-            <span className="text-[10px] font-mono text-slate-400">
-              GET /sapi/v1/c2c/orderMatch/listUserOrderHistory
+            <span className="material-symbols-outlined text-[16px] text-secondary">
+              download
             </span>
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-            <div className="flex items-center space-x-2 text-xs font-mono text-slate-700 dark:text-slate-300">
-              <span>Ventana:</span>
-              <input
-                type="range"
-                min="1"
-                max="30"
-                value={syncDays}
-                onChange={(e) => setSyncDays(Number(e.target.value))}
-                className="w-32 accent-emerald-500 cursor-pointer"
-              />
-              <span className="font-bold text-emerald-600 dark:text-emerald-400">{syncDays} días</span>
+            <span>CSV</span>
+          </a>
+          <a
+            href={getExportOrdersUrl("xlsx")}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 hover:bg-tertiary/25 text-xs font-mono font-semibold text-tertiary flex items-center gap-1.5 transition-colors"
+          >
+            <span className="material-symbols-outlined text-[16px]">table_view</span>
+            <span>Excel (.xlsx)</span>
+          </a>
+        </div>
+      }
+    >
+      <div className="space-y-5">
+        {feedback && (
+          <div
+            className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs ${
+              feedback.type === "success"
+                ? "bg-tertiary/10 border-tertiary/30 text-emerald-200"
+                : "bg-error/10 border-error/30 text-red-200"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[18px]">
+                {feedback.type === "success" ? "check_circle" : "error"}
+              </span>
+              <span>{feedback.text}</span>
             </div>
-
             <button
-              onClick={handleSync}
-              disabled={isSyncing}
-              className="flex items-center space-x-2 px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-slate-950 disabled:text-slate-400 font-mono text-xs font-bold transition-colors"
+              type="button"
+              onClick={() => setFeedback(null)}
+              className="text-slate-400 hover:text-white"
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
-              <span>{isSyncing ? "Sincronizando con Binance..." : "Extraer Órdenes en Caliente"}</span>
-            </button>
-          </div>
-
-          {syncMessage && (
-            <p className="text-xs font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 p-2 rounded border border-emerald-500/20">
-              {syncMessage}
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Barra de Filtros y Búsqueda */}
-      <div className="glass-panel p-3 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono">
-        <div className="flex items-center space-x-2 w-full sm:w-auto">
-          <div className="relative w-full sm:w-64">
-            <Search className="h-3.5 w-3.5 text-slate-400 absolute left-3 top-2.5" />
-            <input
-              type="text"
-              placeholder="Buscar por orden o contraparte..."
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(1);
-              }}
-              className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-slate-800 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:border-emerald-500"
-            />
-          </div>
-
-          <div className="flex items-center space-x-1">
-            <Filter className="h-3.5 w-3.5 text-slate-400" />
-            <select
-              value={tradeType}
-              onChange={(e) => {
-                setTradeType(e.target.value);
-                setPage(1);
-              }}
-              className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
-            >
-              <option value="">Todas</option>
-              <option value="BUY">Solo Compras (BUY)</option>
-              <option value="SELL">Solo Ventas (SELL)</option>
-            </select>
-          </div>
-        </div>
-
-        <span className="text-slate-500 dark:text-slate-400 text-[11px]">
-          Página {page} de {Math.max(1, Math.ceil(total / 25))}
-        </span>
-      </div>
-
-      {/* Tabla de Órdenes */}
-      <div className="glass-panel rounded-xl overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs font-mono">
-            <thead>
-              <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
-                <th className="py-3 px-4 font-semibold">N° Orden</th>
-                <th className="py-3 px-4 font-semibold">Tipo</th>
-                <th className="py-3 px-4 font-semibold">Contraparte</th>
-                <th className="py-3 px-4 font-semibold text-right">Cantidad Cripto</th>
-                <th className="py-3 px-4 font-semibold text-right">Monto Fiat</th>
-                <th className="py-3 px-4 font-semibold text-right">Precio Unitario</th>
-                <th className="py-3 px-4 font-semibold text-right">Tasa BCV</th>
-                <th className="py-3 px-4 font-semibold text-center">Estado</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/40">
-              {orders.length > 0 ? (
-                orders.map((o) => (
-                  <tr key={o.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/30 transition-colors">
-                    <td className="py-3 px-4 text-slate-900 dark:text-slate-200 font-medium">
-                      {o.order_number}
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${o.trade_type === "BUY" ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30" : "bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/30"}`}>
-                        {o.trade_type}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300">
-                      {o.counterparty_name || "--"}
-                    </td>
-                    <td className="py-3 px-4 text-right text-slate-900 dark:text-slate-200 font-bold">
-                      {o.crypto_amount.toFixed(2)} {o.asset}
-                    </td>
-                    <td className="py-3 px-4 text-right text-slate-700 dark:text-slate-300">
-                      {o.fiat_amount.toLocaleString("es-VE", { minimumFractionDigits: 2 })} {o.fiat}
-                    </td>
-                    <td className="py-3 px-4 text-right text-slate-700 dark:text-slate-300">
-                      {o.unit_price.toFixed(2)}
-                    </td>
-                    <td className="py-3 px-4 text-right text-slate-500 dark:text-slate-400">
-                      {o.bcv_rate ? o.bcv_rate.toFixed(2) : "--"}
-                    </td>
-                    <td className="py-3 px-4 text-center">
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                        {o.order_status}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-400 dark:text-slate-500 font-mono">
-                    {isLoading ? "Cargando órdenes..." : "No se encontraron órdenes registradas."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Paginador */}
-        {total > 25 && (
-          <div className="p-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-mono">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page === 1}
-              className="px-3 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-300"
-            >
-              Anterior
-            </button>
-            <span className="text-slate-500 dark:text-slate-400">Página {page}</span>
-            <button
-              onClick={() => setPage((p) => p + 1)}
-              disabled={page * 25 >= total}
-              className="px-3 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-300"
-            >
-              Siguiente
+              ✕
             </button>
           </div>
         )}
+
+        {/* Barra de Progreso Condicional (SOLO visible cuando hay sincronización activa) */}
+        {isSyncing && (
+          <div className="p-3.5 rounded-xl bg-surface-container border border-primary-container/40 space-y-2">
+            <div className="flex items-center justify-between text-xs font-mono">
+              <span className="text-primary flex items-center gap-2">
+                <span className="material-symbols-outlined text-[16px] animate-spin">
+                  sync
+                </span>
+                Sincronizando historial oficial Binance C2C ({syncDays} días)...
+              </span>
+              <span className="text-slate-400">Monitoreando x-mbx-used-weight</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+              <div className="h-full w-2/3 bg-primary-container animate-pulse rounded-full" />
+            </div>
+          </div>
+        )}
+
+        {/* 4 KPIs Fiscales y Operativos */}
+        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
+            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span>Utilidad Neta ({costMethod})</span>
+              <span className="material-symbols-outlined text-[16px] text-tertiary">
+                trending_up
+              </span>
+            </div>
+            <div
+              className={`mt-2 text-xl font-mono font-bold tabular-nums ${
+                (fiscalSummary?.net_profit_ves ?? 0) >= 0
+                  ? "text-tertiary"
+                  : "text-error"
+              }`}
+            >
+              {fiscalSummary
+                ? `Bs. ${fiscalSummary.net_profit_ves.toLocaleString("es-VE", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}`
+                : "Bs. 0,00"}
+            </div>
+            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+              Eq. Fiscal BCV: ${(fiscalSummary?.net_profit_usd ?? 0).toFixed(2)} USD
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
+            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span>Volumen Operado</span>
+              <span className="material-symbols-outlined text-[16px] text-secondary">
+                swap_horiz
+              </span>
+            </div>
+            <div className="mt-2 text-xl font-mono font-bold text-white tabular-nums">
+              Bs.{" "}
+              {(fiscalSummary?.volume_operated ?? 0).toLocaleString("es-VE", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </div>
+            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+              {totalOrders} órdenes registradas en BD
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
+            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span>Comisiones Acumuladas</span>
+              <span className="material-symbols-outlined text-[16px] text-primary">
+                percent
+              </span>
+            </div>
+            <div className="mt-2 text-xl font-mono font-bold text-primary tabular-nums">
+              Bs.{" "}
+              {(fiscalSummary?.total_fees ?? 0).toLocaleString("es-VE", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </div>
+            <div className="mt-1 text-[11px] font-mono text-slate-400">
+              Deducidas de base imponible
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
+            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span>Precio Ponderado Página</span>
+              <span className="material-symbols-outlined text-[16px] text-slate-300">
+                analytics
+              </span>
+            </div>
+            <div className="mt-2 text-xl font-mono font-bold text-white tabular-nums">
+              {avgUnitPrice > 0 ? `Bs. ${avgUnitPrice.toFixed(2)}` : "Bs. --"}
+            </div>
+            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+              BCV Período: Bs. {(fiscalSummary?.bcv_rate ?? 0).toFixed(2)}
+            </div>
+          </div>
+        </section>
+
+        {/* Barra de Ingesta Binance API + Carga de Archivo CSV/Excel */}
+        <section className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-white mr-1">
+              Ingesta API Binance:
+            </span>
+            <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
+              {SYNC_WINDOWS.map((w) => (
+                <button
+                  key={w.days}
+                  type="button"
+                  onClick={() => setSyncDays(w.days)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+                    syncDays === w.days
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={handleSyncBinance}
+              disabled={isSyncing}
+              className="px-3.5 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 transition-all flex items-center gap-1.5"
+            >
+              <span className="material-symbols-outlined text-[16px]">cloud_sync</span>
+              <span>{isSyncing ? "Sincronizando..." : `Sincronizar (${syncDays}d)`}</span>
+            </button>
+          </div>
+
+          {/* Carga Manual de Histórico CSV / XLSX */}
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+              className="px-3.5 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 transition-colors"
+            >
+              <span className="material-symbols-outlined text-[16px] text-primary">
+                upload_file
+              </span>
+              <span>
+                {isUploading ? "Importando archivo..." : "Importar Histórico (.csv / .xlsx)"}
+              </span>
+            </button>
+          </div>
+        </section>
+
+        {/* Controles Restaurados: Búsqueda + Filtro COMPRA/VENTA + Método Costo FIFO/Promedio */}
+        <section className="p-3.5 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Filtro Tipo Operación */}
+            <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center text-xs font-mono">
+              {(
+                [
+                  { id: "ALL", label: "TODAS" },
+                  { id: "BUY", label: "COMPRAS" },
+                  { id: "SELL", label: "VENTAS" },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    setPage(1);
+                    setTradeFilter(tab.id);
+                  }}
+                  className={`px-2.5 py-1 rounded-md transition-colors ${
+                    tradeFilter === tab.id
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Selector Método Fiscal FIFO / Costo Promedio */}
+            <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setCostMethod("FIFO")}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  costMethod === "FIFO"
+                    ? "bg-secondary text-on-secondary font-bold"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                FIFO (PEPS)
+              </button>
+              <button
+                type="button"
+                onClick={() => setCostMethod("AVERAGE")}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  costMethod === "AVERAGE"
+                    ? "bg-secondary text-on-secondary font-bold"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Costo Promedio
+              </button>
+            </div>
+          </div>
+
+          {/* Buscador por Número de Orden o Contraparte */}
+          <div className="relative w-full lg:w-72">
+            <span className="material-symbols-outlined text-[16px] text-slate-500 absolute left-3 top-1/2 -translate-y-1/2">
+              search
+            </span>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setPage(1);
+                setSearchQuery(e.target.value);
+              }}
+              placeholder="Buscar Nº orden o contraparte..."
+              className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs text-white font-mono placeholder:text-slate-500"
+            />
+          </div>
+        </section>
+
+        {/* Tabla Densa Paginada de Órdenes */}
+        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  <th className="py-3 px-4">Fecha / Nº Orden</th>
+                  <th className="py-3 px-4">Tipo</th>
+                  <th className="py-3 px-4">Contraparte</th>
+                  <th className="py-3 px-4 text-right">Cantidad USDT</th>
+                  <th className="py-3 px-4 text-right">Precio Unit.</th>
+                  <th className="py-3 px-4 text-right">Total VES</th>
+                  <th className="py-3 px-4 text-right">BCV Hist.</th>
+                  <th className="py-3 px-4 text-right">Comisión</th>
+                  <th className="py-3 px-4 text-right">Estado</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#1e2430]/70 text-xs">
+                {loading ? (
+                  <tr>
+                    <td colSpan={9} className="py-10 text-center text-slate-400 font-mono">
+                      Cargando libro de órdenes P2P...
+                    </td>
+                  </tr>
+                ) : orders.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="py-10 text-center text-slate-400 font-mono">
+                      No se encontraron órdenes. Usa &ldquo;Sincronizar&rdquo; o importa tu CSV/Excel de Binance.
+                    </td>
+                  </tr>
+                ) : (
+                  orders.map((o) => {
+                    const isBuy = o.trade_type === "BUY";
+                    return (
+                      <tr
+                        key={o.order_number}
+                        className="hover:bg-surface-container/70 transition-colors"
+                      >
+                        <td className="py-3 px-4 font-mono tabular-nums">
+                          <div className="text-white font-semibold">
+                            #{o.order_number.slice(-8)}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {o.created_at?.slice(0, 16).replace("T", " ")}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                              isBuy
+                                ? "bg-tertiary/15 text-tertiary border border-tertiary/30"
+                                : "bg-primary-container/15 text-primary border border-primary-container/30"
+                            }`}
+                          >
+                            {isBuy ? "COMPRA" : "VENTA"}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-slate-300 truncate max-w-[140px]">
+                          {o.counterparty_name || "Contraparte P2P"}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-white font-semibold">
+                          {o.crypto_amount.toFixed(2)} {o.asset}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-300">
+                          Bs. {o.unit_price.toFixed(2)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-white font-semibold">
+                          Bs.{" "}
+                          {o.fiat_amount.toLocaleString("es-VE", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-secondary">
+                          {o.bcv_rate > 0 ? `Bs. ${o.bcv_rate.toFixed(2)}` : "--"}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
+                          {o.fee_crypto > 0
+                            ? `${o.fee_crypto.toFixed(3)} USDT`
+                            : `Bs. ${o.fee_fiat.toFixed(2)}`}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <span className="px-2 py-0.5 rounded bg-surface-container-high text-[10px] font-mono text-slate-300">
+                            {o.order_status}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Paginación */}
+          <div className="px-4 py-3 border-t border-[#1e2430] flex items-center justify-between text-xs font-mono text-slate-400">
+            <span>
+              Página {page} de {totalPages} ({totalOrders} registros)
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                className="px-2.5 py-1 rounded bg-surface-container border border-[#1e2430] disabled:opacity-40 hover:text-white"
+              >
+                Anterior
+              </button>
+              <button
+                type="button"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                className="px-2.5 py-1 rounded bg-surface-container border border-[#1e2430] disabled:opacity-40 hover:text-white"
+              >
+                Siguiente
+              </button>
+            </div>
+          </div>
+        </section>
       </div>
-    </div>
+    </AppShell>
   );
 }

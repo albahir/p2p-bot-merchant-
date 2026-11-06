@@ -27,6 +27,8 @@ services:
       dockerfile: docker/Dockerfile.engine
     container_name: p2p-engine
     restart: unless-stopped
+    volumes:
+      - botdata:/app/data
     env_file:
       - ../config/.env
     depends_on:
@@ -41,6 +43,8 @@ services:
     restart: unless-stopped
     ports:
       - "8501:8501"
+    volumes:
+      - botdata:/app/data
     env_file:
       - ../config/.env
     depends_on:
@@ -49,3 +53,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  botdata:

@@ -14,7 +14,9 @@ from src.api.deps import get_db, get_settings, require_admin, require_authentica
 from src.api.schemas.settings import (
     BinanceStatusResponse,
     GoogleSheetsConfigResponse,
+    GoogleSheetsSyncResponse,
     SaveBinanceKeysRequest,
+    TelegramStatusResponse,
     UpdateGoogleSheetsConfigRequest,
     VerifyBinanceResponse,
 )
@@ -236,14 +238,16 @@ def get_user_sheets_config(
         credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
         credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
     )
-    user_sheet_id = current_user.google_sheet_id or settings.GOOGLE_SHEET_ID
+    raw_sheet_id = current_user.google_sheet_id or settings.GOOGLE_SHEET_ID
+    user_sheet_id = str(raw_sheet_id) if raw_sheet_id else None
     is_connected = bool(user_sheet_id)
     sheet_url = SheetsExporter.get_sheet_url(user_sheet_id) if user_sheet_id else None
+    auth_type_str = str(current_user.google_auth_type or "SERVICE_ACCOUNT")
 
     return GoogleSheetsConfigResponse(
         google_sheet_id=user_sheet_id,
         google_sheet_url=sheet_url,
-        google_auth_type=current_user.google_auth_type or "SERVICE_ACCOUNT",
+        google_auth_type=auth_type_str,
         service_account_email=exporter.client_email,
         is_connected=is_connected,
         message=(
@@ -273,13 +277,145 @@ def update_user_sheets_config(
         credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
     )
     sheet_url = SheetsExporter.get_sheet_url(sheet_id) if sheet_id else None
+    updated_auth_type = str(current_user.google_auth_type or "SERVICE_ACCOUNT")
 
     return GoogleSheetsConfigResponse(
         google_sheet_id=sheet_id,
         google_sheet_url=sheet_url,
-        google_auth_type=current_user.google_auth_type or "SERVICE_ACCOUNT",
+        google_auth_type=updated_auth_type,
         service_account_email=exporter.client_email,
         is_connected=bool(sheet_id),
         message="Configuración de Google Sheets guardada exitosamente.",
     )
+
+
+@router.post("/sheets/sync", response_model=GoogleSheetsSyncResponse)
+def sync_user_sheets_now(
+    current_user: Annotated[User, Depends(require_authenticated)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GoogleSheetsSyncResponse:
+    """Dispara en vivo la exportación del historial fiscal y contable hacia Google Sheets."""
+    from src.data.repositories import JournalEntryRepository, OrderRepository
+    from src.reporting.accounting_engine import AccountingEngine
+    from src.reporting.tax_engine import FIFOCostMethod
+
+    sheet_id = str(current_user.google_sheet_id or settings.GOOGLE_SHEET_ID or "").strip()
+    exporter = SheetsExporter(
+        credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
+        credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+    )
+
+    if not sheet_id:
+        return GoogleSheetsSyncResponse(
+            success=False,
+            google_sheet_id=None,
+            google_sheet_url=None,
+            service_account_email=exporter.client_email,
+            message="No hay ningún Google Sheet ID vinculado. Ingresa el enlace o ID primero.",
+        )
+
+    order_repo = OrderRepository(db)
+    completed_orders = order_repo.list_completed()
+    trade_results = FIFOCostMethod().process_orders(completed_orders)
+
+    ok_fiscal = exporter.export(sheet_id, trade_results)
+
+    now = datetime.now(UTC)
+    journal_repo = JournalEntryRepository(db)
+    journal_entries = journal_repo.list_entries()
+    acc_engine = AccountingEngine(db=db)
+    ledger_summaries = acc_engine.get_monthly_ledger_report(year=now.year, month=now.month)
+    ok_acc = exporter.export_accounting(sheet_id, journal_entries, ledger_summaries) if ok_fiscal else False
+
+    sheet_url = SheetsExporter.get_sheet_url(sheet_id)
+    if not ok_fiscal:
+        return GoogleSheetsSyncResponse(
+            success=False,
+            google_sheet_id=sheet_id,
+            google_sheet_url=sheet_url,
+            service_account_email=exporter.client_email,
+            message=exporter.last_error or "Error al sincronizar con Google Sheets. Verifica permisos de editor.",
+        )
+
+    return GoogleSheetsSyncResponse(
+        success=True,
+        google_sheet_id=sheet_id,
+        google_sheet_url=sheet_url,
+        rows_exported=len(trade_results),
+        journal_entries_exported=len(journal_entries) if ok_acc else 0,
+        service_account_email=exporter.client_email,
+        message=(
+            f"Sincronización completada: {len(trade_results)} operaciones fiscales y "
+            f"{len(journal_entries) if ok_acc else 0} asientos contables exportados."
+        ),
+    )
+
+
+def _mask_bot_token(token: str | None) -> str:
+    if not token or len(token) < 10:
+        return "No configurado"
+    prefix = token.split(":")[0] if ":" in token else token[:4]
+    masked_prefix = f"{prefix[:3]}••••" if len(prefix) > 3 else "••••"
+    return f"Configurado en Bóveda (.env) — {masked_prefix}:AAH••••"
+
+
+@router.get("/telegram", response_model=TelegramStatusResponse)
+def get_telegram_status(
+    current_user: Annotated[User, Depends(require_authenticated)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> TelegramStatusResponse:
+    """Retorna el estado sanitizado del bot de Telegram sin exponer jamás el token real."""
+    raw_token = (settings.TELEGRAM_BOT_TOKEN or "").strip()
+    is_configured = bool(raw_token and ":" in raw_token)
+    linked_chat = str(current_user.telegram_id or settings.TELEGRAM_ALERT_CHAT_ID or "").strip() or None
+
+    return TelegramStatusResponse(
+        is_configured=is_configured,
+        bot_token_masked=_mask_bot_token(raw_token) if is_configured else "No configurado en .env",
+        linked_chat_id=linked_chat,
+        fail_closed_5xx_enabled=True,
+        weight_pause_enabled=True,
+        log_sanitization_enabled=True,
+        message=(
+            "Enlace de notificaciones Telegram activo y sanitizado."
+            if is_configured
+            else "Configura TELEGRAM_BOT_TOKEN en el entorno del servidor."
+        ),
+    )
+
+
+@router.post("/telegram/test")
+def send_telegram_test_alert(
+    current_user: Annotated[User, Depends(require_authenticated)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, str | bool]:
+    """Despacha una alerta de prueba sanitizada al Chat ID vinculado del operador."""
+    target_chat = str(current_user.telegram_id or settings.TELEGRAM_ALERT_CHAT_ID or "").strip()
+    if not target_chat:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No tienes un Chat ID numérico de Telegram vinculado a tu perfil.",
+        )
+
+    from src.integrations.telegram_notifier import TelegramNotifier
+
+    notifier = TelegramNotifier()
+    sent = notifier.send_alert(
+        f"🛡️ *Prueba de Auditoría P2P Merchant OS*\n\n"
+        f"• Operador: `{current_user.username}` (`{current_user.role}`)\n"
+        f"• Protocolos Fail-Closed: `ACTIVOS`\n"
+        f"• Canal de Alertas: `VERIFICADO`",
+        chat_id=target_chat,
+    )
+    if not sent:
+        return {
+            "success": False,
+            "message": "No se pudo despachar la alerta de prueba. Verifica conectividad o token del bot.",
+        }
+    return {
+        "success": True,
+        "message": f"Alerta de prueba enviada exitosamente al Chat ID {target_chat}.",
+    }
+
 

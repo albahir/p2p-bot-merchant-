@@ -2,61 +2,67 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  /* Modo Claro: Blanco Perla Suave (Pearl White) */
-  --background: #F8F9FA;
-  --surface: #FFFFFF;
-  --surface-card: #FFFFFF;
-  --surface-elevated: #F1F3F6;
-  --border: #E2E8F0;
-  --border-bright: #CBD5E1;
-  --text-primary: #0F172A;
-  --text-secondary: #475569;
-  --text-muted: #64748B;
-  --accent-red: #DC2626;
-  --accent-green: #16A34A;
+:root,
+html.dark {
+  /* Tema Oscuro Institucional (Obsidian Deep) */
+  --bg-canvas: #0a0e13;
+  --bg-lowest: #0a0e13;
+  --bg-surface: #101419;
+  --bg-low: #141920;
+  --bg-container: #181f29;
+  --bg-high: #1e2734;
+  --border-subtle: #1e2430;
 }
 
-.dark {
-  /* Modo Oscuro: Negro Azabache / Carbón Sólido (Deep Black) */
-  --background: #07090E;
-  --surface: #0E121A;
-  --surface-card: #131823;
-  --surface-elevated: #1A2130;
-  --border: #1E2638;
-  --border-bright: #2B354D;
-  --text-primary: #F8FAFC;
-  --text-secondary: #94A3B8;
-  --text-muted: #64748B;
-  --accent-red: #E11D48;
-  --accent-green: #22C55E;
+html.dim {
+  /* Tema Atenuado (Slate Dimmed para turnos diurnos) */
+  --bg-canvas: #131922;
+  --bg-lowest: #10161e;
+  --bg-surface: #171f2b;
+  --bg-low: #1c2533;
+  --bg-container: #232e3f;
+  --bg-high: #2b384d;
+  --border-subtle: #2b384d;
 }
 
+html,
 body {
-  background-color: var(--background);
-  color: var(--text-primary);
-  font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: #e0e2ea;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overscroll-behavior: none;
   overflow-x: hidden;
-  letter-spacing: -0.01em;
 }
 
-/* Tablas financieras con números tabulares para evitar saltos de ancho */
-.font-tabular {
+.font-mono,
+.font-mono-val,
+.tabular-nums {
+  font-family: "JetBrains Mono", monospace;
   font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
 }
 
-/* Scrollbar sobrio y delgado */
+.material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 500, "GRAD" 0, "opsz" 20;
+  user-select: none;
+}
+
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
+
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--bg-lowest);
 }
+
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: #1e2430;
   border-radius: 3px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-bright);
+  background: #2b3545;
 }
