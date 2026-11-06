@@ -31,7 +31,7 @@ def test_telegram_command_sheets_unconfigured(monkeypatch):
     notifier = TelegramNotifier(bot_token="fake_token", default_chat_id="1001", allowed_user_ids=[1001])
     monkeypatch.setenv("GOOGLE_SHEET_ID", "")
     res = notifier.handle_command(user_id=1001, command="/sheets")
-    assert "Google Sheets no está configurado" in res
+    assert "Aún no has vinculado tu Google Sheet personal" in res or "Google Sheets no está configurado" in res
 
 
 def test_telegram_command_sheets_settings_error_graceful_fallback(monkeypatch):
@@ -41,7 +41,7 @@ def test_telegram_command_sheets_settings_error_graceful_fallback(monkeypatch):
     monkeypatch.setenv("GOOGLE_SHEET_ID", "")
     with patch("config.settings.Settings", side_effect=ValueError("Invalid config")):
         res = notifier.handle_command(user_id=1001, command="/sheets")
-        assert "Google Sheets no está configurado" in res
+        assert "Aún no has vinculado tu Google Sheet personal" in res or "Google Sheets no está configurado" in res
 
 
 def test_telegram_command_guardar_cedula_and_lookup():

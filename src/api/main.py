@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from config.settings import Settings
 from src.api.routes import accounting, auth, bot, fiscal, orders, spreads, users, websockets
 from src.api.routes import settings as settings_route
-from src.data.database import SessionLocal, init_db
+from src.data.database import SessionLocal, init_db, seed_env_operators
 from src.security.auth_service import AuthService
 
 logger = logging.getLogger("api_main")
@@ -23,13 +23,14 @@ async def lifespan(app: FastAPI):
     logger.info("Iniciando P2P Merchant API...")
     init_db()
 
-    # Garantizar existencia de administrador inicial
+    # Garantizar existencia de administrador inicial y operadores blindados en .env
     db = SessionLocal()
     try:
         settings = Settings()
         auth_svc = AuthService(db_session=db)
         admin_tg = settings.telegram_allowed_users[0] if settings.telegram_allowed_users else None
         auth_svc.ensure_default_admin(admin_telegram_id=admin_tg)
+        seed_env_operators(db, settings)
     except (RuntimeError, ValueError, KeyError, OSError) as err:
         logger.warning("Aviso durante la inicialización del administrador por defecto: %s", err)
     finally:

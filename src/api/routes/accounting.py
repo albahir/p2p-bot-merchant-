@@ -390,18 +390,18 @@ async def upload_voucher(
             )
             dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
             exporter.append_voucher_entry(
-                sheet_id=user_sheet_id,
+                sheet_id=str(user_sheet_id),
                 date_time_str=dt_str,
-                bank_name=voucher.bank_name,
-                reference_number=voucher.reference_number,
-                amount_ves=voucher.amount_ves,
-                sender_id=voucher.sender_id,
-                sender_name=voucher.sender_name,
-                payment_method=voucher.payment_method,
-                order_number=matched_order.order_number if matched_order else None,
-                status=voucher.verification_status,
-                bank_fee_ves=voucher.bank_fee_ves,
-                concept=voucher.concept,
+                bank_name=str(voucher.bank_name),
+                reference_number=str(voucher.reference_number),
+                amount_ves=float(cast(float, voucher.amount_ves) or 0.0),
+                sender_id=str(voucher.sender_id) if voucher.sender_id else None,
+                sender_name=str(voucher.sender_name) if voucher.sender_name else None,
+                payment_method=str(voucher.payment_method),
+                order_number=str(matched_order.order_number) if matched_order and matched_order.order_number else None,
+                status=str(voucher.verification_status),
+                bank_fee_ves=float(cast(float, voucher.bank_fee_ves) or 0.0),
+                concept=str(voucher.concept) if voucher.concept else None,
             )
         except (OSError, ValueError, TypeError, KeyError) as e:
             # Comportamiento fail-safe: no tumbar la subida si Google Sheets falla

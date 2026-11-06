@@ -84,3 +84,58 @@ def test_api_auth_register_assigns_trader_role_from_whitelist(monkeypatch):
     assert resp.user.username == "operador_otc"
 
 
+def test_usuarios_command_lists_static_env_users_even_after_db_reset():
+    """Tras un commit o reinicio en Render (BD vacía), /usuarios debe mostrar los IDs blindados en .env."""
+    sm = setup_in_memory_db()
+    notifier = TelegramNotifier(
+        bot_token="fake_token",
+        default_chat_id="6326947793",
+        allowed_user_ids=[6326947793],
+        trader_user_ids=[6430765245, 8522428625, 5570646610],
+        session_factory=sm,
+    )
+
+    output = notifier.handle_command(user_id=6326947793, command="/usuarios")
+    assert "6326947793" in output
+    assert "6430765245" in output
+    assert "8522428625" in output
+    assert "5570646610" in output
+    assert "ADMIN" in output
+    assert "TRADER" in output
+    assert "Blindado (.env)" in output
+
+
+def test_seed_env_operators_and_postgres_url_normalization():
+    """Verifica que al arrancar el contenedor se pueblen en BD todos los Admins/Traders de .env y se normalice postgres://."""
+    from src.data.database import normalize_database_url, seed_env_operators
+    from src.data.repositories import UserRepository
+
+    assert (
+        normalize_database_url("postgres://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb")
+        == "postgresql://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb"
+    )
+
+    sm = setup_in_memory_db()
+    db = sm()
+    settings = Settings(
+        TELEGRAM_ALERT_CHAT_ID="6326947793",
+        TELEGRAM_ALLOWED_USER_IDS="6326947793",
+        TELEGRAM_TRADER_USER_IDS="6430765245,8522428625,5570646610",
+    )
+
+    counts = seed_env_operators(db, settings)
+    assert counts == {"admins": 1, "traders": 3}
+
+    repo = UserRepository(db)
+    all_users = repo.list_all()
+    assert len(all_users) == 4
+    roles_by_tg = {str(u.telegram_id): str(u.role) for u in all_users}
+    assert roles_by_tg["6326947793"] == "ADMIN"
+    assert roles_by_tg["6430765245"] == "TRADER"
+    assert roles_by_tg["8522428625"] == "TRADER"
+    assert roles_by_tg["5570646610"] == "TRADER"
+    db.close()
+
+
+
+
