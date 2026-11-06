@@ -1015,10 +1015,13 @@ class TelegramNotifier:
         try:
             # Si el usuario tiene una hoja personal configurada en su perfil, priorizarla
             if user_id:
-                u_repo = UserRepository(db)
-                u = u_repo.get_by_telegram_id(str(user_id))
-                if u and u.google_sheet_id:
-                    sheet_id = str(u.google_sheet_id)
+                try:
+                    u_repo = UserRepository(db)
+                    u = u_repo.get_by_telegram_id(str(user_id))
+                    if u and u.google_sheet_id:
+                        sheet_id = str(u.google_sheet_id)
+                except (SQLAlchemyError, RuntimeError, OSError):
+                    pass
 
             if not sheet_id:
                 exporter = SheetsExporter(credentials_path=creds_file, credentials_json=creds_json)
