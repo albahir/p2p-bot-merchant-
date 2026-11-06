@@ -80,11 +80,12 @@ def test_telegram_process_receipt_photo(notifier):
     )
 
     with patch("src.integrations.receipt_ocr.BankReceiptOCR.extract_from_image", return_value=mock_extraction):
-        resp = notifier.process_receipt_photo(b"fake_image_bytes")
+        resp, voucher_id = notifier.process_receipt_photo(b"fake_image_bytes")
         assert "Comprobante Bancario Procesado" in resp
         assert "Banco de Venezuela" in resp
         assert "12345678" in resp
         assert "5,500.00 VES" in resp
+        assert voucher_id is not None
 
 
 def test_telegram_poller_handles_photo_message(notifier):
@@ -111,7 +112,7 @@ def test_telegram_poller_handles_photo_message(notifier):
     with (
         patch.object(notifier._client, "get") as mock_get,
         patch.object(notifier, "get_file_bytes", return_value=b"photo_bytes") as mock_get_bytes,
-        patch.object(notifier, "process_receipt_photo", return_value="Comprobante OK") as mock_process,
+        patch.object(notifier, "process_receipt_photo", return_value=("Comprobante OK", 42)) as mock_process,
         patch.object(notifier, "send_alert") as mock_send,
     ):
         mock_resp = MagicMock()
@@ -122,5 +123,9 @@ def test_telegram_poller_handles_photo_message(notifier):
         processed = poller.poll_once()
         assert processed == 1
         mock_get_bytes.assert_called_with("large_photo_456")
-        mock_process.assert_called_with(b"photo_bytes")
-        mock_send.assert_called_with("Comprobante OK", chat_id="123456")
+        mock_process.assert_called_with(b"photo_bytes", user_id=123456)
+        assert mock_send.call_count == 1
+        call_args, call_kwargs = mock_send.call_args
+        assert call_args[0] == "Comprobante OK"
+        assert call_kwargs["chat_id"] == "123456"
+        assert "inline_keyboard" in call_kwargs["reply_markup"]
