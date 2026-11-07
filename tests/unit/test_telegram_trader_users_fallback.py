@@ -112,7 +112,11 @@ def test_seed_env_operators_and_postgres_url_normalization():
 
     assert (
         normalize_database_url("postgres://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb")
-        == "postgresql://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb"
+        == "postgresql+psycopg2://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb"
+    )
+    assert (
+        normalize_database_url("postgresql://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb")
+        == "postgresql+psycopg2://user:pass@ep-cool.eu-central-1.aws.neon.tech/neondb"
     )
 
     sm = setup_in_memory_db()
