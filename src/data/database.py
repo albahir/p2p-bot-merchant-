@@ -16,10 +16,12 @@ except ImportError:
 
 
 def normalize_database_url(raw_url: str) -> str:
-    """Normaliza esquemas postgres:// heredados (Render, Neon, Heroku) a postgresql:// para SQLAlchemy 2.0."""
+    """Normaliza esquemas postgres:// heredados (Render, Neon, Heroku) a postgresql+psycopg2:// para SQLAlchemy 2.0."""
     cleaned = (raw_url or "").strip()
     if cleaned.startswith("postgres://"):
-        return "postgresql://" + cleaned[len("postgres://") :]
+        return "postgresql+psycopg2://" + cleaned[len("postgres://") :]
+    if cleaned.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + cleaned[len("postgresql://") :]
     return cleaned or "sqlite:///./p2p_bot.db"
 
 
