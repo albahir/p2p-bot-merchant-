@@ -126,9 +126,12 @@ class FIFOCostMethod(CostMethod):
 class WeightedAverageCostMethod(CostMethod):
     """Método de Costo Promedio Ponderado."""
 
+    def __init__(self, initial_inventory: list[TaxLot] | None = None):
+        self._initial_lots = list(initial_inventory) if initial_inventory else []
+
     def process_orders(self, orders: list[Order]) -> list[TradeResult]:
-        total_crypto = 0.0
-        total_cost_fiat = 0.0
+        total_crypto = sum(float(lot.crypto_amount) for lot in self._initial_lots)
+        total_cost_fiat = sum(float(lot.total_cost_fiat) for lot in self._initial_lots)
         results: list[TradeResult] = []
 
         for order in orders:

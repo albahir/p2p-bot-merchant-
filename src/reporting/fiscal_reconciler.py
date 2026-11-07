@@ -20,7 +20,7 @@ from src.data.repositories import (
     WalletMovementRepository,
 )
 from src.reporting.bcv_service import BCVService
-from src.reporting.tax_engine import FIFOCostMethod, TaxLot
+from src.reporting.tax_engine import FIFOCostMethod, TaxLot, WeightedAverageCostMethod
 
 logger = logging.getLogger("fiscal_reconciler")
 
@@ -50,6 +50,9 @@ class FiscalReconciliationResult:
     vouchers_count: int = 0
     matched_vouchers_count: int = 0
     message: str = ""
+    volume_operated_ves: float = 0.0
+    total_fees_ves: float = 0.0
+    cost_method: str = "FIFO"
 
 
 class FiscalReconciler:
@@ -84,6 +87,7 @@ class FiscalReconciler:
         initial_bcv_rate: float | None = None,
         actual_final_balance: float | None = None,
         asset: str = "USDT",
+        cost_method: str = "FIFO",
     ) -> FiscalReconciliationResult:
         """Calcula las 6 piezas fiscales para el período mensual especificado."""
         start_dt, end_dt = self._parse_period_dates(period)
@@ -117,6 +121,9 @@ class FiscalReconciler:
         inflows_p2p_buys = sum(float(o.crypto_amount) for o in p2p_buys)
         outflows_p2p_sells = sum(float(o.crypto_amount) for o in p2p_sells)
         volume_operated = sum(float(o.crypto_amount) for o in asset_orders)
+        volume_operated_ves = sum(float(o.fiat_amount or 0.0) for o in asset_orders)
+        p2p_crypto_fees = sum(float(o.fee_crypto or 0.0) for o in asset_orders)
+        p2p_fiat_fees = sum(float(o.fee_fiat or 0.0) for o in asset_orders)
 
         # Obtener movimientos de billetera (Depósitos y Retiros)
         all_movements = self.wallet_repo.list_completed(start_date=start_dt, end_date=end_dt)
@@ -131,7 +138,8 @@ class FiscalReconciler:
 
         total_inflows = inflows_deposits + inflows_p2p_buys
         total_outflows = outflows_withdrawals + outflows_p2p_sells
-        total_fees = withdrawal_fees
+        total_fees = withdrawal_fees + p2p_crypto_fees
+        total_fees_ves = p2p_fiat_fees + (withdrawal_fees * float(initial_bcv_rate or 0.0))
 
         # Ecuación de consistencia: Saldo Final Teórico
         calculated_final = round(initial_balance + total_inflows - total_outflows - total_fees, 6)
@@ -148,7 +156,7 @@ class FiscalReconciler:
             diff_label = "Faltante (merma no justificada)" if discrepancy < 0 else "Sobrante no registrado"
             message = f"Discrepancia detectada: {diff_label} de {abs(discrepancy):.4f} {asset}."
 
-        # Cálculo ISLR mediante FIFOCostMethod con inventario inicial
+        # Cálculo ISLR mediante FIFO o Costo Promedio con inventario inicial
         initial_lots: list[TaxLot] = []
         if initial_balance > 0:
             initial_lots.append(
@@ -159,8 +167,13 @@ class FiscalReconciler:
                 )
             )
 
-        fifo = FIFOCostMethod(initial_inventory=initial_lots)
-        trade_results = fifo.process_orders(asset_orders)
+        normalized_method = "AVG" if cost_method.strip().upper() in ("AVG", "PROMEDIO", "WEIGHTED_AVG") else "FIFO"
+        calculator = (
+            WeightedAverageCostMethod(initial_inventory=initial_lots)
+            if normalized_method == "AVG"
+            else FIFOCostMethod(initial_inventory=initial_lots)
+        )
+        trade_results = calculator.process_orders(asset_orders)
 
         gross_revenue_ves = sum(r.total_revenue_fiat for r in trade_results)
         acquisition_cost_ves = sum(r.acquisition_cost_fiat for r in trade_results)
@@ -200,6 +213,9 @@ class FiscalReconciler:
             vouchers_count=vouchers_count,
             matched_vouchers_count=matched_vouchers_count,
             message=message,
+            volume_operated_ves=round(volume_operated_ves, 2),
+            total_fees_ves=round(total_fees_ves, 2),
+            cost_method=normalized_method,
         )
 
     def save_snapshot(self, result: FiscalReconciliationResult) -> FiscalPeriodSnapshot:

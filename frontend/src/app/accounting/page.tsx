@@ -9,9 +9,11 @@ import {
   LedgerSummaryItem,
   UploadVoucherResponse,
   User,
+  closeFiscalPeriod,
+  downloadAccountingExcel,
+  downloadAccountingPdf,
   getCurrentUser,
-  getExportAccountingExcelUrl,
-  getExportAccountingPdfUrl,
+  getFiscalSnapshot,
   getFiscalSummary,
   getJournalEntries,
   getLedgerSummaries,
@@ -102,19 +104,23 @@ export default function AccountingPage() {
     setLoading(true);
     const periodStr = `${year}-${String(month).padStart(2, "0")}`;
     const startDate = `${periodStr}-01`;
+    const lastDay = new Date(year, month, 0).getDate();
+    const endDate = `${periodStr}-${String(lastDay).padStart(2, "0")}T23:59:59`;
 
     try {
-      const [liveRes, journalRes, ledgerRes, fiscalRes] = await Promise.all([
+      const [liveRes, journalRes, ledgerRes, fiscalRes, snapshotRes] = await Promise.all([
         getLiveBalance(year, month, initialUsdt, initialVes).catch(() => null),
-        getJournalEntries(startDate).catch(() => []),
+        getJournalEntries(startDate, endDate).catch(() => []),
         getLedgerSummaries(year, month, undefined, initialVes).catch(() => []),
-        getFiscalSummary(periodStr, initialVes).catch(() => null),
+        getFiscalSummary(periodStr, initialUsdt).catch(() => null),
+        getFiscalSnapshot(periodStr).catch(() => null),
       ]);
 
       if (liveRes) setLiveBalance(liveRes);
       setJournalEntries(journalRes || []);
       setLedgerSummaries(ledgerRes || []);
       if (fiscalRes) setFiscalSummary(fiscalRes);
+      setPeriodClosed(Boolean(snapshotRes?.is_closed));
     } catch (err: any) {
       setFeedback({
         type: "error",
@@ -286,27 +292,43 @@ export default function AccountingPage() {
             </select>
           </div>
 
-          <a
-            href={getExportAccountingExcelUrl(year, month)}
-            target="_blank"
-            rel="noreferrer"
-            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center gap-1.5 whitespace-nowrap"
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await downloadAccountingExcel(year, month);
+              } catch (err: any) {
+                setFeedback({
+                  type: "error",
+                  text: err.message || "Error al descargar el libro contable en Excel.",
+                });
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
           >
             <span className="material-symbols-outlined text-[15px]">grid_on</span>
             <span>Excel 4 Pestañas</span>
-          </a>
+          </button>
 
-          <a
-            href={getExportAccountingPdfUrl(year, month)}
-            target="_blank"
-            rel="noreferrer"
-            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-slate-200 text-xs font-mono flex items-center gap-1.5 whitespace-nowrap"
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await downloadAccountingPdf(year, month);
+              } catch (err: any) {
+                setFeedback({
+                  type: "error",
+                  text: err.message || "Error al descargar el informe contable en PDF.",
+                });
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-slate-200 text-xs font-mono flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
           >
             <span className="material-symbols-outlined text-[15px] text-secondary">
               picture_as_pdf
             </span>
             <span>PDF Ejecutivo</span>
-          </a>
+          </button>
 
           <button
             type="button"
@@ -709,33 +731,39 @@ export default function AccountingPage() {
             <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
               {[
                 {
-                  title: "1. Saldo Inicial Declarado",
+                  title: "1. Saldo Inicial Declarado (USDT)",
                   val: fiscalSummary?.initial_balance ?? 0,
+                  unit: "USDT",
                   tone: "text-white",
                 },
                 {
-                  title: "2. Entradas Operativas (Ventas VES)",
+                  title: "2. Entradas Operativas (Compras/Depósitos USDT)",
                   val: fiscalSummary?.total_inflows ?? 0,
+                  unit: "USDT",
                   tone: "text-tertiary",
                 },
                 {
-                  title: "3. Salidas Operativas (Compras VES)",
+                  title: "3. Salidas Operativas (Ventas/Retiros USDT)",
                   val: fiscalSummary?.total_outflows ?? 0,
+                  unit: "USDT",
                   tone: "text-primary",
                 },
                 {
-                  title: "4. Comisiones Deducibles",
+                  title: "4. Comisiones Cripto Deducibles (USDT)",
                   val: fiscalSummary?.total_fees ?? 0,
+                  unit: "USDT",
                   tone: "text-slate-200",
                 },
                 {
-                  title: "5. Saldo Final Calculado",
+                  title: "5. Saldo Final Teórico (USDT)",
                   val: fiscalSummary?.calculated_final_balance ?? 0,
+                  unit: "USDT",
                   tone: "text-secondary",
                 },
                 {
                   title: "6. Utilidad Neta Fiscal (VES)",
                   val: fiscalSummary?.net_profit_ves ?? 0,
+                  unit: "VES",
                   tone: "text-tertiary",
                 },
               ].map((piece) => (
@@ -749,11 +777,15 @@ export default function AccountingPage() {
                   <div
                     className={`mt-2 text-lg font-mono font-bold tabular-nums ${piece.tone}`}
                   >
-                    Bs.{" "}
-                    {piece.val.toLocaleString("es-VE", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {piece.unit === "VES"
+                      ? `Bs. ${piece.val.toLocaleString("es-VE", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}`
+                      : `${piece.val.toLocaleString("es-VE", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 4,
+                        })} USDT`}
                   </div>
                 </div>
               ))}
@@ -798,16 +830,30 @@ export default function AccountingPage() {
                 <button
                   type="button"
                   disabled={closeConfirmText !== "CERRAR-MES"}
-                  onClick={() => {
-                    setPeriodClosed(true);
-                    setCloseConfirmText("");
-                    setShowCloseModal(false);
-                    setFeedback({
-                      type: "success",
-                      text: `Período ${month}/${year} sellado en modo lectura. Descarga tu Excel o PDF auditable arriba.`,
-                    });
+                  onClick={async () => {
+                    try {
+                      const periodStr = `${year}-${String(month).padStart(2, "0")}`;
+                      const closedRes = await closeFiscalPeriod({
+                        period: periodStr,
+                        initial_balance: initialUsdt,
+                        actual_final_balance: fiscalSummary?.calculated_final_balance,
+                      });
+                      setFiscalSummary(closedRes);
+                      setPeriodClosed(true);
+                      setCloseConfirmText("");
+                      setShowCloseModal(false);
+                      setFeedback({
+                        type: "success",
+                        text: `Período ${periodStr} sellado y persistido en base de datos (${closedRes.status}). Descarga tu Excel o PDF auditable arriba.`,
+                      });
+                    } catch (err: any) {
+                      setFeedback({
+                        type: "error",
+                        text: err.message || "Error al persistir el cierre mensual en base de datos.",
+                      });
+                    }
                   }}
-                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold disabled:opacity-40"
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold disabled:opacity-40 cursor-pointer"
                 >
                   Confirmar Sello Contable
                 </button>

@@ -7,8 +7,8 @@ import {
   FiscalSummary,
   OrderItem,
   User,
+  downloadOrdersExport,
   getCurrentUser,
-  getExportOrdersUrl,
   getFiscalSummary,
   getOrders,
   syncOrders,
@@ -59,6 +59,7 @@ export default function OrdersPage() {
 
     setLoading(true);
     try {
+      const apiMethod = costMethod === "AVERAGE" ? "AVG" : "FIFO";
       const [ordersRes, summaryRes] = await Promise.all([
         getOrders({
           page,
@@ -66,7 +67,7 @@ export default function OrdersPage() {
           trade_type: tradeFilter === "ALL" ? undefined : tradeFilter,
           search: searchQuery.trim() || undefined,
         }),
-        getFiscalSummary().catch(() => null),
+        getFiscalSummary(undefined, undefined, undefined, apiMethod).catch(() => null),
       ]);
       setOrders(ordersRes.items || []);
       setTotalOrders(ordersRes.total || 0);
@@ -79,7 +80,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, tradeFilter, searchQuery]);
+  }, [page, tradeFilter, searchQuery, costMethod]);
 
   useEffect(() => {
     loadOrdersAndSummary();
@@ -188,28 +189,44 @@ export default function OrdersPage() {
       badge={`MOTOR ${costMethod}`}
       subtitle="Ingesta histórica oficial Binance C2C, importación manual y cálculo de utilidad neta realizada."
       actions={
-        /* Grupo Único de Exportación (sin duplicados) */
+        /* Grupo Único de Exportación Autenticada (Bearer sin fuga de JWT en URL) */
         <div className="flex items-center gap-2">
-          <a
-            href={getExportOrdersUrl("csv_semicolon")}
-            target="_blank"
-            rel="noreferrer"
-            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 transition-colors"
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await downloadOrdersExport("csv_semicolon");
+              } catch (err: any) {
+                setFeedback({
+                  type: "error",
+                  text: err.message || "No se pudo exportar el CSV de órdenes.",
+                });
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <span className="material-symbols-outlined text-[16px] text-secondary">
               download
             </span>
             <span>CSV</span>
-          </a>
-          <a
-            href={getExportOrdersUrl("xlsx")}
-            target="_blank"
-            rel="noreferrer"
-            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 hover:bg-tertiary/25 text-xs font-mono font-semibold text-tertiary flex items-center gap-1.5 transition-colors"
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await downloadOrdersExport("xlsx");
+              } catch (err: any) {
+                setFeedback({
+                  type: "error",
+                  text: err.message || "No se pudo exportar el Excel de órdenes.",
+                });
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 hover:bg-tertiary/25 text-xs font-mono font-semibold text-tertiary flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <span className="material-symbols-outlined text-[16px]">table_view</span>
             <span>Excel (.xlsx)</span>
-          </a>
+          </button>
         </div>
       }
     >
@@ -292,14 +309,19 @@ export default function OrdersPage() {
               </span>
             </div>
             <div className="mt-2 text-xl font-mono font-bold text-white tabular-nums">
-              Bs.{" "}
               {(fiscalSummary?.volume_operated ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
-              })}
+              })}{" "}
+              USDT
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              {totalOrders} órdenes registradas en BD
+              Bs.{" "}
+              {(fiscalSummary?.volume_operated_ves ?? 0).toLocaleString("es-VE", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}{" "}
+              • {totalOrders} órdenes
             </div>
           </div>
 
@@ -311,14 +333,19 @@ export default function OrdersPage() {
               </span>
             </div>
             <div className="mt-2 text-xl font-mono font-bold text-primary tabular-nums">
-              Bs.{" "}
               {(fiscalSummary?.total_fees ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}
+                maximumFractionDigits: 4,
+              })}{" "}
+              USDT
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Deducidas de base imponible
+            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+              Bs.{" "}
+              {(fiscalSummary?.total_fees_ves ?? 0).toLocaleString("es-VE", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}{" "}
+              deducidas de base imponible
             </div>
           </div>
 

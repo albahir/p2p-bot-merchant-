@@ -1,9 +1,10 @@
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any, cast
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 try:
@@ -55,49 +56,94 @@ def init_db() -> None:
 
     ModelsBase.metadata.create_all(bind=engine)
 
+    migrations: dict[str, list[tuple[str, str]]] = {
+        "orders": [
+            ("counterparty_name", "VARCHAR(100)"),
+            ("completed_at", "TIMESTAMP"),
+            ("payment_method", "VARCHAR(50)"),
+        ],
+        "app_users": [
+            ("google_sheet_id", "VARCHAR(100)"),
+            ("google_refresh_token_enc", "TEXT"),
+            ("google_auth_type", "VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'"),
+        ],
+        "bank_vouchers": [
+            ("destination_bank", "VARCHAR(100)"),
+            ("bank_fee_ves", "FLOAT DEFAULT 0.0"),
+            ("total_debited_ves", "FLOAT DEFAULT 0.0"),
+            ("sender_phone", "VARCHAR(30)"),
+            ("concept", "VARCHAR(255)"),
+            ("movement_type", "VARCHAR(20) DEFAULT 'DEBIT'"),
+            ("reconciliation_score", "FLOAT DEFAULT 0.0"),
+        ],
+    }
 
-    # Migración ligera para evolución de esquema en SQLite / PostgreSQL (orders)
-    for col_def in [
-        "counterparty_name VARCHAR(100)",
-        "completed_at TIMESTAMP",
-        "payment_method VARCHAR(50)",
-    ]:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text(f"ALTER TABLE orders ADD COLUMN {col_def}"))
-                conn.commit()
-        except SQLAlchemyError as err:
-            logging.getLogger("database").debug("Verificación de columna orders %s: %s", col_def, err)
+    try:
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+    except SQLAlchemyError:
+        existing_tables = set()
+        inspector = None
 
-    # Migración ligera para campos de Google Sheets en app_users
-    for col_def in [
-        "google_sheet_id VARCHAR(100)",
-        "google_refresh_token_enc TEXT",
-        "google_auth_type VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'",
-    ]:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text(f"ALTER TABLE app_users ADD COLUMN {col_def}"))
-                conn.commit()
-        except SQLAlchemyError as err:
-            logging.getLogger("database").debug("Verificación de columna %s: %s", col_def, err)
+    for table_name, cols in migrations.items():
+        existing_cols: set[str] = set()
+        if inspector is not None and table_name in existing_tables:
+            try:
+                existing_cols = {c["name"] for c in inspector.get_columns(table_name)}
+            except SQLAlchemyError:
+                existing_cols = set()
 
-    # Migración ligera para campos de OCR y conciliación bancaria en bank_vouchers
-    for col_def in [
-        "destination_bank VARCHAR(100)",
-        "bank_fee_ves FLOAT DEFAULT 0.0",
-        "total_debited_ves FLOAT DEFAULT 0.0",
-        "sender_phone VARCHAR(30)",
-        "concept VARCHAR(255)",
-        "movement_type VARCHAR(20) DEFAULT 'DEBIT'",
-        "reconciliation_score FLOAT DEFAULT 0.0",
-    ]:
+        for col_name, col_type in cols:
+            if col_name in existing_cols:
+                continue
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+                    conn.commit()
+            except SQLAlchemyError as err:
+                logging.getLogger("database").debug(
+                    "Verificación de columna %s.%s: %s", table_name, col_name, err
+                )
+
+
+_RUNTIME_BOT_PAUSED: bool = False
+
+
+def get_bot_paused_state(db: Session | None = None) -> bool:
+    """Obtiene el estado persistente de pausa operativa compartido entre Telegram, API y Engine."""
+    if db is not None:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.data.models import SystemState
+
         try:
-            with engine.connect() as conn:
-                conn.execute(text(f"ALTER TABLE bank_vouchers ADD COLUMN {col_def}"))
-                conn.commit()
-        except SQLAlchemyError as err:
-            logging.getLogger("database").debug("Verificación de columna bank_vouchers %s: %s", col_def, err)
+            row = db.query(SystemState).filter(SystemState.key == "bot_is_paused").first()
+            if row is not None:
+                return str(row.value).lower() == "true"
+        except SQLAlchemyError:
+            pass
+    return _RUNTIME_BOT_PAUSED
+
+
+def set_bot_paused_state(paused: bool, db: Session | None = None) -> None:
+    """Persiste el estado de pausa operativa en base de datos y memoria."""
+    global _RUNTIME_BOT_PAUSED
+    _RUNTIME_BOT_PAUSED = bool(paused)
+    if db is not None:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.data.models import SystemState
+
+        try:
+            row = db.query(SystemState).filter(SystemState.key == "bot_is_paused").first()
+            val_str = "true" if paused else "false"
+            if row is not None:
+                row.value = val_str  # type: ignore[assignment]
+            else:
+                db.add(SystemState(key="bot_is_paused", value=val_str))
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
 
 
 def seed_env_operators(db: Session, settings: Any) -> dict[str, int]:
@@ -124,7 +170,7 @@ def seed_env_operators(db: Session, settings: Any) -> dict[str, int]:
             uname = "admin" if not repo.get_by_username("admin") else f"admin_{admin_id}"
             repo.create_user(
                 username=uname,
-                password_hash=AuthService.hash_password(f"env_{admin_id}"),
+                password_hash=AuthService.hash_password(secrets.token_urlsafe(32)),
                 role="ADMIN",
                 telegram_id=admin_id,
                 is_active=True,
@@ -143,7 +189,7 @@ def seed_env_operators(db: Session, settings: Any) -> dict[str, int]:
                 uname = f"trader_{trader_id}"
             repo.create_user(
                 username=uname,
-                password_hash=AuthService.hash_password(f"env_{trader_id}"),
+                password_hash=AuthService.hash_password(secrets.token_urlsafe(32)),
                 role="TRADER",
                 telegram_id=trader_id,
                 is_active=True,

@@ -14,21 +14,30 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const unmountedRef = useRef(false);
+  const onMessageRef = useRef(onMessageReceived);
+
+  useEffect(() => {
+    onMessageRef.current = onMessageReceived;
+  }, [onMessageReceived]);
 
   const connect = useCallback(() => {
+    if (unmountedRef.current) return;
     try {
       const socket = new WebSocket(WS_URL);
       wsRef.current = socket;
 
       socket.onopen = () => {
-        setIsConnected(true);
+        if (!unmountedRef.current) {
+          setIsConnected(true);
+        }
       };
 
       socket.onmessage = (event) => {
         try {
           const parsed: WebSocketMessage = JSON.parse(event.data);
-          if (onMessageReceived) {
-            onMessageReceived(parsed);
+          if (onMessageRef.current) {
+            onMessageRef.current(parsed);
           }
         } catch {
           // Ignorar frames no json
@@ -36,6 +45,7 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
       };
 
       socket.onclose = () => {
+        if (unmountedRef.current) return;
         setIsConnected(false);
         // Reconexión automática con retroceso suave
         reconnectTimeoutRef.current = setTimeout(() => {
@@ -47,11 +57,14 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
         socket.close();
       };
     } catch {
-      setIsConnected(false);
+      if (!unmountedRef.current) {
+        setIsConnected(false);
+      }
     }
-  }, [onMessageReceived]);
+  }, []);
 
   useEffect(() => {
+    unmountedRef.current = false;
     connect();
 
     // Heartbeat ping cada 25 segundos
@@ -62,6 +75,7 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
     }, 25000);
 
     return () => {
+      unmountedRef.current = true;
       clearInterval(interval);
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       if (wsRef.current) wsRef.current.close();

@@ -80,7 +80,14 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
     app.include_router(bot.router)
     app.include_router(websockets.router)
 
+    @app.get("/", tags=["Salud"])
+    @app.head("/", tags=["Salud"])
+    def root_health():
+        """Sondeo raíz para balanceadores de carga (Render, Koyeb, Cloudflare)."""
+        return {"status": "ok", "service": "p2p-bot-merchant-api"}
+
     @app.get("/health", tags=["Salud"])
+    @app.head("/health", tags=["Salud"])
     def health_check():
         """Verificación de salud de la API (Healthcheck)."""
         return {"status": "ok", "service": "p2p-bot-merchant-api"}
