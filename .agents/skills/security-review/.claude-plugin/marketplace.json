@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "cdmx-security",
+  "version": "1.0.0",
+  "description": "Security tooling for Claude Code. Runs real scanners and verifies every finding against source.",
+  "owner": {
+    "name": "Codemax IT Solutions Pvt. Ltd.",
+    "url": "https://cdmx.in"
+  },
+  "plugins": [
+    {
+      "name": "security-audit",
+      "displayName": "Security Audit",
+      "description": "Runs real security scanners (Semgrep, gitleaks, TruffleHog, Trivy, osv-scanner, ZAP) over code, full git history, dependencies, IaC and Supabase/Firebase row-level security, then verifies every finding against source before reporting. Produces one severity-ranked report tagged to OWASP Top 10 2025.",
+      "version": "1.0.0",
+      "source": "./",
+      "category": "security",
+      "license": "MIT",
+      "homepage": "https://github.com/cdmx-in/security-review",
+      "repository": "https://github.com/cdmx-in/security-review",
+      "author": {
+        "name": "Codemax IT Solutions Pvt. Ltd.",
+        "url": "https://cdmx.in"
+      },
+      "keywords": [
+        "security",
+        "sast",
+        "dast",
+        "sca",
+        "secret-scanning",
+        "owasp",
+        "appsec",
+        "devsecops",
+        "vulnerability-scanner",
+        "compliance"
+      ],
+      "strict": false
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# Audit output — a map of live vulnerabilities, never commit it
+SECURITY-AUDIT-*.md
+*.sarif
+*.sarif.json
+gitleaks-report.json
+trivy.json
+semgrep.json
+osv.json
+sbom.cdx.json
+
+# Scanner baselines are intentionally committed; their raw reports are not
+!.gitleaks-baseline.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
