@@ -145,7 +145,18 @@ export default function SettingsSecurityPage() {
         type: res.is_connected ? "success" : "error",
         text: `${res.message} (Latencia: ${res.latency_ms} ms | Deriva NTP: ${res.clock_drift_ms} ms | Weight: ${res.used_weight}/${res.max_weight})`,
       });
-      await loadAllSettings();
+      setBinanceStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              is_connected: res.is_connected,
+              latency_ms: res.latency_ms,
+              clock_drift_ms: res.clock_drift_ms,
+              used_weight: res.used_weight,
+              max_weight: res.max_weight,
+            }
+          : prev
+      );
     } catch (err: any) {
       setFeedback({
         type: "error",
@@ -527,13 +538,14 @@ export default function SettingsSecurityPage() {
                 <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1">
                   Nueva API Key de Binance (Solo Escritura)
                 </label>
-                <input
+                  <input
                   type="password"
                   autoComplete="off"
+                  disabled={currentUser?.role !== "ADMIN"}
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
                   placeholder="Introduce nueva API Key para rotar credencial..."
-                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-50"
                 />
               </div>
 
@@ -546,20 +558,23 @@ export default function SettingsSecurityPage() {
                 <input
                   type="password"
                   autoComplete="off"
+                  disabled={currentUser?.role !== "ADMIN"}
                   value={secretKeyInput}
                   onChange={(e) => setSecretKeyInput(e.target.value)}
                   placeholder="Se cifra en AES-256-GCM y jamás vuelve a enviarse al navegador..."
-                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-50"
                 />
               </div>
 
               <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
                 <span className="text-[10px] font-mono text-slate-500">
-                  Permisos requeridos: Enable Reading + P2P. Prohibido Enable Withdrawals.
+                  {currentUser?.role === "ADMIN"
+                    ? "Permisos requeridos: Enable Reading + P2P. Prohibido Enable Withdrawals."
+                    : "Solo rol ADMIN puede rotar llaves maestras de Binance."}
                 </span>
                 <button
                   type="submit"
-                  disabled={savingKeys}
+                  disabled={savingKeys || currentUser?.role !== "ADMIN"}
                   className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50"
                 >
                   {savingKeys ? "Cifrando..." : "Rotar & Cifrar Credenciales"}

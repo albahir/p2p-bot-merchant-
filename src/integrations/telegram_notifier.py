@@ -13,6 +13,8 @@ import logging
 import os
 import queue
 import re
+import secrets
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime
@@ -23,17 +25,31 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger("telegram_notifier")
 
-SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|secret|token|password|bearer)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
-    re.compile(r"([a-fA-F0-9]{64})")
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"(?i)(api[_-]?key|secret|token|password|bearer)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
+        r"\1: [REDACTED]",
+    ),
+    (
+        re.compile(r"(postgres(?:ql)?(?:\+psycopg2?)?://[^:\s]+:)([^@\s]+)(@)"),
+        r"\1[REDACTED]\3",
+    ),
+    (
+        re.compile(r"\b(\d{8,12}:[a-zA-Z0-9_-]{25,})\b"),
+        "[REDACTED]",
+    ),
+    (
+        re.compile(r"([a-fA-F0-9]{64})"),
+        "[REDACTED]",
+    ),
 ]
 
 
 def sanitize_message(text: str) -> str:
     """Enmascara cualquier secreto inadvertido en el mensaje."""
     sanitized = text
-    for pattern in SECRET_PATTERNS:
-        sanitized = pattern.sub(r"\1: [REDACTED]", sanitized)
+    for pattern, replacement in SECRET_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
     return sanitized
 
 
@@ -154,26 +170,28 @@ class TelegramNotifier:
                 ]
             }
 
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "📈 Spreads P2P", "callback_data": "/spread"},
-                    {"text": "🏛️ Tasa BCV", "callback_data": "/bcv"},
-                ],
-                [
-                    {"text": "📊 Estado Bot", "callback_data": "/status"},
-                    {"text": "📑 Cierre Fiscal", "callback_data": "/cierre"},
-                ],
-                [
-                    {"text": "⚖️ Conciliación", "callback_data": "/conciliacion"},
-                    {"text": "🔄 Sincronizar Sheets", "callback_data": "/sheets"},
-                ],
+        rows: list[list[dict[str, str]]] = [
+            [
+                {"text": "📈 Spreads P2P", "callback_data": "/spread"},
+                {"text": "🏛️ Tasa BCV", "callback_data": "/bcv"},
+            ],
+            [
+                {"text": "📊 Estado Bot", "callback_data": "/status"},
+                {"text": "📑 Cierre Fiscal", "callback_data": "/cierre"},
+            ],
+            [
+                {"text": "⚖️ Conciliación", "callback_data": "/conciliacion"},
+                {"text": "🔄 Sincronizar Sheets", "callback_data": "/sheets"},
+            ],
+        ]
+        if role.upper() == "ADMIN":
+            rows.append(
                 [
                     {"text": "⏸️ Pausar", "callback_data": "/pause"},
                     {"text": "▶️ Reanudar", "callback_data": "/resume"},
-                ],
-            ]
-        }
+                ]
+            )
+        return {"inline_keyboard": rows}
 
     def get_persistent_menu_markup(self, role: str = "ADMIN") -> dict[str, Any]:
         """Genera un teclado persistente en la app móvil adaptado al rol."""
@@ -533,16 +551,27 @@ class TelegramNotifier:
             return self._handle_admin_revoke_user(clean_cmd_str)
 
         # --- Comandos Generales (ADMIN y TRADER) ---
-        if cmd == "/status":
-            state = "⏸️ PAUSADO" if self.is_paused else "🟢 ACTIVO"
+        if cmd in ("/status", "/estado"):
+            paused_now = self.is_paused
+            if self.session_factory is not None:
+                db_st = self.session_factory()
+                try:
+                    from src.data.database import get_bot_paused_state
+
+                    paused_now = paused_now or get_bot_paused_state(db_st)
+                finally:
+                    db_st.close()
+            state = "⏸️ PAUSADO" if paused_now else "🟢 ACTIVO"
             mode = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN (Binance Real)"
             return f"🤖 *Estado del Bot*: {state}\nModo: {mode}\nRol Operativo: `{role}`\nServicios: OK"
         elif cmd == "/pause":
             self.is_paused = True
+            self._sync_pause_state_to_db(True)
             logger.warning("Bot pausado mediante comando de Telegram.")
             return "⏸️ Operaciones del bot pausadas exitosamente."
         elif cmd == "/resume":
             self.is_paused = False
+            self._sync_pause_state_to_db(False)
             logger.info("Bot reanudado mediante comando de Telegram.")
             return "▶️ Operaciones del bot reanudadas."
         elif cmd == "/report":
@@ -562,7 +591,7 @@ class TelegramNotifier:
 
             return self._handle_compliance_sheets_sync()
         elif cmd in ("/cierre", "/cierre_mensual"):
-            return self._handle_monthly_close(clean_cmd_str)
+            return self._handle_monthly_close(clean_cmd_str, user_id=user_id)
         elif cmd in ("/cedula", "/identidad", "/consultar_cedula"):
             return self._handle_cedula_lookup(clean_cmd_str)
         elif cmd in ("/cedulas", "/directorio_cedulas", "/historial_cedulas"):
@@ -654,7 +683,7 @@ class TelegramNotifier:
                     uname = "admin" if not repo.get_by_username("admin") else f"admin_{admin_id}"
                     repo.create_user(
                         username=uname,
-                        password_hash=AuthService.hash_password(f"env_{admin_id}"),
+                        password_hash=AuthService.hash_password(secrets.token_urlsafe(32)),
                         role="ADMIN",
                         telegram_id=admin_id,
                         is_active=True,
@@ -668,7 +697,7 @@ class TelegramNotifier:
                         uname = f"trader_{trader_id}"
                     repo.create_user(
                         username=uname,
-                        password_hash=AuthService.hash_password(f"env_{trader_id}"),
+                        password_hash=AuthService.hash_password(secrets.token_urlsafe(32)),
                         role="TRADER",
                         telegram_id=trader_id,
                         is_active=True,
@@ -757,7 +786,7 @@ class TelegramNotifier:
                 return f"✅ Usuario `{user.username}` (`{target_id}`) actualizado exitosamente al rol `{target_role}`."
             else:
                 username = f"tg_{target_id}"
-                temp_hash = AuthService.hash_password(f"p2p_{target_id}")
+                temp_hash = AuthService.hash_password(secrets.token_urlsafe(32))
                 new_user = repo.create_user(
                     username=username,
                     password_hash=temp_hash,
@@ -818,9 +847,20 @@ class TelegramNotifier:
                 user = repo.get_by_username(target_id)
 
             if not user:
-                return f"⚠️ No se encontró al usuario `{target_id}` en la base de datos."
+                if target_id.isdigit():
+                    from src.security.auth_service import AuthService
 
-            repo.set_active_status(cast(int, user.id), False)
+                    user = repo.create_user(
+                        username=f"tg_{target_id}",
+                        password_hash=AuthService.hash_password(secrets.token_urlsafe(32)),
+                        role="INVITADO",
+                        telegram_id=target_id,
+                        is_active=False,
+                    )
+                else:
+                    return f"⚠️ No se encontró al usuario `{target_id}` en la base de datos."
+            else:
+                repo.set_active_status(cast(int, user.id), False)
             db.commit()
 
             # Notificar al usuario sobre la revocación de su acceso
@@ -854,7 +894,8 @@ class TelegramNotifier:
         except (ValueError, IndexError):
             return "⚠️ Formato de acción de comprobante inválido."
 
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
             repo = BankVoucherRepository(db)
             voucher = repo.get_by_id(voucher_id)
@@ -862,6 +903,9 @@ class TelegramNotifier:
                 return f"⚠️ Comprobante #{voucher_id} no encontrado en el sistema."
 
             voucher.movement_type = action  # type: ignore[assignment]
+            if action == "CREDIT":
+                voucher.bank_fee_ves = 0.0  # type: ignore[assignment]
+                voucher.total_debited_ves = float(cast(float, voucher.amount_ves) or 0.0)  # type: ignore[assignment]
             repo.update(voucher)
 
             label = "🟢 Venta P2P (Abono recibido en tu cuenta)" if action == "CREDIT" else "🔴 Compra P2P (Pago enviado desde tu cuenta)"
@@ -1073,7 +1117,27 @@ class TelegramNotifier:
         finally:
             db.close()
 
-    def _handle_monthly_close(self, command: str) -> str:
+    def _sync_pause_state_to_db(self, paused: bool) -> None:
+        """Sincroniza el estado de pausa en base de datos para coherencia con la API Web y el Engine."""
+        from src.data.database import SessionLocal, set_bot_paused_state
+
+        sf = self.session_factory
+        if sf is None:
+            set_bot_paused_state(paused, None)
+            try:
+                sf = SessionLocal
+            except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                return
+
+        db = sf()
+        try:
+            set_bot_paused_state(paused, db)
+        except (SQLAlchemyError, RuntimeError, OSError):
+            pass
+        finally:
+            db.close()
+
+    def _handle_monthly_close(self, command: str, user_id: int | str | None = None) -> str:
         """Procesa el comando /cierre [YYYY-MM] y despacha el archivo Excel a Telegram."""
         from src.data.database import SessionLocal
         from src.reporting.monthly_closer import MonthlyFiscalCloser
@@ -1103,8 +1167,19 @@ class TelegramNotifier:
             else:
                 month -= 1
 
-        closer = MonthlyFiscalCloser(session_factory=SessionLocal, notifier=self)
-        file_path, metrics = closer.execute_close(year=year, month=month, send_telegram=True)
+        sf = self.session_factory or SessionLocal
+        closer = MonthlyFiscalCloser(
+            session_factory=sf,
+            notifier=self,
+            output_dir=tempfile.gettempdir(),
+        )
+        target_chat = str(user_id) if user_id is not None else None
+        file_path, metrics = closer.execute_close(
+            year=year,
+            month=month,
+            send_telegram=True,
+            chat_id=target_chat,
+        )
 
         if not file_path:
             msg = metrics.get("message") or metrics.get("error") or "No hay datos para el período."
@@ -1129,7 +1204,8 @@ class TelegramNotifier:
             return f"⚠️ No se pudo reconocer una cédula válida en '{parts[1]}'."
 
         nat, num = extracted
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
             service = IdentityService(db=db)
             info = service.lookup(nationality=nat, cedula=num)
@@ -1189,7 +1265,8 @@ class TelegramNotifier:
         nat, num = extracted
         nombre = parts[2].strip().upper()
 
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
             service = IdentityService(db=db)
             service.save_to_cache(nationality=nat, cedula=num, full_name=nombre, source="MANUAL")
@@ -1256,15 +1333,19 @@ class TelegramNotifier:
         monitor = SpreadMonitor()
         try:
             quotes = monitor.fetch_live_quotes(use_public_bapi=True)
-        except (httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
+        except (SQLAlchemyError, httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
             logger.debug(f"Fallback a cotizaciones simuladas tras error de red: {e}")
+            quotes = monitor.get_market_quotes(use_sandbox=True)
+
+        if not quotes and self.use_sandbox:
             quotes = monitor.get_market_quotes(use_sandbox=True)
 
         if not quotes:
             return "ℹ️ No hay cotizaciones disponibles en este momento."
 
         bcv_rate = 820.0
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
             latest = db.query(Order).filter(cast(Any, Order.bcv_rate > 0)).order_by(Order.id.desc()).first()
             if latest and latest.bcv_rate:
@@ -1385,11 +1466,24 @@ class TelegramNotifier:
         from src.data.repositories import UserRepository
         from src.integrations.receipt_ocr import BankReceiptOCR, process_and_save_voucher
 
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
             ocr = BankReceiptOCR()
-            voucher, matched_order = process_and_save_voucher(image_bytes, db, ocr_service=ocr)
+            try:
+                voucher, matched_order = process_and_save_voucher(image_bytes, db, ocr_service=ocr)
+            except ValueError as val_err:
+                return f"⚠️ *No se pudo procesar el comprobante*: {val_err}", None
+
             if voucher:
+                if matched_order and voucher.verification_status == "MATCHED":
+                    try:
+                        from src.reporting.accounting_engine import AccountingEngine
+
+                        AccountingEngine(db=db).record_p2p_trade(order=matched_order, voucher=voucher)
+                    except (SQLAlchemyError, ValueError, TypeError, KeyError) as acct_err:
+                        logger.warning(f"Error asentando partida doble desde Telegram OCR: {acct_err}")
+
                 # Si el usuario tiene una hoja vinculada, asentar el comprobante en vivo
                 sheet_notice = ""
                 if user_id:

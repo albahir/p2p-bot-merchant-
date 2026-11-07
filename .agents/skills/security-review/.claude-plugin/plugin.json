@@ -1,0 +1,26 @@
+{
+  "name": "security-audit",
+  "displayName": "Security Audit",
+  "version": "1.2.0",
+  "description": "Runs real security scanners over code, full git history, dependencies, IaC and Supabase/Firebase row-level security, then verifies every finding against source before reporting.",
+  "author": {
+    "name": "Codemax IT Solutions Pvt. Ltd.",
+    "url": "https://cdmx.in"
+  },
+  "homepage": "https://github.com/cdmx-in/security-review",
+  "repository": "https://github.com/cdmx-in/security-review",
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "sast",
+    "dast",
+    "sca",
+    "secret-scanning",
+    "owasp",
+    "appsec",
+    "devsecops"
+  ],
+  "skills": [
+    "./security-audit"
+  ]
+}

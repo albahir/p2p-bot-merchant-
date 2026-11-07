@@ -46,7 +46,30 @@ class BinanceHistorySyncer:
     """Servicio de extracción y persistencia de órdenes P2P desde Binance API."""
 
     @staticmethod
-    def _map_item_to_order(item: BinanceOrderMatchItem) -> Order:
+    def _resolve_bcv_rate(db: Session | None = None) -> float:
+        """Obtiene la tasa oficial BCV vigente con fallback al último histórico en BD."""
+        try:
+            from src.reporting.bcv_service import BCVService
+
+            rate = float(BCVService().fetch_current_rate() or 0.0)
+            if rate > 0.0:
+                return rate
+        except (RuntimeError, ValueError, OSError, KeyError, TypeError):
+            pass
+
+        if db is not None:
+            try:
+                from src.data.models import BCVRateHistory
+
+                latest = db.query(BCVRateHistory).order_by(BCVRateHistory.fecha_valor.desc()).first()
+                if latest and float(latest.usd_rate or 0.0) > 0.0:
+                    return float(latest.usd_rate)
+            except SQLAlchemyError:
+                pass
+        return 0.0
+
+    @staticmethod
+    def _map_item_to_order(item: BinanceOrderMatchItem, bcv_rate: float = 0.0) -> Order:
         """Convierte un BinanceOrderMatchItem de la API en la entidad SQLAlchemy Order."""
         created_dt = datetime.fromtimestamp(item.createTime / 1000.0, tz=UTC)
         unit_price = float(item.unitPrice)
@@ -65,7 +88,7 @@ class BinanceHistorySyncer:
             unit_price=unit_price,
             fee_fiat=fee_fiat,
             fee_crypto=fee_crypto,
-            bcv_rate=0.0,
+            bcv_rate=bcv_rate,
             order_status=str(item.orderStatus.value),
             counterparty_name=str(item.counterPartNickName or ""),
             created_at=created_dt,
@@ -199,9 +222,11 @@ class BinanceHistorySyncer:
         vol_usdt = 0.0
         vol_fiat = 0.0
 
+        current_bcv_rate = self._resolve_bcv_rate(db)
+
         try:
             for item in all_items:
-                order_entity = self._map_item_to_order(item)
+                order_entity = self._map_item_to_order(item, bcv_rate=current_bcv_rate)
                 orders.append(order_entity)
 
                 if order_entity.trade_type == "BUY":
@@ -290,6 +315,8 @@ class BinanceHistorySyncer:
                             return row[c_orig]
                 return None
 
+            current_bcv_rate = self._resolve_bcv_rate(db)
+
             for _, row in df.iterrows():
                 order_num = _get_val(row, "order number", "order no", "número de orden", "orden", "nº de orden")
                 if not order_num or pd.isna(order_num):
@@ -327,7 +354,7 @@ class BinanceHistorySyncer:
                     unit_price=unit_price,
                     fee_fiat=0.0,
                     fee_crypto=0.0,
-                    bcv_rate=0.0,
+                    bcv_rate=current_bcv_rate,
                     order_status="COMPLETED",
                     counterparty_name=counterparty,
                     created_at=created_dt,

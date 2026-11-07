@@ -25,3 +25,9 @@
 
 8. **Los secretos nunca se loguean**: Ni API Keys, ni credenciales bancarias,
    ni tokens de Telegram, ni en logs ni en excepciones.
+
+9. **Auditoría de Seguridad Obligatoria y Continua**: Ante cualquier cambio que involucre
+   autenticación, manejo de sesiones, endpoints API, migraciones de base de datos,
+   gestión de secretos, dependencias externas o previo a despliegues en producción (CI/CD / Render),
+   es obligatorio ejecutar una auditoría de seguridad preventiva utilizando el skill
+   `security-review` (SAST, SCA de dependencias, escaneo de secretos y validación contra código).

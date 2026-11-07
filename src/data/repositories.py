@@ -466,10 +466,10 @@ class JournalEntryRepository:
         return int(last.entry_number + 1) if last else 1
 
     def get_last_entry(self) -> JournalEntry | None:
-        """Retorna el último asiento asentado en el Libro Diario."""
+        """Retorna la última línea asentada en el Libro Diario para mantener la cadena SHA-256 lineal."""
         return (
             self.db.query(JournalEntry)
-            .order_by(JournalEntry.entry_number.desc())
+            .order_by(JournalEntry.entry_number.desc(), JournalEntry.id.desc())
             .first()
         )
 

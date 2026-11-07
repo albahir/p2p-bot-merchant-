@@ -37,6 +37,7 @@ class MonthlyFiscalCloser:
         year: int,
         month: int,
         send_telegram: bool = True,
+        chat_id: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         """Calcula las métricas de un mes calendario, genera el .xlsx y lo envía opcionalmente a Telegram."""
         if month < 1 or month > 12:
@@ -108,7 +109,7 @@ class MonthlyFiscalCloser:
                     f"• Margen Operativo: `{margin_pct:.2f}%`\n\n"
                     f"📎 *Informe contable auditado en Excel adjunto.*"
                 )
-                self.notifier.send_document(file_path=output_file, caption=caption)
+                self.notifier.send_document(file_path=output_file, caption=caption, chat_id=chat_id)
 
             logger.info(f"Cierre fiscal de {year}-{month:02d} completado exitosamente: {output_file}")
             return output_file, metrics

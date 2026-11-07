@@ -2,7 +2,7 @@
 
 import logging
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -22,8 +22,9 @@ router = APIRouter(prefix="/api/fiscal", tags=["Gestión Fiscal P2P"])
 class FiscalReconciliationRequest(BaseModel):
     period: str = Field(..., description="Período contable en formato YYYY-MM", examples=["2026-10"])
     initial_balance: float = Field(default=0.0, ge=0.0, description="Saldo inicial real en USDT")
-    actual_final_balance: float = Field(default=0.0, ge=0.0, description="Saldo final real en USDT (Snapshot)")
+    actual_final_balance: float | None = Field(default=None, ge=0.0, description="Saldo final real en USDT (Snapshot)")
     asset: str = Field(default="USDT", description="Activo cripto principal")
+    cost_method: str = Field(default="FIFO", description="Método de costeo: FIFO o AVG")
 
 
 class FiscalReconciliationResponse(BaseModel):
@@ -34,7 +35,9 @@ class FiscalReconciliationResponse(BaseModel):
     outflows_p2p_sells: float
     total_outflows: float
     volume_operated: float
+    volume_operated_ves: float = 0.0
     total_fees: float
+    total_fees_ves: float = 0.0
     calculated_final_balance: float
     actual_final_balance: float
     discrepancy: float
@@ -46,6 +49,7 @@ class FiscalReconciliationResponse(BaseModel):
     orders_count: int
     message: str
     bcv_rate: float
+    cost_method: str = "FIFO"
 
 
 @router.get("/summary", response_model=FiscalReconciliationResponse)
@@ -54,7 +58,8 @@ def get_fiscal_summary(
     current_user: Annotated[User, Depends(require_trader)],
     period: str = Query(default=datetime.now(UTC).strftime("%Y-%m"), description="Período en formato YYYY-MM"),
     initial_balance: float = Query(default=0.0, ge=0.0),
-    actual_final_balance: float = Query(default=0.0, ge=0.0),
+    actual_final_balance: float | None = Query(default=None, ge=0.0),
+    cost_method: str = Query(default="FIFO", description="Método de costeo fiscal: FIFO o AVG"),
 ) -> FiscalReconciliationResponse:
     """Calcula y retorna la ecuación contable de 6 piezas para auditoría fiscal P2P."""
     try:
@@ -64,6 +69,7 @@ def get_fiscal_summary(
             period=period,
             initial_balance=initial_balance,
             actual_final_balance=actual_final_balance,
+            cost_method=cost_method,
         )
         bcv_val = bcv_svc.fetch_current_rate() or 0.0
 
@@ -75,7 +81,9 @@ def get_fiscal_summary(
             outflows_p2p_sells=res.outflows_p2p_sells,
             total_outflows=res.total_outflows,
             volume_operated=res.volume_operated,
+            volume_operated_ves=res.volume_operated_ves,
             total_fees=res.total_fees,
+            total_fees_ves=res.total_fees_ves,
             calculated_final_balance=res.calculated_final_balance,
             actual_final_balance=res.actual_final_balance,
             discrepancy=res.discrepancy,
@@ -87,6 +95,7 @@ def get_fiscal_summary(
             orders_count=res.orders_count,
             message=res.message,
             bcv_rate=bcv_val,
+            cost_method=res.cost_method,
         )
     except ValueError as val_err:
         raise HTTPException(
@@ -116,7 +125,9 @@ def execute_fiscal_reconciliation(
             initial_balance=req.initial_balance,
             actual_final_balance=req.actual_final_balance,
             asset=req.asset,
+            cost_method=req.cost_method,
         )
+        reconciler.save_snapshot(res)
         bcv_val = bcv_svc.fetch_current_rate() or 0.0
 
         return FiscalReconciliationResponse(
@@ -127,7 +138,9 @@ def execute_fiscal_reconciliation(
             outflows_p2p_sells=res.outflows_p2p_sells,
             total_outflows=res.total_outflows,
             volume_operated=res.volume_operated,
+            volume_operated_ves=res.volume_operated_ves,
             total_fees=res.total_fees,
+            total_fees_ves=res.total_fees_ves,
             calculated_final_balance=res.calculated_final_balance,
             actual_final_balance=res.actual_final_balance,
             discrepancy=res.discrepancy,
@@ -139,6 +152,7 @@ def execute_fiscal_reconciliation(
             orders_count=res.orders_count,
             message=res.message,
             bcv_rate=bcv_val,
+            cost_method=res.cost_method,
         )
     except ValueError as val_err:
         raise HTTPException(
@@ -151,3 +165,36 @@ def execute_fiscal_reconciliation(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error en la persistencia del cierre contable.",
         )
+
+
+@router.get("/snapshot")
+def get_fiscal_snapshot(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    period: str = Query(default=datetime.now(UTC).strftime("%Y-%m"), description="Período en formato YYYY-MM"),
+) -> dict[str, Any]:
+    """Consulta si un período mensual ya fue cerrado y sellado en la base de datos."""
+    _ = current_user
+    from src.data.repositories import FiscalSnapshotRepository
+
+    snap_repo = FiscalSnapshotRepository(db)
+    snap = snap_repo.get_by_period(period)
+    if not snap:
+        return {"period": period, "is_closed": False, "snapshot": None}
+
+    return {
+        "period": period,
+        "is_closed": True,
+        "snapshot": {
+            "period": snap.period,
+            "initial_balance": float(snap.initial_balance),
+            "calculated_final_balance": float(snap.calculated_final_balance),
+            "actual_final_balance": float(snap.actual_final_balance),
+            "discrepancy": float(snap.discrepancy),
+            "total_fees": float(snap.total_fees),
+            "net_profit_ves": float(snap.net_profit_ves),
+            "net_profit_usd": float(snap.net_profit_usd),
+            "status": snap.status,
+            "created_at": snap.created_at.isoformat() if snap.created_at else None,
+        },
+    }

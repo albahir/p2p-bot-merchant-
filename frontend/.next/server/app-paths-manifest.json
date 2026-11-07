@@ -1,9 +1,13 @@
 {
-  "/settings/page": "app/settings/page.js",
-  "/page": "app/page.js",
-  "/login/page": "app/login/page.js",
-  "/register/page": "app/register/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/accounting/page": "app/accounting/page.js",
+  "/admin/page": "app/admin/page.js",
   "/calculator/page": "app/calculator/page.js",
+  "/fiscal/page": "app/fiscal/page.js",
+  "/login/page": "app/login/page.js",
   "/orders/page": "app/orders/page.js",
-  "/accounting/page": "app/accounting/page.js"
+  "/page": "app/page.js",
+  "/register/page": "app/register/page.js",
+  "/settings/page": "app/settings/page.js",
+  "/sheets/page": "app/sheets/page.js"
 }
