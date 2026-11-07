@@ -16,3 +16,4 @@
 
 ## Fase 4: Verificación Integral, Auditoría de Seguridad y Documentación
 - [x] T21.9: Ejecutar suite de pruebas (`pytest`), `mypy`, `ruff check .`, compilación de producción Next.js (`npm run build`), auditoría preventiva `security-review` y actualizar `memory.md`.
+- [x] T21.10: Alinear `tests/unit/test_api_auth_routes.py::test_password_recovery_and_reset_flow` con la eliminación de `debug_code` OTP en respuestas HTTP (Regla #5 Constitución: Cero Secretos), validando la entrega del código OTP vía `TelegramNotifier.send_alert` y verificando la suite completa en CI.
