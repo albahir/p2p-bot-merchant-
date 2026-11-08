@@ -1,6 +1,22 @@
 """Tests unitarios para TelegramNotifier (sanitización de secretos y control de comandos)."""
 
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from src.data.models import Base
 from src.integrations.telegram_notifier import TelegramNotifier, sanitize_message
+
+
+@pytest.fixture(autouse=True)
+def isolated_memory_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    with patch("src.data.database.SessionLocal", session_factory):
+        yield
 
 
 def test_sanitize_message_redacts_secrets():

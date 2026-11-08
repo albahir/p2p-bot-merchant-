@@ -1,5 +1,6 @@
 """Rutas de API REST para el Sistema Contable P2P y Reconciliación Bancaria (SPEC-017)."""
 
+import calendar
 import os
 import tempfile
 from datetime import datetime
@@ -234,9 +235,18 @@ def export_accounting_excel(
     voucher_repo = BankVoucherRepository(db)
     engine = AccountingEngine(db=db)
 
-    entries = journal_repo.list_entries()
+    _, last_day = calendar.monthrange(year, month)
+    start_dt = datetime(year, month, 1, 0, 0, 0)
+    end_dt = datetime(year, month, last_day, 23, 59, 59, 999999)
+
+    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt)
     ledgers = engine.get_monthly_ledger_report(year=year, month=month)
-    vouchers = voucher_repo.list_all()
+    vouchers = [
+        v
+        for v in voucher_repo.list_all()
+        if v.voucher_date is None
+        or (v.voucher_date.year == year and v.voucher_date.month == month)
+    ]
 
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_p2p_{year}_{month:02d}.xlsx")
@@ -267,9 +277,18 @@ def export_accounting_pdf(
     voucher_repo = BankVoucherRepository(db)
     engine = AccountingEngine(db=db)
 
-    entries = journal_repo.list_entries()
+    _, last_day = calendar.monthrange(year, month)
+    start_dt = datetime(year, month, 1, 0, 0, 0)
+    end_dt = datetime(year, month, last_day, 23, 59, 59, 999999)
+
+    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt)
     ledgers = engine.get_monthly_ledger_report(year=year, month=month)
-    vouchers = voucher_repo.list_all()
+    vouchers = [
+        v
+        for v in voucher_repo.list_all()
+        if v.voucher_date is None
+        or (v.voucher_date.year == year and v.voucher_date.month == month)
+    ]
 
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_{year}_{month:02d}.pdf")
@@ -364,11 +383,17 @@ async def upload_voucher(
         )
 
     ocr = BankReceiptOCR()
-    voucher, matched_order = ocr.process_and_save_voucher(
-        image_bytes=content,
-        db=db,
-        mime_type=file.content_type or "image/jpeg",
-    )
+    try:
+        voucher, matched_order = ocr.process_and_save_voucher(
+            image_bytes=content,
+            db=db,
+            mime_type=file.content_type or "image/jpeg",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
     # Si se auto-concilió al 100%, asentar en el Libro Diario
     if matched_order and voucher.verification_status == "MATCHED":

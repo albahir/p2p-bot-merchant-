@@ -72,7 +72,8 @@ def test_ai_tools_metrics_and_orders():
         assert len(orders) == 2
         assert orders[0]["order_number"] in ("AI_BUY_1", "AI_SELL_1")
 
-        bcv = tools.consultar_tasa_bcv()
+        with patch("src.reporting.bcv_service.BCVService.fetch_current_rate", return_value=36.50):
+            bcv = tools.consultar_tasa_bcv()
         assert bcv["tasa_bcv"] > 0
     finally:
         db.close()

@@ -101,6 +101,17 @@ function getToken(): string | null {
   return localStorage.getItem("p2p_token");
 }
 
+function formatApiErrorDetail(rawDetail: unknown, fallback: string): string {
+  if (!rawDetail) return fallback;
+  if (typeof rawDetail === "string") return rawDetail;
+  if (Array.isArray(rawDetail)) {
+    return rawDetail
+      .map((item: any) => item?.msg || JSON.stringify(item))
+      .join("; ");
+  }
+  return String(rawDetail);
+}
+
 export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -124,7 +135,7 @@ export async function apiRequest<T>(
     let errorDetail = "Error en la petición";
     try {
       const errJson = await response.json();
-      errorDetail = errJson.detail || errorDetail;
+      errorDetail = formatApiErrorDetail(errJson.detail, errorDetail);
     } catch {
       // Ignorar fallo de parseo JSON
     }
@@ -132,6 +143,52 @@ export async function apiRequest<T>(
   }
 
   return response.json();
+}
+
+export async function downloadAuthenticatedFile(
+  endpoint: string,
+  fallbackFilename: string
+): Promise<void> {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    method: "GET",
+    headers,
+  });
+
+  if (!response.ok) {
+    let errorDetail = "No se pudo descargar el archivo solicitado.";
+    try {
+      const errJson = await response.json();
+      errorDetail = formatApiErrorDetail(errJson.detail, errorDetail);
+    } catch {
+      // Ignorar fallo de parseo JSON
+    }
+    throw new Error(errorDetail);
+  }
+
+  const blob = await response.blob();
+  let filename = fallbackFilename;
+  const disposition = response.headers.get("content-disposition");
+  if (disposition) {
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    if (match?.[1]) {
+      filename = match[1];
+    }
+  }
+
+  const blobUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = blobUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(blobUrl);
 }
 
 // Métodos de autenticación
@@ -234,16 +291,26 @@ export async function uploadOrdersFile(file: File): Promise<any> {
     body: formData,
   });
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(errorText || "Error al subir archivo de órdenes");
+    let detail = "Error al subir archivo de órdenes";
+    try {
+      const errJson = await res.json();
+      detail = formatApiErrorDetail(errJson.detail, detail);
+    } catch {
+      // Ignorar fallo de parseo JSON
+    }
+    throw new Error(detail);
   }
   return res.json();
 }
 
-
-export function getExportOrdersUrl(format: "xlsx" | "csv_semicolon" | "csv_comma"): string {
-  const token = getToken();
-  return `${API_BASE_URL}/api/orders/export?format=${format}&token=${token || ""}`;
+export async function downloadOrdersExport(
+  format: "xlsx" | "csv_semicolon" | "csv_comma"
+): Promise<void> {
+  const ext = format === "xlsx" ? "xlsx" : "csv";
+  return downloadAuthenticatedFile(
+    `/api/orders/export?format=${format}`,
+    `ordenes_p2p.${ext}`
+  );
 }
 
 // Métodos de autenticación adicional (Registro y Recuperación)
@@ -459,7 +526,9 @@ export interface FiscalSummary {
   outflows_p2p_sells: number;
   total_outflows: number;
   volume_operated: number;
+  volume_operated_ves?: number;
   total_fees: number;
+  total_fees_ves?: number;
   calculated_final_balance: number;
   actual_final_balance: number;
   discrepancy: number;
@@ -471,18 +540,49 @@ export interface FiscalSummary {
   orders_count: number;
   message: string;
   bcv_rate: number;
+  cost_method?: string;
 }
 
 export async function getFiscalSummary(
   period?: string,
   initial_balance?: number,
-  actual_final_balance?: number
+  actual_final_balance?: number,
+  cost_method: "FIFO" | "AVG" = "FIFO"
 ): Promise<FiscalSummary> {
   const query = new URLSearchParams();
   if (period) query.set("period", period);
   if (initial_balance !== undefined) query.set("initial_balance", initial_balance.toString());
   if (actual_final_balance !== undefined) query.set("actual_final_balance", actual_final_balance.toString());
+  query.set("cost_method", cost_method);
   return apiRequest<FiscalSummary>(`/api/fiscal/summary?${query.toString()}`);
+}
+
+export async function closeFiscalPeriod(data: {
+  period: string;
+  initial_balance: number;
+  actual_final_balance?: number;
+  asset?: string;
+  cost_method?: "FIFO" | "AVG";
+}): Promise<FiscalSummary> {
+  return apiRequest<FiscalSummary>("/api/fiscal/reconcile", {
+    method: "POST",
+    body: JSON.stringify({
+      period: data.period,
+      initial_balance: data.initial_balance,
+      actual_final_balance: data.actual_final_balance,
+      asset: data.asset || "USDT",
+      cost_method: data.cost_method || "FIFO",
+    }),
+  });
+}
+
+export async function getFiscalSnapshot(period: string): Promise<{
+  period: string;
+  is_closed: boolean;
+  snapshot?: Record<string, any> | null;
+}> {
+  const query = new URLSearchParams({ period });
+  return apiRequest(`/api/fiscal/snapshot?${query.toString()}`);
 }
 
 // Métodos de Contabilidad P2P (Libro Diario y Libro Mayor - SPEC-017)
@@ -550,14 +650,20 @@ export async function getLedgerSummaries(
   return apiRequest<LedgerSummaryItem[]>(`/api/accounting/ledger?${query.toString()}`);
 }
 
-export function getExportAccountingExcelUrl(year: number, month: number): string {
-  const token = getToken();
-  return `${API_BASE_URL}/api/accounting/export/excel?year=${year}&month=${month}${token ? `&token=${token}` : ""}`;
+export async function downloadAccountingExcel(year: number, month: number): Promise<void> {
+  const padded = String(month).padStart(2, "0");
+  return downloadAuthenticatedFile(
+    `/api/accounting/export/excel?year=${year}&month=${month}`,
+    `reporte_contable_p2p_${year}_${padded}.xlsx`
+  );
 }
 
-export function getExportAccountingPdfUrl(year: number, month: number): string {
-  const token = getToken();
-  return `${API_BASE_URL}/api/accounting/export/pdf?year=${year}&month=${month}${token ? `&token=${token}` : ""}`;
+export async function downloadAccountingPdf(year: number, month: number): Promise<void> {
+  const padded = String(month).padStart(2, "0");
+  return downloadAuthenticatedFile(
+    `/api/accounting/export/pdf?year=${year}&month=${month}`,
+    `reporte_contable_${year}_${padded}.pdf`
+  );
 }
 
 export async function matchVoucherWithOrder(voucherId: number, orderNumber: string): Promise<any> {
@@ -601,8 +707,14 @@ export async function uploadVoucherFile(file: File): Promise<UploadVoucherRespon
     body: formData,
   });
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(errorText || "Error al subir comprobante");
+    let detail = "Error al subir comprobante";
+    try {
+      const errJson = await res.json();
+      detail = formatApiErrorDetail(errJson.detail, detail);
+    } catch {
+      // Ignorar fallo de parseo JSON
+    }
+    throw new Error(detail);
   }
   return res.json();
 }

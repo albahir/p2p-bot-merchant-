@@ -120,10 +120,12 @@ export default function SheetsSyncPage() {
       const res = await syncSheetsNow();
       setLastSync(res);
       setFeedback({
-        type: "success",
+        type: res.success ? "success" : "error",
         text:
           res.message ||
-          `Sincronización completada: ${res.rows_exported} órdenes y ${res.journal_entries_exported} asientos exportados.`,
+          (res.success
+            ? `Sincronización completada: ${res.rows_exported} órdenes y ${res.journal_entries_exported} asientos exportados.`
+            : "No se pudo sincronizar con Google Sheets. Verifica permisos del documento."),
       });
       await loadConfig();
     } catch (err: any) {

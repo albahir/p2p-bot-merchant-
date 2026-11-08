@@ -96,13 +96,32 @@ def register(
     assigned_role = "ADMIN" if is_admin else ("TRADER" if is_trader else "INVITADO")
     password_hash = AuthService.hash_password(req.password)
 
-    new_user = user_repo.create_user(
-        username=req.username,
-        password_hash=password_hash,
-        role=assigned_role,
-        telegram_id=tg_id_str,
-        is_active=True,
-    )
+    existing_tg_user = user_repo.get_by_telegram_id(tg_id_str) if tg_id_str else None
+    if existing_tg_user is not None:
+        # Si es una cuenta pre-autorizada (placeholder tg_/trader_/admin_), permitir reclamarla con clave propia
+        if str(existing_tg_user.username).startswith(("tg_", "trader_", "admin_")):
+            existing_tg_user.username = req.username  # type: ignore[assignment]
+            existing_tg_user.password_hash = password_hash  # type: ignore[assignment]
+            current_role = str(existing_tg_user.role or "INVITADO").upper()
+            if assigned_role == "ADMIN" or current_role not in ("ADMIN", "TRADER"):
+                existing_tg_user.role = assigned_role  # type: ignore[assignment]
+            existing_tg_user.is_active = True  # type: ignore[assignment]
+            db.commit()
+            db.refresh(existing_tg_user)
+            new_user = existing_tg_user
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Este ID de Telegram ya está vinculado a otra cuenta activa. Inicia sesión o recupera tu contraseña.",
+            )
+    else:
+        new_user = user_repo.create_user(
+            username=req.username,
+            password_hash=password_hash,
+            role=assigned_role,
+            telegram_id=tg_id_str,
+            is_active=True,
+        )
 
     if req.google_sheet_id and req.google_sheet_id.strip():
         import re
@@ -164,36 +183,35 @@ def recover_password(
     otp = "".join([str(secrets.randbelow(10)) for _ in range(6)])
     expires_at = time.time() + 900  # 15 minutos
 
-    _RECOVERY_CODES[user.username.lower()] = {
-        "code": otp,
-        "expires_at": expires_at,
-        "user_id": user.id,
-    }
-
     sent_to_telegram = False
     if user.telegram_id:
         try:
             from src.integrations.telegram_notifier import TelegramNotifier
             notifier = TelegramNotifier()
-            notifier.send_alert(
-                "🔐 *Recuperación de Contraseña*\n\n"
-                f"Hola `{user.username}`, tu código de seguridad es:\n"
-                f"👉 `{otp}`\n\n"
-                "Válido por 15 minutos. Si no solicitaste este código, ignora este mensaje.",
-                chat_id=str(user.telegram_id),
+            sent_to_telegram = bool(
+                notifier.send_alert(
+                    "🔐 *Recuperación de Contraseña*\n\n"
+                    f"Hola `{user.username}`, tu código de seguridad es:\n"
+                    f"👉 `{otp}`\n\n"
+                    "Válido por 15 minutos. Si no solicitaste este código, ignora este mensaje.",
+                    chat_id=str(user.telegram_id),
+                )
             )
-            sent_to_telegram = True
         except (RuntimeError, ValueError, OSError, TypeError):
-            pass
+            sent_to_telegram = False
+
+    if sent_to_telegram:
+        _RECOVERY_CODES[str(user.username).lower()] = {
+            "code": otp,
+            "expires_at": expires_at,
+            "user_id": user.id,
+            "attempts": 0,
+        }
 
     return {
         "success": True,
-        "message": (
-            "Código de recuperación de 6 dígitos despachado exitosamente"
-            + (" a tu Telegram vinculado." if sent_to_telegram else ". Contacta a un administrador.")
-        ),
+        "message": "Si la cuenta existe y tiene Telegram vinculado, se ha enviado el código de recuperación.",
         "has_telegram": sent_to_telegram,
-        "debug_code": otp if not sent_to_telegram else None,
     }
 
 
@@ -203,7 +221,11 @@ def reset_password(
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, Any]:
     """Aplica el cambio de contraseña utilizando el código de recuperación."""
-    record = _RECOVERY_CODES.get(req.username.lower())
+    user_repo = UserRepository(db)
+    target_user = user_repo.get_by_username(req.username.strip()) or user_repo.get_by_telegram_id(req.username.strip())
+    lookup_key = str(target_user.username).lower() if target_user else req.username.strip().lower()
+
+    record = _RECOVERY_CODES.get(lookup_key)
     if not record:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -211,19 +233,21 @@ def reset_password(
         )
 
     if time.time() > record["expires_at"]:
-        _RECOVERY_CODES.pop(req.username.lower(), None)
+        _RECOVERY_CODES.pop(lookup_key, None)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El código de recuperación ha expirado (límite de 15 minutos).",
         )
 
-    if record["code"] != req.reset_code.strip():
+    if not secrets.compare_digest(str(record["code"]), req.reset_code.strip()):
+        record["attempts"] = int(record.get("attempts", 0)) + 1
+        if record["attempts"] >= 5:
+            _RECOVERY_CODES.pop(lookup_key, None)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Código de recuperación inválido.",
         )
 
-    user_repo = UserRepository(db)
     user = user_repo.get_by_id(record["user_id"])
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
@@ -233,7 +257,7 @@ def reset_password(
     db.commit()
 
     # Consumir el código para evitar reuso
-    _RECOVERY_CODES.pop(req.username.lower(), None)
+    _RECOVERY_CODES.pop(lookup_key, None)
 
     return {
         "success": True,
@@ -277,8 +301,8 @@ def login_telegram(
         # Registrar nuevo usuario con rol según whitelist
         assigned_role = "ADMIN" if is_admin_allowed else ("TRADER" if is_trader_allowed else "INVITADO")
         username = data.username or f"tg_{data.id}"
-        # Generar hash aleatorio para contraseñas de cuentas SSO puras
-        random_pass = AuthService.hash_password(f"sso_{data.id}_{data.auth_date}")
+        # Generar hash aleatorio criptográfico para contraseñas de cuentas SSO puras
+        random_pass = AuthService.hash_password(secrets.token_urlsafe(32))
         user = user_repo.create_user(
             username=username,
             password_hash=random_pass,
@@ -349,7 +373,7 @@ def login_telegram_webapp(
 
     if not user:
         assigned_role = "ADMIN" if is_admin_allowed else ("TRADER" if is_trader_allowed else "INVITADO")
-        random_pass = AuthService.hash_password(f"tma_{tg_id}")
+        random_pass = AuthService.hash_password(secrets.token_urlsafe(32))
         user = user_repo.create_user(
             username=username,
             password_hash=random_pass,

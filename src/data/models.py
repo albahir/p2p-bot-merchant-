@@ -188,5 +188,19 @@ class JournalEntry(Base):
     entry_hash = Column(String(64), nullable=False)
 
 
+class SystemState(Base):
+    """Estado operativo ligero compartido entre el motor 24/7, el Bot de Telegram y la API Web."""
+    __tablename__ = "system_state"
+
+    key = Column(String(64), primary_key=True, index=True, nullable=False)
+    value = Column(String(255), nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+
 
 

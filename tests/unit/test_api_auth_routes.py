@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import re
 import time
 from unittest.mock import patch
 
@@ -161,27 +162,47 @@ def test_register_new_user_and_login(client):
 
 
 def test_password_recovery_and_reset_flow(client):
-    """Verifica el flujo completo de recuperación con OTP y cambio de contraseña."""
-    # 1. Registrar usuario
+    """Verifica el flujo completo de recuperación con OTP vía Telegram y cambio de contraseña sin filtración HTTP."""
+    # 0. Usuario sin Telegram vinculado: no genera ni expone debug_code (Regla #5 Constitución: Cero Secretos)
     client.post(
         "/api/auth/register",
-        json={"username": "recovery_user", "password": "InitialPass123!"},
+        json={"username": "no_tg_recovery_user", "password": "InitialPass123!"},
+    )
+    no_tg_res = client.post("/api/auth/recover-password", json={"username": "no_tg_recovery_user"})
+    assert no_tg_res.status_code == 200
+    no_tg_data = no_tg_res.json()
+    assert no_tg_data["success"] is True
+    assert no_tg_data["has_telegram"] is False
+    assert "debug_code" not in no_tg_data
+
+    # 1. Registrar usuario con Telegram vinculado
+    client.post(
+        "/api/auth/register",
+        json={"username": "recovery_user", "password": "InitialPass123!", "telegram_id": "777888999"},
     )
 
-    # 2. Solicitar recuperación
-    rec_res = client.post("/api/auth/recover-password", json={"username": "recovery_user"})
+    # 2. Solicitar recuperación capturando el OTP enviado exclusivamente por Telegram
+    with patch("src.integrations.telegram_notifier.TelegramNotifier.send_alert", return_value=True) as mock_send:
+        rec_res = client.post("/api/auth/recover-password", json={"username": "recovery_user"})
+
     assert rec_res.status_code == 200
     rec_data = rec_res.json()
     assert rec_data["success"] is True
-    # En entorno de prueba sin telegram bot real, retorna debug_code
-    otp = rec_data.get("debug_code")
-    assert otp is not None
+    assert rec_data["has_telegram"] is True
+    assert "debug_code" not in rec_data
+
+    assert mock_send.called
+    sent_message = mock_send.call_args[0][0]
+    otp_match = re.search(r"(\d{6})", sent_message)
+    assert otp_match is not None
+    otp = otp_match.group(1)
     assert len(otp) == 6
 
     # 3. Restablecer con código incorrecto falla
+    wrong_code = "000000" if otp != "000000" else "999999"
     bad_reset = client.post(
         "/api/auth/reset-password",
-        json={"username": "recovery_user", "reset_code": "000000", "new_password": "NewStrongPass999!"},
+        json={"username": "recovery_user", "reset_code": wrong_code, "new_password": "NewStrongPass999!"},
     )
     assert bad_reset.status_code == 400
 

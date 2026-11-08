@@ -243,12 +243,22 @@ class BankReceiptOCR:
     ) -> tuple[BankVoucher, Order | None]:
         """Extrae los datos por OCR, persiste el comprobante y auto-concilia con órdenes P2P."""
         extracted = self.extract_from_image(image_bytes, mime_type=mime_type)
+        if not extracted.is_valid or float(extracted.amount_ves or 0.0) <= 0.0:
+            raise ValueError(
+                extracted.error_message
+                or "No se pudo extraer un comprobante bancario válido con monto mayor a cero (Fail-closed)."
+            )
 
         voucher_repo = BankVoucherRepository(db)
         order_repo = OrderRepository(db)
 
-        # Buscar órdenes completadas o recientes para auto-matching
-        orders = order_repo.list_completed()
+        # Excluir órdenes ya conciliadas con otro comprobante para evitar doble imputación
+        already_matched: set[str] = {
+            str(v.associated_order_number)
+            for v in voucher_repo.list_all()
+            if v.associated_order_number
+        }
+        orders = [o for o in order_repo.list_completed() if str(o.order_number) not in already_matched]
         matched_order = self.match_receipt_with_orders(extracted, orders)
 
         voucher_date = None
@@ -265,18 +275,18 @@ class BankReceiptOCR:
         )
 
         voucher = BankVoucher(
-            bank_name=extracted.bank_name or "Banco Desconocido",
-            destination_bank=extracted.destination_bank,
-            reference_number=extracted.reference_number or f"REF-{int(datetime.now(UTC).timestamp())}",
+            bank_name=(extracted.bank_name or "Banco Desconocido")[:100],
+            destination_bank=extracted.destination_bank[:100] if extracted.destination_bank else None,
+            reference_number=(extracted.reference_number or f"REF-{int(datetime.now(UTC).timestamp())}")[:50],
             amount_ves=extracted.amount_ves,
             bank_fee_ves=extracted.bank_fee_ves,
             total_debited_ves=total_debited,
-            sender_id=extracted.sender_cedula,
-            sender_name=extracted.sender_name,
-            sender_phone=extracted.sender_phone,
-            concept=extracted.concept,
-            payment_method=extracted.payment_method,
-            movement_type=extracted.movement_type,
+            sender_id=extracted.sender_cedula[:20] if extracted.sender_cedula else None,
+            sender_name=extracted.sender_name[:255] if extracted.sender_name else None,
+            sender_phone=extracted.sender_phone[:30] if extracted.sender_phone else None,
+            concept=extracted.concept[:255] if extracted.concept else None,
+            payment_method=(extracted.payment_method or "PAGO_MOVIL")[:30],
+            movement_type=(extracted.movement_type or "DEBIT")[:20],
             associated_order_number=matched_order.order_number if matched_order else None,
             verification_status="MATCHED" if matched_order else "UNMATCHED",
             voucher_date=voucher_date or datetime.now(UTC),
@@ -326,22 +336,33 @@ class BankReceiptOCR:
         if not unmatched_vouchers:
             return 0
 
-        # Obtener todas las órdenes completadas para cotejar
-        completed_orders = order_repo.list_completed()
+        # Obtener todas las órdenes completadas aún no vinculadas
+        already_matched: set[str] = {
+            str(v.associated_order_number)
+            for v in voucher_repo.list_all()
+            if v.associated_order_number
+        }
+        completed_orders = [o for o in order_repo.list_completed() if str(o.order_number) not in already_matched]
         reconciled_count = 0
 
         from src.reporting.accounting_engine import AccountingEngine
 
         acct_engine = AccountingEngine(db=db)
 
+        def _to_naive_utc(dt_val: datetime) -> datetime:
+            return dt_val.astimezone(UTC).replace(tzinfo=None) if dt_val.tzinfo is not None else dt_val
+
         for v in unmatched_vouchers:
-            v_date = v.voucher_date or datetime.now(UTC)
+            v_date = _to_naive_utc(v.voucher_date or datetime.now(UTC))
             for o in completed_orders:
+                if str(o.order_number) in already_matched:
+                    continue
                 # Comprobar monto idéntico en VES
                 if abs(float(o.fiat_amount) - float(v.amount_ves)) < 0.05:
                     # Comprobar ventana de tiempo si la orden tiene fecha
                     if o.created_at:
-                        diff = abs((v_date - o.created_at).total_seconds())
+                        o_date = _to_naive_utc(o.created_at)
+                        diff = abs((v_date - o_date).total_seconds())
                         if diff > (tolerance_hours * 3600):
                             continue
 
@@ -349,6 +370,7 @@ class BankReceiptOCR:
                     v.associated_order_number = o.order_number  # type: ignore[assignment]
                     v.verification_status = "MATCHED"  # type: ignore[assignment]
                     voucher_repo.update(v)
+                    already_matched.add(str(o.order_number))
 
                     # Registrar en el Libro Diario formal
                     try:

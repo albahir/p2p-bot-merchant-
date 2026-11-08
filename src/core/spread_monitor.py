@@ -431,6 +431,8 @@ class SpreadMonitor:
 
         # Nivel 2: Binance P2P BAPI / SAPI con credenciales si están disponibles
         try:
+            from sqlalchemy.exc import SQLAlchemyError
+
             from config.settings import Settings
             from src.core.binance_client import BinanceP2PClient
             from src.security.api_key_manager import ApiKeyManager
@@ -442,7 +444,7 @@ class SpreadMonitor:
                 km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY)
                 api_key = km.get_secret("binance_api_key") or ""
                 private_key = km.get_secret("binance_private_key") or ""
-            except (ValueError, KeyError, OSError, RuntimeError, TypeError):
+            except (SQLAlchemyError, ValueError, KeyError, OSError, RuntimeError, TypeError):
                 api_key = ""
                 private_key = ""
 

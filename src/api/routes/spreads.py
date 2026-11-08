@@ -86,6 +86,7 @@ def get_arbitrage_matrix(
     best_cross = spread_mon.find_best_cross_arbitrage(quotes)
     best_item: BestArbitrageItem | None = None
     if best_cross:
+        scaled_profit_ves = round(float(best_cross["net_profit_ves_100u"]) * (float(amount_usdt) / 100.0), 2)
         best_item = BestArbitrageItem(
             buy_bank=best_cross["buy_bank"],
             buy_rate=best_cross["buy_rate"],
@@ -93,7 +94,7 @@ def get_arbitrage_matrix(
             sell_rate=best_cross["sell_rate"],
             spread_ves=best_cross["spread_ves"],
             spread_pct=best_cross["spread_pct"],
-            net_profit_ves=best_cross["net_profit_ves_100u"],
+            net_profit_ves=scaled_profit_ves,
             is_viable=best_cross["is_viable"],
             warning_message="Arbitraje interbancario disponible" if best_cross["is_viable"] else "Margen ajustado",
         )

@@ -98,6 +98,19 @@ class AccountingEngine:
         voucher: BankVoucher,
     ) -> list[JournalEntry]:
         """Genera el asiento contable formal de partida doble para una orden P2P conciliada con su comprobante."""
+        if voucher.id is not None and order.order_number:
+            existing_entries = (
+                self.db.query(JournalEntry)
+                .filter(
+                    JournalEntry.voucher_id == voucher.id,
+                    JournalEntry.order_number == order.order_number,
+                )
+                .order_by(JournalEntry.id.asc())
+                .all()
+            )
+            if existing_entries:
+                return existing_entries
+
         entry_number = self.journal_repo.get_next_entry_number()
         last_entry = self.journal_repo.get_last_entry()
         current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
@@ -180,6 +193,8 @@ class AccountingEngine:
 
         created_entries: list[JournalEntry] = []
         for line in lines:
+            safe_ref = str(line["reference"])[:50]
+            safe_acc_name = str(line["account_name"])[:100]
             entry_hash = self._compute_hash(
                 prev_hash=current_prev_hash,
                 entry_number=entry_number,
@@ -187,17 +202,17 @@ class AccountingEngine:
                 account_code=line["account_code"],
                 debit=line["debit"],
                 credit=line["credit"],
-                reference=line["reference"],
+                reference=safe_ref,
             )
 
             entry = JournalEntry(
                 entry_number=entry_number,
                 date_time=dt,
                 account_code=line["account_code"],
-                account_name=line["account_name"],
+                account_name=safe_acc_name,
                 debit=line["debit"],
                 credit=line["credit"],
-                reference=line["reference"],
+                reference=safe_ref,
                 description=line["description"],
                 voucher_id=voucher.id,
                 order_number=order.order_number,
@@ -380,7 +395,9 @@ class AccountingEngine:
         """Calcula el saldo teórico en tiempo real (Inflow - Outflow) desglosado por banco y USDT."""
         cfg = initial_balances or {}
         init_usdt = float(cfg.get("crypto_usdt", 0.0))
-        banks_cfg: dict[str, float] = cfg.get("banks", {})
+        explicit_banks_cfg: dict[str, float] = dict(cfg.get("banks") or {})
+        has_explicit_banks = bool(explicit_banks_cfg)
+        banks_cfg: dict[str, float] = dict(explicit_banks_cfg)
 
         # Si el usuario solo colocó un saldo general en bolívares sin desglose
         if not banks_cfg and "total_ves" in cfg:
@@ -388,9 +405,9 @@ class AccountingEngine:
         elif not banks_cfg and "1.1.01" in cfg:
             banks_cfg = {"Banco Principal": float(cfg["1.1.01"])}
 
-        start_date = datetime(year, month, 1, 0, 0, 0, tzinfo=UTC)
         days_in_month = calendar.monthrange(year, month)[1]
-        end_date = datetime(year, month, days_in_month, 23, 59, 59, tzinfo=UTC)
+        start_date = datetime(year, month, 1, 0, 0, 0)
+        end_date = datetime(year, month, days_in_month, 23, 59, 59, 999999)
 
         # 1. Movimientos Cripto (USDT) desde órdenes completadas
         orders = (
@@ -412,11 +429,9 @@ class AccountingEngine:
             elif t_type == "SELL":
                 outflow_usdt += c_amount
 
-
         theoretical_usdt = round(init_usdt + inflow_usdt - outflow_usdt, 2)
 
-        # 2. Movimientos Fiat (VES) por banco desde el Libro Diario o Comprobantes
-        # Inicializar estructura para los bancos configurados
+        # 2. Movimientos Fiat (VES) por banco desde el Libro Diario
         bank_stats: dict[str, dict[str, float]] = {}
         for b_name, b_init in banks_cfg.items():
             bank_stats[b_name] = {
@@ -432,23 +447,34 @@ class AccountingEngine:
         )
 
         for e in entries:
-            # Identificar a qué banco pertenece por descripción o voucher asociado
-            matched_bank = None
+            matched_bank: str | None = None
             desc = (e.description or "").lower()
+            acc_name = str(e.account_name or "")
+            acc_lower = acc_name.lower()
+
             for b_name in bank_stats:
-                if b_name.lower() in desc:
+                if b_name == "Banco Principal" and not has_explicit_banks:
+                    continue
+                if b_name.lower() in desc or b_name.lower() in acc_lower:
                     matched_bank = b_name
                     break
 
             if not matched_bank:
-                # Si solo hay un banco configurado, asignarlo a ese
-                if len(bank_stats) == 1:
-                    matched_bank = next(iter(bank_stats.keys()))
+                if has_explicit_banks and len(explicit_banks_cfg) == 1:
+                    matched_bank = next(iter(explicit_banks_cfg.keys()))
                 else:
+                    extracted_bank = ""
+                    if " - " in acc_name:
+                        extracted_bank = acc_name.split(" - ", 1)[1].strip()
+                    if extracted_bank and extracted_bank.lower() not in ("comercial", "desconocido"):
+                        matched_bank = extracted_bank
+                    elif not has_explicit_banks and "Banco Principal" in bank_stats:
+                        matched_bank = "Banco Principal"
+                    else:
+                        matched_bank = "Otros / No Especificado"
 
-                    matched_bank = "Otros / No Especificado"
-                    if matched_bank not in bank_stats:
-                        bank_stats[matched_bank] = {"initial": 0.0, "inflows": 0.0, "outflows": 0.0}
+                if matched_bank not in bank_stats:
+                    bank_stats[matched_bank] = {"initial": 0.0, "inflows": 0.0, "outflows": 0.0}
 
             # En cuenta de Activo (1.1.01): Debe = Entrada de dinero (Venta P2P recibida)
             # Haber = Salida de dinero (Pago de Compra P2P)

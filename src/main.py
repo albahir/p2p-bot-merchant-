@@ -24,7 +24,13 @@ from src.core.binance_client import (
 from src.core.binance_mock import MockBinanceP2PClient
 from src.core.history_ingestor import HistoryIngestor
 from src.core.rate_alert_service import RateAlertService
-from src.data.database import DATABASE_URL, SessionLocal, init_db, seed_env_operators
+from src.data.database import (
+    DATABASE_URL,
+    SessionLocal,
+    get_bot_paused_state,
+    init_db,
+    seed_env_operators,
+)
 from src.integrations.ai_assistant import TelegramAIAgent
 from src.integrations.telegram_notifier import (
     TelegramCommandPoller,
@@ -122,6 +128,10 @@ class P2PBotEngine:
         self.seeded_counts = {"admins": 0, "traders": 0}
         db_seed = SessionLocal()
         try:
+            from src.security.auth_service import AuthService
+
+            admin_tg = self.settings.telegram_allowed_users[0] if self.settings.telegram_allowed_users else None
+            AuthService(db_session=db_seed).ensure_default_admin(admin_telegram_id=admin_tg)
             self.seeded_counts = seed_env_operators(db_seed, self.settings)
             logger.info(
                 "Operadores blindados sincronizados en arranque: %s Admin(s), %s Trader(s).",
@@ -217,7 +227,7 @@ class P2PBotEngine:
         self.pinger.start()
 
     def _start_healthcheck_server(self) -> None:
-        """Inicia listeners HTTP en los puertos comunes de Cloud (PORT, 8000, 10000)."""
+        """Inicia la API FastAPI embebida en el puerto principal (Render/Koyeb/Docker) y listeners de respaldo."""
         ports_to_try: list[int] = []
         env_port = os.getenv("PORT")
         if env_port and env_port.strip().isdigit():
@@ -226,7 +236,33 @@ class P2PBotEngine:
             if default_port not in ports_to_try:
                 ports_to_try.append(default_port)
 
+        primary_api_started = False
         for port in ports_to_try:
+            if not primary_api_started:
+                try:
+                    import uvicorn
+
+                    from src.api.main import create_app
+
+                    fastapi_app = create_app(skip_lifespan=True, settings=self.settings)
+                    uv_cfg = uvicorn.Config(
+                        app=fastapi_app,
+                        host="0.0.0.0",
+                        port=port,
+                        log_level="warning",
+                    )
+                    uv_server = uvicorn.Server(uv_cfg)
+                    threading.Thread(
+                        target=uv_server.run,
+                        daemon=True,
+                        name=f"fastapi_uvicorn_{port}",
+                    ).start()
+                    primary_api_started = True
+                    logger.info(f"P2P Merchant API + Healthcheck activa en http://0.0.0.0:{port}")
+                    continue
+                except (ImportError, OSError, RuntimeError, ValueError) as api_err:
+                    logger.warning(f"Fallback a HealthCheckHandler en puerto {port}: {api_err}")
+
             try:
                 httpd = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
                 self.httpd_servers.append(httpd)
@@ -271,6 +307,16 @@ class P2PBotEngine:
 
     def run_cycle(self):
         """Ejecuta una iteración de sincronización y monitoreo."""
+        db_state = SessionLocal()
+        try:
+            persisted_pause = get_bot_paused_state(db_state)
+        finally:
+            db_state.close()
+
+        if self.notifier.is_paused or persisted_pause:
+            logger.info("Ciclo omitido: El motor se encuentra en PAUSA operativa.")
+            return
+
         # 1. Sincronización de órdenes Binance
         if self.client:
             try:
