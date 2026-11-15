@@ -2,7 +2,15 @@
  * Cliente de API tipado para comunicarse con FastAPI.
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+function getApiBaseUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  if (typeof window !== "undefined" && window.location?.hostname) {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "http://127.0.0.1:8000";
+}
 
 export interface User {
   id: number;
@@ -11,6 +19,10 @@ export interface User {
   telegram_id?: string | null;
   google_sheet_id?: string | null;
   permission_source?: string;
+  telegram_linked?: boolean;
+  binance_api_configured?: boolean;
+  binance_key_type?: "HMAC" | "Ed25519" | string | null;
+  google_sheet_configured?: boolean;
   is_active: boolean;
   created_at: string;
 }
@@ -60,6 +72,45 @@ export interface ArbitrageMatrix {
   best_arbitrage?: BestArbitrage | null;
   bcv_official_usd: number;
   bcv_brecha_pct: number;
+  timestamp: string;
+}
+
+export interface OrderbookAd {
+  adv_no: string;
+  trade_type: "BUY" | "SELL" | string;
+  price: number;
+  surplus_usdt: number;
+  min_ves: number;
+  max_ves: number;
+  min_usdt: number;
+  max_usdt: number;
+  nick_name: string;
+  month_orders: number;
+  finish_rate_pct: number;
+  is_merchant: boolean;
+  banks: string[];
+}
+
+export interface FilteredOrderbook {
+  amount_usdt: number;
+  trans_amount_ves: number;
+  bank_filter: string;
+  pay_types: string[];
+  merchant_only: boolean;
+  best_buy_price: number;
+  best_sell_price: number;
+  price_spread_ves: number;
+  price_spread_pct: number;
+  taker_spread_ves: number;
+  taker_spread_pct: number;
+  maker_spread_ves: number;
+  maker_spread_pct: number;
+  recommended_mode: "MAKER" | "TAKER" | "NONE" | string;
+  net_profit_ves: number;
+  net_profit_usdt: number;
+  buy_ads: OrderbookAd[];
+  sell_ads: OrderbookAd[];
+  source: string;
   timestamp: string;
 }
 
@@ -122,16 +173,29 @@ export async function apiRequest<T>(
   if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
-  if (token && !headers.has("Authorization")) {
+  const isPublicEndpoint =
+    endpoint.startsWith("/api/spreads/") ||
+    endpoint.startsWith("/api/auth/login") ||
+    endpoint.startsWith("/api/auth/register");
+
+  if (token && !isPublicEndpoint && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+  const response = await fetch(`${getApiBaseUrl()}${endpoint}`, {
     ...options,
     headers,
   });
 
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      typeof window !== "undefined" &&
+      !endpoint.startsWith("/api/auth/")
+    ) {
+      localStorage.removeItem("p2p_token");
+      localStorage.removeItem("p2p_user");
+    }
     let errorDetail = "Error en la petición";
     try {
       const errJson = await response.json();
@@ -155,7 +219,7 @@ export async function downloadAuthenticatedFile(
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+  const response = await fetch(`${getApiBaseUrl()}${endpoint}`, {
     method: "GET",
     headers,
   });
@@ -230,8 +294,9 @@ export async function loginTelegramWebApp(initData: string): Promise<AuthRespons
 
 export function getCurrentUser(): User | null {
   if (typeof window === "undefined") return null;
+  const token = localStorage.getItem("p2p_token");
   const raw = localStorage.getItem("p2p_user");
-  if (!raw) return null;
+  if (!token || !raw) return null;
   try {
     return JSON.parse(raw);
   } catch {
@@ -247,13 +312,69 @@ export function logout(): void {
   }
 }
 
+// Caché en memoria y deduplicación de peticiones en vuelo para tasas BCV
+// (Evita consultas duplicadas entre AppShell y las páginas dado que el BCV cambia 1 vez por día hábil)
+let _bcvCacheData: BCVRates | null = null;
+let _bcvCacheTimestamp = 0;
+let _bcvInFlight: Promise<BCVRates> | null = null;
+const BCV_CLIENT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
 // Métodos de mercado y spreads
-export async function getBCVRates(): Promise<BCVRates> {
-  return apiRequest<BCVRates>("/api/spreads/bcv");
+export async function getBCVRates(forceRefresh = false): Promise<BCVRates> {
+  const now = Date.now();
+  if (!forceRefresh && _bcvCacheData && now - _bcvCacheTimestamp < BCV_CLIENT_CACHE_TTL_MS) {
+    return _bcvCacheData;
+  }
+  if (!forceRefresh && _bcvInFlight) {
+    return _bcvInFlight;
+  }
+  _bcvInFlight = apiRequest<BCVRates>("/api/spreads/bcv")
+    .then((data) => {
+      _bcvCacheData = data;
+      _bcvCacheTimestamp = Date.now();
+      return data;
+    })
+    .finally(() => {
+      _bcvInFlight = null;
+    });
+  return _bcvInFlight;
 }
 
-export async function getArbitrageMatrix(amountUsdt = 100): Promise<ArbitrageMatrix> {
-  return apiRequest<ArbitrageMatrix>(`/api/spreads/matrix?amount_usdt=${amountUsdt}`);
+export async function getArbitrageMatrix(
+  amountUsdt = 100,
+  merchantOnly = false
+): Promise<ArbitrageMatrix> {
+  const query = new URLSearchParams({
+    amount_usdt: String(amountUsdt),
+    merchant_only: String(merchantOnly),
+  });
+  return apiRequest<ArbitrageMatrix>(`/api/spreads/matrix?${query.toString()}`);
+}
+
+export async function getFilteredOrderbook(params: {
+  amount_usdt?: number;
+  amount_ves?: number | null;
+  bank?: string;
+  merchant_only?: boolean;
+  rows?: number;
+}): Promise<FilteredOrderbook> {
+  const query = new URLSearchParams();
+  if (params.amount_usdt !== undefined) {
+    query.set("amount_usdt", String(params.amount_usdt));
+  }
+  if (params.amount_ves !== undefined && params.amount_ves !== null && params.amount_ves > 0) {
+    query.set("amount_ves", String(params.amount_ves));
+  }
+  if (params.bank) {
+    query.set("bank", params.bank);
+  }
+  if (params.merchant_only !== undefined) {
+    query.set("merchant_only", String(params.merchant_only));
+  }
+  if (params.rows !== undefined) {
+    query.set("rows", String(params.rows));
+  }
+  return apiRequest<FilteredOrderbook>(`/api/spreads/orderbook?${query.toString()}`);
 }
 
 // Métodos de órdenes
@@ -285,7 +406,7 @@ export async function uploadOrdersFile(file: File): Promise<any> {
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE_URL}/api/orders/upload`, {
+  const res = await fetch(`${getApiBaseUrl()}/api/orders/upload`, {
     method: "POST",
     headers,
     body: formData,
@@ -693,6 +814,27 @@ export async function reconcileOrphanVouchers(toleranceHours: number = 48): Prom
   });
 }
 
+export interface ManualVoucherPayload {
+  bank_name: string;
+  reference_number: string;
+  amount_ves: number;
+  movement_type: "DEBIT" | "CREDIT";
+  payment_method: "PAGO_MOVIL" | "TRANSFER" | "INTERBANK";
+  sender_name?: string;
+  sender_id?: string;
+  bank_fee_ves?: number;
+  order_number?: string;
+}
+
+export async function createManualVoucher(
+  data: ManualVoucherPayload
+): Promise<UploadVoucherResponse> {
+  return apiRequest<UploadVoucherResponse>("/api/accounting/vouchers/manual", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
 export async function uploadVoucherFile(file: File): Promise<UploadVoucherResponse> {
 
   const formData = new FormData();
@@ -701,7 +843,7 @@ export async function uploadVoucherFile(file: File): Promise<UploadVoucherRespon
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE_URL}/api/accounting/vouchers/upload`, {
+  const res = await fetch(`${getApiBaseUrl()}/api/accounting/vouchers/upload`, {
     method: "POST",
     headers,
     body: formData,

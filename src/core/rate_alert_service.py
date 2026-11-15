@@ -66,6 +66,8 @@ class RateAlertService:
         self.last_arbitrage_buy_rate: float | None = None
         self.last_arbitrage_sell_rate: float | None = None
         self.last_arbitrage_spread_pct: float | None = None
+        self.last_negative_spread_alert_time: float = 0.0
+        self.last_negative_spread_banks: set[str] = set()
         self._recent_bcv_alerts: list[tuple[float, float]] = []  # (timestamp, rate)
         self.monitor = SpreadMonitor()
         self.bcv_service = BCVService()
@@ -214,14 +216,120 @@ class RateAlertService:
 
         return None
 
+    def check_negative_spread_risk(
+        self,
+        quotes: list[BankRateQuote],
+        bcv_rate: float = 0.0,
+    ) -> str | None:
+        """Detecta y alerta cuando el Spread Intrabanco se vuelve negativo (sell_rate < buy_rate)
+        o se invierte peligrosamente durante un ciclo abierto por volatilidad del Bolívar.
+        """
+        if not quotes:
+            return None
+        if any(getattr(q, "source", "") in ("calibrated", "mock", "fallback") for q in quotes):
+            return None
+
+        inverted: list[BankRateQuote] = [
+            q for q in quotes if q.buy_rate > 0 and q.sell_rate > 0 and q.sell_rate < q.buy_rate
+        ]
+        if not inverted:
+            self.last_negative_spread_banks.clear()
+            return None
+
+        current_banks = {q.bank_name for q in inverted}
+        now = time.time()
+        is_new_inversion = bool(current_banks - self.last_negative_spread_banks)
+        if not is_new_inversion and self.cooldown_seconds > 0 and (now - self.last_negative_spread_alert_time) < self.cooldown_seconds:
+            return None
+
+        self.last_negative_spread_banks = current_banks
+        self.last_negative_spread_alert_time = now
+
+        lines = [
+            "⚠️ *¡ALERTA DE RIESGO CAMBIARIO: SPREAD INTRABANCO NEGATIVO!*\n",
+            "Se detectó inversión de precios (Costo de Compra > Precio de Venta) en:",
+        ]
+        for q in inverted:
+            spread_ves = q.sell_rate - q.buy_rate
+            spread_pct = (spread_ves / q.buy_rate) * 100.0 if q.buy_rate > 0 else 0.0
+            lines.append(
+                f"• *{q.bank_name}*: Compra `{q.buy_rate:,.2f} Bs` vs Venta `{q.sell_rate:,.2f} Bs` "
+                f"(Spread: `{spread_pct:+.2f}%` / `{spread_ves:+.2f} Bs`)"
+            )
+        if bcv_rate > 0:
+            lines.append(f"\n• Referencia BCV Oficial: `{bcv_rate:,.2f} VES/USD`")
+        lines.append(
+            "\n🛡️ *Acción de Cobertura*: Pausa tus anuncios en los bancos afectados o rota hacia ruta interbancaria positiva."
+        )
+        return "\n".join(lines)
+
+    def _persist_bcv_to_history_db(
+        self,
+        usd_rate: float,
+        eur_rate: float | None = None,
+        fecha_valor_str: str = "",
+    ) -> None:
+        """Persiste la tasa oficial detectada en la tabla `bcv_rate_history` (SQLite o PostgreSQL/Neon)."""
+        if usd_rate <= 0:
+            return
+        try:
+            from datetime import datetime
+
+            from sqlalchemy.exc import SQLAlchemyError
+
+            from src.data.database import SessionLocal
+            from src.data.models import BCVRateHistory
+            from src.data.repositories import BCVHistoryRepository
+            from src.reporting.bcv_history_service import VET_TIMEZONE, BCVHistoryService
+
+            today_ve = datetime.now(VET_TIMEZONE).date()
+            effective_today = BCVHistoryService.effective_business_date(today_ve)
+            parsed_date = parse_fecha_valor(fecha_valor_str)
+
+            db = SessionLocal()
+            try:
+                repo = BCVHistoryRepository(db)
+                # 1. Guardar para la Fecha Valor publicada por el BCV (si se pudo parsear del HTML)
+                if parsed_date:
+                    repo.upsert_rate(
+                        BCVRateHistory(
+                            fecha_valor=parsed_date,
+                            usd_rate=usd_rate,
+                            eur_rate=eur_rate,
+                            source="bcv_official",
+                        )
+                    )
+                # 2. Garantizar que el día hábil vigente en curso también tenga su registro en BD
+                existing_today = repo.get_rate_by_date(effective_today)
+                if existing_today is None:
+                    repo.upsert_rate(
+                        BCVRateHistory(
+                            fecha_valor=effective_today,
+                            usd_rate=usd_rate,
+                            eur_rate=eur_rate,
+                            source="bcv_official",
+                        )
+                    )
+            finally:
+                db.close()
+        except (SQLAlchemyError, ValueError, KeyError, OSError, RuntimeError, ImportError) as e:
+            logger.debug(f"No se pudo sincronizar tasa BCV en bcv_rate_history: {e}")
+
     def poll_and_check(self) -> list[str]:
-        """Consulta en vivo el BCV y cotizaciones P2P y retorna alertas disparadas."""
+        """Consulta en vivo el BCV y cotizaciones P2P, persiste en `bcv_rate_history` y retorna alertas."""
         alerts: list[str] = []
         try:
             full_bcv = self.bcv_service.fetch_full_rates()
             usd_rate = float(full_bcv.get("usd", 0.0))
+            eur_raw = full_bcv.get("eur")
+            eur_rate = float(eur_raw) if eur_raw is not None and float(eur_raw) > 0 else None
             fecha = str(full_bcv.get("fecha_valor", ""))
             if usd_rate > 0:
+                self._persist_bcv_to_history_db(
+                    usd_rate=usd_rate,
+                    eur_rate=eur_rate,
+                    fecha_valor_str=fecha,
+                )
                 bcv_alert = self.check_bcv_rate_change(current_rate=usd_rate, fecha_valor=fecha)
                 if bcv_alert:
                     alerts.append(bcv_alert)
@@ -231,6 +339,9 @@ class RateAlertService:
             spread_alert = self.check_spread_opportunities(quotes)
             if spread_alert:
                 alerts.append(spread_alert)
+            risk_alert = self.check_negative_spread_risk(quotes, bcv_rate=usd_rate)
+            if risk_alert:
+                alerts.append(risk_alert)
         except (ValueError, TypeError, OSError) as e:
             logger.debug(f"Error evaluando alertas de mercado: {e}")
 

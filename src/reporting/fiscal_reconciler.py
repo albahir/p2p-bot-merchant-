@@ -18,6 +18,7 @@ from src.data.repositories import (
     FiscalSnapshotRepository,
     OrderRepository,
     WalletMovementRepository,
+    _apply_user_scope,
 )
 from src.reporting.bcv_service import BCVService
 from src.reporting.tax_engine import FIFOCostMethod, TaxLot, WeightedAverageCostMethod
@@ -58,13 +59,19 @@ class FiscalReconciliationResult:
 class FiscalReconciler:
     """Motor de cálculo y auditoría de consistencia de 6 piezas para comerciantes P2P."""
 
-    def __init__(self, db_session: Session, bcv_service: BCVService | None = None):
+    def __init__(
+        self,
+        db_session: Session,
+        bcv_service: BCVService | None = None,
+        user_id: int | None = None,
+    ):
         self.db = db_session
+        self.user_id = user_id
         self.bcv_service = bcv_service or BCVService()
-        self.order_repo = OrderRepository(self.db)
-        self.wallet_repo = WalletMovementRepository(self.db)
-        self.snapshot_repo = FiscalSnapshotRepository(self.db)
-        self.voucher_repo = BankVoucherRepository(self.db)
+        self.order_repo = OrderRepository(self.db, user_id=user_id)
+        self.wallet_repo = WalletMovementRepository(self.db, user_id=user_id)
+        self.snapshot_repo = FiscalSnapshotRepository(self.db, user_id=user_id)
+        self.voucher_repo = BankVoucherRepository(self.db, user_id=user_id)
 
     @staticmethod
     def _parse_period_dates(period: str) -> tuple[datetime, datetime]:
@@ -180,12 +187,12 @@ class FiscalReconciler:
         net_profit_ves = sum(r.net_profit_fiat for r in trade_results)
         net_profit_usd = sum(r.net_profit_usd for r in trade_results)
 
-        # Comprobantes bancarios (estadísticas de conciliación)
-        vouchers = (
-            self.db.query(BankVoucher)
-            .filter(cast(Any, BankVoucher.created_at >= start_dt), cast(Any, BankVoucher.created_at <= end_dt))
-            .all()
+        # Comprobantes bancarios (estadísticas de conciliación aisladas por usuario)
+        vouchers_q = self.db.query(BankVoucher).filter(
+            cast(Any, BankVoucher.created_at >= start_dt),
+            cast(Any, BankVoucher.created_at <= end_dt),
         )
+        vouchers = _apply_user_scope(self.db, vouchers_q, BankVoucher, self.user_id).all()
         vouchers_count = len(vouchers)
         matched_vouchers_count = sum(1 for v in vouchers if v.verification_status == "MATCHED")
 
@@ -221,6 +228,7 @@ class FiscalReconciler:
     def save_snapshot(self, result: FiscalReconciliationResult) -> FiscalPeriodSnapshot:
         """Persiste o actualiza el snapshot mensual de reconciliación en la base de datos."""
         snapshot = FiscalPeriodSnapshot(
+            user_id=self.user_id,
             period=result.period,
             initial_balance=result.initial_balance,
             inflows_deposits=result.inflows_deposits,

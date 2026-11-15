@@ -58,9 +58,13 @@ def init_db() -> None:
 
     migrations: dict[str, list[tuple[str, str]]] = {
         "orders": [
+            ("user_id", "INTEGER"),
             ("counterparty_name", "VARCHAR(100)"),
             ("completed_at", "TIMESTAMP"),
             ("payment_method", "VARCHAR(50)"),
+        ],
+        "wallet_movements": [
+            ("user_id", "INTEGER"),
         ],
         "app_users": [
             ("google_sheet_id", "VARCHAR(100)"),
@@ -68,6 +72,7 @@ def init_db() -> None:
             ("google_auth_type", "VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'"),
         ],
         "bank_vouchers": [
+            ("user_id", "INTEGER"),
             ("destination_bank", "VARCHAR(100)"),
             ("bank_fee_ves", "FLOAT DEFAULT 0.0"),
             ("total_debited_ves", "FLOAT DEFAULT 0.0"),
@@ -75,6 +80,12 @@ def init_db() -> None:
             ("concept", "VARCHAR(255)"),
             ("movement_type", "VARCHAR(20) DEFAULT 'DEBIT'"),
             ("reconciliation_score", "FLOAT DEFAULT 0.0"),
+        ],
+        "journal_entries": [
+            ("user_id", "INTEGER"),
+        ],
+        "fiscal_period_snapshots": [
+            ("user_id", "INTEGER"),
         ],
     }
 

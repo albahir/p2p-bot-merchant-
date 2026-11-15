@@ -599,7 +599,7 @@ class TelegramNotifier:
         elif cmd in ("/guardar_cedula", "/registrar_cedula", "/agregar_cedula"):
             return self._handle_save_cedula(clean_cmd_str)
         elif cmd in ("/conciliacion", "/reconciliacion", "/reconstruccion"):
-            return self._handle_fiscal_reconciliation(clean_cmd_str)
+            return self._handle_fiscal_reconciliation(clean_cmd_str, user_id=user_id)
         elif cmd in ("/spread", "/arbitraje", "/margen", "/matriz", "/matriz_spreads"):
             return self._handle_spread_monitor(clean_cmd_str)
         elif cmd in ("/help", "/ayuda", "/start", "/menu"):
@@ -709,7 +709,10 @@ class TelegramNotifier:
             if not users:
                 return "👥 No hay usuarios registrados en la base de datos ni en variables de entorno."
 
-            lines = ["👥 *Usuarios Registrados en el Sistema*:\n"]
+            from src.data.repositories import SecurityRepository
+
+            sec_repo = SecurityRepository(db)
+            lines = ["👥 *Usuarios Registrados en el Sistema (Estatus Operativo)*:\n"]
             for u in users:
                 status = "🟢 Activo" if u.is_active else "🔴 Inactivo"
                 tg_raw = str(u.telegram_id).strip() if u.telegram_id else ""
@@ -724,7 +727,14 @@ class TelegramNotifier:
                     if tg_raw in static_admins
                     else ("TRADER" if tg_raw in static_traders and str(u.role) == "INVITADO" else str(u.role))
                 )
-                lines.append(f"• *{u.username}* (ID: {tg}) | Rol: `{effective_role}` | {status} | {origin}")
+                has_api = sec_repo.get_secret(f"user_{u.id}:binance_api_key") is not None
+                has_sheet = bool(u.google_sheet_id and str(u.google_sheet_id).strip())
+                api_badge = "🟢 API Conectada" if has_api else "⚪ Sin API"
+                sheet_badge = "🟢 Sheets OK" if has_sheet else "⚪ Sin Sheets"
+                lines.append(
+                    f"• *{u.username}* (ID: {tg}) | Rol: `{effective_role}` | {status} | {api_badge} | {sheet_badge} | {origin}"
+                )
+            lines.append("\n🔒 _Los saldos y órdenes de cada operador son confidenciales y están aislados._")
             return "\n".join(lines)
         except (SQLAlchemyError, RuntimeError, OSError, KeyError, ValueError) as e:
             logger.error(f"Error listando usuarios: {e}")
@@ -1055,15 +1065,19 @@ class TelegramNotifier:
             creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
             creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "config/google_credentials.json")
 
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
+            db_user_id: int | None = None
             # Si el usuario tiene una hoja personal configurada en su perfil, priorizarla
             if user_id:
                 try:
                     u_repo = UserRepository(db)
                     u = u_repo.get_by_telegram_id(str(user_id))
-                    if u and u.google_sheet_id:
-                        sheet_id = str(u.google_sheet_id)
+                    if u:
+                        db_user_id = int(cast(int, u.id))
+                        if u.google_sheet_id:
+                            sheet_id = str(u.google_sheet_id)
                 except (SQLAlchemyError, RuntimeError, OSError):
                     pass
 
@@ -1081,7 +1095,7 @@ class TelegramNotifier:
 
 
             repo = OrderRepository(db)
-            completed_orders = repo.list_completed()
+            completed_orders = repo.list_completed(user_id=db_user_id)
             if not completed_orders:
                 return "ℹ️ No hay órdenes completadas para sincronizar en Google Sheets."
 
@@ -1469,9 +1483,22 @@ class TelegramNotifier:
         sf = self.session_factory or SessionLocal
         db = sf()
         try:
+            db_user_id: int | None = None
+            u = None
+            if user_id:
+                u_repo = UserRepository(db)
+                u = u_repo.get_by_telegram_id(str(user_id))
+                if u and u.id is not None:
+                    db_user_id = int(cast(int, u.id))
+
             ocr = BankReceiptOCR()
             try:
-                voucher, matched_order = process_and_save_voucher(image_bytes, db, ocr_service=ocr)
+                voucher, matched_order = process_and_save_voucher(
+                    image_bytes,
+                    db,
+                    ocr_service=ocr,
+                    user_id=db_user_id,
+                )
             except ValueError as val_err:
                 return f"⚠️ *No se pudo procesar el comprobante*: {val_err}", None
 
@@ -1480,16 +1507,17 @@ class TelegramNotifier:
                     try:
                         from src.reporting.accounting_engine import AccountingEngine
 
-                        AccountingEngine(db=db).record_p2p_trade(order=matched_order, voucher=voucher)
+                        AccountingEngine(db=db).record_p2p_trade(
+                            order=matched_order,
+                            voucher=voucher,
+                            user_id=db_user_id,
+                        )
                     except (SQLAlchemyError, ValueError, TypeError, KeyError) as acct_err:
                         logger.warning(f"Error asentando partida doble desde Telegram OCR: {acct_err}")
 
                 # Si el usuario tiene una hoja vinculada, asentar el comprobante en vivo
                 sheet_notice = ""
-                if user_id:
-                    u_repo = UserRepository(db)
-                    u = u_repo.get_by_telegram_id(str(user_id))
-                    if u and u.google_sheet_id:
+                if u and u.google_sheet_id:
                         try:
                             from config.settings import Settings
                             from src.reporting.sheets_exporter import SheetsExporter
@@ -1544,9 +1572,10 @@ class TelegramNotifier:
 
 
 
-    def _handle_fiscal_reconciliation(self, command: str) -> str:
+    def _handle_fiscal_reconciliation(self, command: str, user_id: int | str | None = None) -> str:
         """Procesa /conciliacion [YYYY-MM] y devuelve las 6 piezas contables."""
         from src.data.database import SessionLocal
+        from src.data.repositories import UserRepository
         from src.reporting.fiscal_reconciler import FiscalReconciler
 
         parts = command.strip().split()
@@ -1557,9 +1586,15 @@ class TelegramNotifier:
             if len(arg) == 7 and "-" in arg:
                 period = arg
 
-        db = SessionLocal()
+        sf = self.session_factory or SessionLocal
+        db = sf()
         try:
-            reconciler = FiscalReconciler(db_session=db)
+            db_user_id: int | None = None
+            if user_id:
+                u = UserRepository(db).get_by_telegram_id(str(user_id))
+                if u and u.id is not None:
+                    db_user_id = int(cast(int, u.id))
+            reconciler = FiscalReconciler(db_session=db, user_id=db_user_id)
             res = reconciler.reconcile_period(period=period)
 
             status_icon = "🟢" if res.status == "BALANCED" else "🔴"

@@ -3,7 +3,7 @@
 import calendar
 import os
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_db, require_trader
-from src.data.models import User
+from src.data.models import BankVoucher, User
 from src.data.repositories import (
     BankVoucherRepository,
     JournalEntryRepository,
@@ -57,6 +57,20 @@ class MatchVoucherRequest(BaseModel):
     order_number: str = Field(..., description="Número de orden P2P a vincular con el comprobante")
 
 
+class ManualVoucherRequest(BaseModel):
+    bank_name: str = Field(..., min_length=2, max_length=100, description="Banco origen o receptor")
+    destination_bank: str | None = Field(default=None, max_length=100)
+    reference_number: str = Field(..., min_length=3, max_length=50, description="Referencia bancaria")
+    amount_ves: float = Field(..., gt=0.0, description="Monto en bolívares")
+    bank_fee_ves: float | None = Field(default=None, ge=0.0, description="Comisión bancaria opcional")
+    movement_type: str = Field(default="DEBIT", pattern="^(DEBIT|CREDIT)$")
+    payment_method: str = Field(default="PAGO_MOVIL")
+    sender_name: str | None = Field(default=None, max_length=255)
+    sender_cedula: str | None = Field(default=None, max_length=20)
+    concept: str | None = Field(default=None, max_length=255)
+    order_number: str | None = Field(default=None, max_length=50, description="Orden P2P opcional a vincular")
+
+
 class BankBalanceItemResponse(BaseModel):
     bank_name: str
     initial_ves: float
@@ -89,8 +103,9 @@ def get_live_balance(
     initial_usdt: Annotated[float, Query()] = 0.0,
     initial_ves: Annotated[float, Query()] = 0.0,
 ) -> LiveBalanceResponse:
-    """Calcula el saldo teórico en tiempo real (Inflow - Outflow) sin forzar un saldo final manual."""
-    engine = AccountingEngine(db=db)
+    """Calcula el saldo teórico en tiempo real (Inflow - Outflow) aislado por usuario."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    engine = AccountingEngine(db=db, user_id=uid)
     summary = engine.get_live_theoretical_balance(
         year=year,
         month=month,
@@ -133,8 +148,9 @@ def get_journal_entries(
     end_date: Annotated[str | None, Query()] = None,
     account_code: Annotated[str | None, Query()] = None,
 ) -> list[JournalEntryResponse]:
-    """Consulta cronológica de asientos del Libro Diario con partida doble inmutable."""
-    repo = JournalEntryRepository(db)
+    """Consulta cronológica de asientos del Libro Diario del operador con partida doble inmutable."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    repo = JournalEntryRepository(db, user_id=uid)
     dt_start = None
     dt_end = None
     if start_date and isinstance(start_date, str):
@@ -149,7 +165,7 @@ def get_journal_entries(
             pass
 
     clean_code = account_code if isinstance(account_code, str) else None
-    entries = repo.list_entries(start_date=dt_start, end_date=dt_end, account_code=clean_code)
+    entries = repo.list_entries(start_date=dt_start, end_date=dt_end, account_code=clean_code, user_id=uid)
 
     return [
         JournalEntryResponse(
@@ -179,8 +195,9 @@ def get_ledger_summaries(
     account_code: Annotated[str | None, Query()] = None,
     initial_balance: Annotated[float, Query()] = 0.0,
 ) -> list[LedgerSummaryResponse]:
-    """Consolida el Libro Mayor mensual por cuenta contable."""
-    engine = AccountingEngine(db=db)
+    """Consolida el Libro Mayor mensual por cuenta contable del operador."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    engine = AccountingEngine(db=db, user_id=uid)
     clean_code = account_code if isinstance(account_code, str) else None
     y = int(year) if isinstance(year, int) else 2026
     m = int(month) if isinstance(month, int) else 11
@@ -230,20 +247,21 @@ def export_accounting_excel(
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
 ) -> FileResponse:
-    """Exporta el reporte contable integral en 4 pestañas (.xlsx)."""
-    journal_repo = JournalEntryRepository(db)
-    voucher_repo = BankVoucherRepository(db)
-    engine = AccountingEngine(db=db)
+    """Exporta el reporte contable integral del operador en 4 pestañas (.xlsx)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    journal_repo = JournalEntryRepository(db, user_id=uid)
+    voucher_repo = BankVoucherRepository(db, user_id=uid)
+    engine = AccountingEngine(db=db, user_id=uid)
 
     _, last_day = calendar.monthrange(year, month)
     start_dt = datetime(year, month, 1, 0, 0, 0)
     end_dt = datetime(year, month, last_day, 23, 59, 59, 999999)
 
-    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt)
+    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
     ledgers = engine.get_monthly_ledger_report(year=year, month=month)
     vouchers = [
         v
-        for v in voucher_repo.list_all()
+        for v in voucher_repo.list_all(user_id=uid)
         if v.voucher_date is None
         or (v.voucher_date.year == year and v.voucher_date.month == month)
     ]
@@ -272,20 +290,21 @@ def export_accounting_pdf(
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
 ) -> FileResponse:
-    """Exporta el informe contable legal listo para impresión fiscal SENIAT (.pdf)."""
-    journal_repo = JournalEntryRepository(db)
-    voucher_repo = BankVoucherRepository(db)
-    engine = AccountingEngine(db=db)
+    """Exporta el informe contable legal del operador listo para impresión fiscal SENIAT (.pdf)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    journal_repo = JournalEntryRepository(db, user_id=uid)
+    voucher_repo = BankVoucherRepository(db, user_id=uid)
+    engine = AccountingEngine(db=db, user_id=uid)
 
     _, last_day = calendar.monthrange(year, month)
     start_dt = datetime(year, month, 1, 0, 0, 0)
     end_dt = datetime(year, month, last_day, 23, 59, 59, 999999)
 
-    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt)
+    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
     ledgers = engine.get_monthly_ledger_report(year=year, month=month)
     vouchers = [
         v
-        for v in voucher_repo.list_all()
+        for v in voucher_repo.list_all(user_id=uid)
         if v.voucher_date is None
         or (v.voucher_date.year == year and v.voucher_date.month == month)
     ]
@@ -316,18 +335,19 @@ def match_voucher_with_order(
     current_user: Annotated[User, Depends(require_trader)],
 ) -> dict[str, Any]:
     """Vincula manualmente un comprobante con una orden y genera los asientos de partida doble."""
-    voucher_repo = BankVoucherRepository(db)
-    order_repo = OrderRepository(db)
-    acct_engine = AccountingEngine(db=db)
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    voucher_repo = BankVoucherRepository(db, user_id=uid)
+    order_repo = OrderRepository(db, user_id=uid)
+    acct_engine = AccountingEngine(db=db, user_id=uid)
 
-    voucher = voucher_repo.get_by_id(voucher_id)
+    voucher = voucher_repo.get_by_id(voucher_id, user_id=uid)
     if not voucher:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Comprobante con ID {voucher_id} no encontrado.",
         )
 
-    order = order_repo.get_by_order_number(payload.order_number)
+    order = order_repo.get_by_order_number(payload.order_number, user_id=uid)
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -357,13 +377,94 @@ def reconcile_orphan_vouchers_endpoint(
     current_user: Annotated[User, Depends(require_trader)],
     tolerance_hours: Annotated[int, Query()] = 48,
 ) -> dict[str, Any]:
-    """Auto-concilia en lote comprobantes rezagados o huérfanos con órdenes de Binance."""
+    """Auto-concilia en lote comprobantes rezagados o huérfanos con órdenes de Binance del operador."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
     ocr = BankReceiptOCR()
-    count = ocr.reconcile_orphan_vouchers(db=db, tolerance_hours=tolerance_hours)
+    count = ocr.reconcile_orphan_vouchers(db=db, tolerance_hours=tolerance_hours, user_id=uid)
     return {
         "status": "SUCCESS",
         "reconciled_count": count,
         "message": f"Se auto-conciliaron {count} comprobantes huérfanos exitosamente.",
+    }
+
+
+@router.post("/vouchers/manual")
+def create_manual_voucher(
+    payload: ManualVoucherRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+) -> dict[str, Any]:
+    """Registra y concilia de forma manual ultrarrápida (<5s sin OCR) un comprobante bancario."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    voucher_repo = BankVoucherRepository(db, user_id=uid)
+    order_repo = OrderRepository(db, user_id=uid)
+    acct_engine = AccountingEngine(db=db, user_id=uid)
+
+    mov_type = payload.movement_type.strip().upper()
+    pay_method = payload.payment_method.strip().upper() or "PAGO_MOVIL"
+    amount = round(float(payload.amount_ves), 2)
+
+    if payload.bank_fee_ves is not None:
+        fee_ves = round(float(payload.bank_fee_ves), 2)
+    elif mov_type == "DEBIT" and (
+        pay_method == "PAGO_MOVIL"
+        or (payload.destination_bank and payload.destination_bank.strip().lower() != payload.bank_name.strip().lower())
+    ):
+        fee_ves = round(amount * 0.003, 2)
+    else:
+        fee_ves = 0.0
+
+    total_debited = round(amount + fee_ves, 2) if mov_type == "DEBIT" else amount
+
+    matched_order = None
+    if payload.order_number and payload.order_number.strip():
+        matched_order = order_repo.get_by_order_number(payload.order_number.strip(), user_id=uid)
+    else:
+        already_matched: set[str] = {
+            str(v.associated_order_number)
+            for v in voucher_repo.list_all(user_id=uid)
+            if v.associated_order_number
+        }
+        for cand in order_repo.list_completed(user_id=uid):
+            if str(cand.order_number) not in already_matched and abs(float(cand.fiat_amount) - amount) <= 0.05:
+                matched_order = cand
+                break
+
+    voucher = BankVoucher(
+        user_id=uid,
+        bank_name=payload.bank_name.strip()[:100],
+        destination_bank=payload.destination_bank.strip()[:100] if payload.destination_bank else None,
+        reference_number=payload.reference_number.strip()[:50],
+        amount_ves=amount,
+        bank_fee_ves=fee_ves,
+        total_debited_ves=total_debited,
+        sender_id=payload.sender_cedula.strip()[:20] if payload.sender_cedula else None,
+        sender_name=payload.sender_name.strip()[:255] if payload.sender_name else None,
+        concept=payload.concept.strip()[:255] if payload.concept else "Registro manual rápido",
+        payment_method=pay_method[:30],
+        movement_type=mov_type[:20],
+        associated_order_number=matched_order.order_number if matched_order else None,
+        verification_status="MATCHED" if matched_order else "UNMATCHED",
+        reconciliation_score=100.0 if matched_order else 0.0,
+        voucher_date=datetime.now(UTC),
+    )
+    saved_voucher = voucher_repo.create(voucher)
+
+    if matched_order:
+        entries = acct_engine.record_p2p_trade(order=matched_order, voucher=saved_voucher)
+    else:
+        entries = acct_engine.record_unmatched_voucher(voucher=saved_voucher)
+
+    return {
+        "voucher_id": saved_voucher.id,
+        "bank_name": saved_voucher.bank_name,
+        "reference_number": saved_voucher.reference_number,
+        "amount_ves": saved_voucher.amount_ves,
+        "bank_fee_ves": saved_voucher.bank_fee_ves,
+        "payment_method": saved_voucher.payment_method,
+        "verification_status": saved_voucher.verification_status,
+        "matched_order_number": matched_order.order_number if matched_order else None,
+        "journal_entries_created": len(entries),
     }
 
 
@@ -382,12 +483,14 @@ async def upload_voucher(
             detail="Archivo de comprobante vacío.",
         )
 
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
     ocr = BankReceiptOCR()
     try:
         voucher, matched_order = ocr.process_and_save_voucher(
             image_bytes=content,
             db=db,
             mime_type=file.content_type or "image/jpeg",
+            user_id=uid,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -397,7 +500,7 @@ async def upload_voucher(
 
     # Si se auto-concilió al 100%, asentar en el Libro Diario
     if matched_order and voucher.verification_status == "MATCHED":
-        engine = AccountingEngine(db=db)
+        engine = AccountingEngine(db=db, user_id=uid)
         engine.record_p2p_trade(order=matched_order, voucher=voucher)
 
 

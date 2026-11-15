@@ -304,19 +304,19 @@ export default function SettingsSecurityPage() {
   if (!currentUser || currentUser.role === "INVITADO") {
     return (
       <AppShell
-        title="Configuración API, Seguridad & Operadores"
+        title="Configuración API, Seguridad y Operadores"
         badge="ACCESO RESTRINGIDO"
-        subtitle="Bóveda criptográfica AES-256-GCM y gobierno RBAC para operadores autorizados."
+        subtitle="Bóveda criptográfica AES-256-GCM y gobierno de roles para operadores autorizados."
       >
         <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
           <span className="material-symbols-outlined text-[36px] text-primary">
             shield_lock
           </span>
           <h2 className="text-base font-bold text-white">
-            Se requiere sesión activa con rol TRADER o ADMIN
+            Se requiere sesión activa con rol Comerciante o Administrador
           </h2>
           <p className="text-xs text-slate-400">
-            Inicia sesión para gestionar llaves cifradas de Binance P2P, alertas sanitizadas de Telegram y operadores RBAC.
+            Inicia sesión para gestionar llaves cifradas de Binance P2P, alertas sanitizadas de Telegram y operadores.
           </p>
           <Link
             href="/login"
@@ -335,9 +335,9 @@ export default function SettingsSecurityPage() {
 
   return (
     <AppShell
-      title="Configuración API, Seguridad & Operadores"
-      badge="ZERO-SECRETS • AES-256-GCM"
-      subtitle="Gestión criptográfica de credenciales Binance C2C, políticas Fail-Closed, sanitización Telegram y control de acceso RBAC."
+      title="Configuración API, Seguridad y Operadores"
+      badge="CERO SECRETOS • AES-256-GCM"
+      subtitle="Gestión criptográfica de credenciales Binance P2P, políticas de parada segura, sanitización Telegram y control de acceso."
       actions={
         <button
           type="button"
@@ -402,7 +402,7 @@ export default function SettingsSecurityPage() {
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Monitor x-mbx-used-weight</span>
+              <span>Monitor de Cuota API (Peso)</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 speed
               </span>
@@ -415,13 +415,13 @@ export default function SettingsSecurityPage() {
               {usedWeight} / {maxWeight}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Pausa automática &gt; 5,000 (60s)
+              Pausa automática &gt; 5.000 (60s)
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Deriva de Reloj & Latencia</span>
+              <span>Deriva de Reloj y Latencia</span>
               <span className="material-symbols-outlined text-[16px] text-secondary">
                 schedule
               </span>
@@ -430,13 +430,13 @@ export default function SettingsSecurityPage() {
               {binanceStatus ? `${binanceStatus.clock_drift_ms} ms` : "-- ms"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              Latencia REST: {binanceStatus ? `${binanceStatus.latency_ms} ms` : "--"}
+              Latencia API: {binanceStatus ? `${binanceStatus.latency_ms} ms` : "--"}
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Arquitectura Fail-Closed</span>
+              <span>Arquitectura de Parada Segura</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 security
               </span>
@@ -449,14 +449,14 @@ export default function SettingsSecurityPage() {
               {isPaused ? "DETENIDO (PAUSA)" : "PROTECCIÓN ACTIVA"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Cero RPA • Solo API Oficial Binance
+              Cero Bots No Oficiales • Solo API Oficial Binance
             </div>
           </div>
         </section>
 
-        {/* Fila Central: Bóveda Binance (Izquierda) + Telegram & Fail-Closed (Derecha) */}
+        {/* Fila Central: Bóveda Binance (Izquierda) + Telegram y Parada Segura (Derecha) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* Tarjeta 1: Credenciales Binance C2C (Sanitizadas — Cero Secretos en DOM) */}
+          {/* Tarjeta 1: Credenciales Binance P2P (Sanitizadas — Cero Secretos en DOM) */}
           <section className="lg:col-span-7 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
             <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
@@ -464,7 +464,7 @@ export default function SettingsSecurityPage() {
                   vpn_key
                 </span>
                 <h2 className="text-sm font-bold text-white">
-                  Credenciales Oficiales Binance P2P (Write-Only Vault)
+                  Credenciales Oficiales Binance P2P (Bóveda de Solo Escritura)
                 </h2>
               </div>
               <span
@@ -482,7 +482,7 @@ export default function SettingsSecurityPage() {
             <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="text-[10px] font-mono uppercase text-slate-400">
-                  API Key Activa (Enmascarada por Regla Constitucional #5)
+                  Llave API Activa (Enmascarada por Regla Constitucional #5)
                 </div>
                 <div className="mt-1 text-sm font-mono font-bold text-white tracking-wider">
                   {binanceStatus?.api_key_masked || "Sin llave registrada"}
@@ -497,7 +497,11 @@ export default function SettingsSecurityPage() {
                     key={perm}
                     className="px-2 py-0.5 rounded bg-surface-container-high border border-[#1e2430] text-[10px] font-mono text-slate-300"
                   >
-                    {perm}
+                    {perm === "READING"
+                      ? "LECTURA"
+                      : perm === "P2P_TRADING"
+                      ? "COMERCIO_P2P"
+                      : perm}
                   </span>
                 ))}
               </div>
@@ -535,55 +539,51 @@ export default function SettingsSecurityPage() {
               </div>
 
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1">
-                  Nueva API Key de Binance (Solo Escritura)
-                </label>
-                  <input
-                  type="password"
-                  autoComplete="off"
-                  disabled={currentUser?.role !== "ADMIN"}
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="Introduce nueva API Key para rotar credencial..."
-                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-50"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1">
-                  {keyType === "Ed25519"
-                    ? "Clave Privada Ed25519 (PEM / Base64 — Solo Escritura)"
-                    : "Secret Key HMAC-SHA256 (Solo Escritura)"}
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-300 mb-1">
+                  Mi Llave API Personal de Binance (Solo Escritura)
                 </label>
                 <input
                   type="password"
                   autoComplete="off"
-                  disabled={currentUser?.role !== "ADMIN"}
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="Introduce tu llave API personal de Binance..."
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-300 mb-1">
+                  {keyType === "Ed25519"
+                    ? "Mi Clave Privada Ed25519 (PEM / Base64 — Solo Escritura)"
+                    : "Mi Clave Secreta HMAC-SHA256 (Solo Escritura)"}
+                </label>
+                <input
+                  type="password"
+                  autoComplete="off"
                   value={secretKeyInput}
                   onChange={(e) => setSecretKeyInput(e.target.value)}
-                  placeholder="Se cifra en AES-256-GCM y jamás vuelve a enviarse al navegador..."
-                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-50"
+                  placeholder="Se cifra en AES-256-GCM en tu bóveda aislada y jamás vuelve al navegador..."
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
                 />
               </div>
 
               <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
-                <span className="text-[10px] font-mono text-slate-500">
-                  {currentUser?.role === "ADMIN"
-                    ? "Permisos requeridos: Enable Reading + P2P. Prohibido Enable Withdrawals."
-                    : "Solo rol ADMIN puede rotar llaves maestras de Binance."}
+                <span className="text-[11px] font-mono text-slate-300">
+                  🔒 Bóveda aislada de @{currentUser?.username}: tus órdenes y saldos son confidenciales (Solo Lectura + P2P).
                 </span>
                 <button
                   type="submit"
-                  disabled={savingKeys || currentUser?.role !== "ADMIN"}
-                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50"
+                  disabled={savingKeys}
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 cursor-pointer"
                 >
-                  {savingKeys ? "Cifrando..." : "Rotar & Cifrar Credenciales"}
+                  {savingKeys ? "Cifrando..." : "Guardar y Cifrar Mi API"}
                 </button>
               </div>
             </form>
           </section>
 
-          {/* Tarjeta 2: Notificador Sanitizado Telegram + Controles Fail-Closed */}
+          {/* Tarjeta 2: Notificador Sanitizado Telegram + Controles de Parada Segura */}
           <section className="lg:col-span-5 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
             <div className="space-y-4">
               <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between">
@@ -591,7 +591,7 @@ export default function SettingsSecurityPage() {
                   <span className="material-symbols-outlined text-[18px] text-secondary">
                     send
                   </span>
-                  Telegram & Reglas Fail-Closed
+                  Telegram y Reglas de Parada Segura
                 </h2>
                 <span
                   className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
@@ -622,15 +622,15 @@ export default function SettingsSecurityPage() {
               <div className="space-y-2 text-xs">
                 {[
                   {
-                    label: "Detención Fail-Closed ante errores 5xx, timeout o IP no autorizada",
+                    label: "Detención segura ante errores 5xx, tiempo agotado o IP no autorizada",
                     active: telegramStatus?.fail_closed_5xx_enabled ?? true,
                   },
                   {
-                    label: "Pausa preventiva de 60s si x-mbx-used-weight supera 5,000",
+                    label: "Pausa preventiva de 60s si el peso de API supera 5.000",
                     active: telegramStatus?.weight_pause_enabled ?? true,
                   },
                   {
-                    label: "Filtro Regex anti-filtración de secretos en logs y Telegram",
+                    label: "Filtro anti-filtración de secretos en registros y Telegram",
                     active: telegramStatus?.log_sanitization_enabled ?? true,
                   },
                 ].map((policy) => (
@@ -640,7 +640,7 @@ export default function SettingsSecurityPage() {
                   >
                     <span className="text-[11px] text-slate-300">{policy.label}</span>
                     <span className="px-2 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-mono font-bold shrink-0">
-                      {policy.active ? "ON" : "OFF"}
+                      {policy.active ? "ACTIVO" : "INACTIVO"}
                     </span>
                   </div>
                 ))}
@@ -668,14 +668,14 @@ export default function SettingsSecurityPage() {
                       : "bg-error text-on-error"
                   }`}
                 >
-                  {isPaused ? "Reanudar Motor P2P" : "Parada Fail-Closed"}
+                  {isPaused ? "Reanudar Motor P2P" : "Parada de Emergencia"}
                 </button>
               )}
             </div>
           </section>
         </div>
 
-        {/* Sección Exclusiva ADMIN: Gobierno de Operadores RBAC (.env + Base de Datos) */}
+        {/* Sección Exclusiva ADMIN: Gobierno de Operadores (.env + Base de Datos) */}
         {currentUser.role === "ADMIN" && (
           <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden">
             <div className="p-4 border-b border-[#1e2430] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -684,14 +684,14 @@ export default function SettingsSecurityPage() {
                   <span className="material-symbols-outlined text-[18px] text-primary">
                     admin_panel_settings
                   </span>
-                  Gobierno de Operadores RBAC & Persistencia Dual (.env + Base de Datos)
+                  Gobierno de Operadores y Persistencia Dual (.env + Base de Datos)
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Autoriza operadores dinámicamente en SQLite/PostgreSQL o audita permisos declarados en variables de entorno.
                 </p>
               </div>
 
-              {/* Alta Rápida por Telegram ID */}
+              {/* Alta Rápida por ID de Telegram */}
               <form
                 onSubmit={handleAuthorizeOperator}
                 className="flex items-center gap-2 flex-wrap"
@@ -701,7 +701,7 @@ export default function SettingsSecurityPage() {
                   inputMode="numeric"
                   value={newTgId}
                   onChange={(e) => setNewTgId(e.target.value.replace(/\D/g, ""))}
-                  placeholder="Telegram ID (ej. 2076708117)"
+                  placeholder="ID de Telegram (ej. 2076708117)"
                   className="w-48 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
                 />
                 <input
@@ -718,8 +718,8 @@ export default function SettingsSecurityPage() {
                   }
                   className="px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-primary"
                 >
-                  <option value="TRADER">TRADER</option>
-                  <option value="ADMIN">ADMIN</option>
+                  <option value="TRADER">COMERCIANTE</option>
+                  <option value="ADMIN">ADMINISTRADOR</option>
                   <option value="INVITADO">INVITADO</option>
                 </select>
                 <button
@@ -732,15 +732,27 @@ export default function SettingsSecurityPage() {
               </form>
             </div>
 
+            <div className="px-4 py-2.5 bg-surface-container border-b border-[#1e2430] flex items-center justify-between gap-2 text-[11px] text-slate-300 font-mono">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[16px] text-tertiary">
+                  lock
+                </span>
+                <span>
+                  Aislamiento Confidencial Activo: El Administrador visualiza el estatus de integraciones (Telegram, API Binance, Google Sheets), pero las órdenes y saldos de cada usuario son estrictamente privados.
+                </span>
+              </div>
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-300">
                     <th className="py-3 px-4">Operador</th>
-                    <th className="py-3 px-4">Telegram ID</th>
-                    <th className="py-3 px-4">Rol RBAC</th>
+                    <th className="py-3 px-4">Telegram</th>
+                    <th className="py-3 px-4">API Binance</th>
+                    <th className="py-3 px-4">Rol de Acceso</th>
                     <th className="py-3 px-4">Origen del Permiso</th>
-                    <th className="py-3 px-4">Google Sheet Contable</th>
+                    <th className="py-3 px-4">Hoja Contable Google</th>
                     <th className="py-3 px-4">Estado</th>
                     <th className="py-3 px-4 text-right">Acciones</th>
                   </tr>
@@ -748,13 +760,13 @@ export default function SettingsSecurityPage() {
                 <tbody className="divide-y divide-[#1e2430]/70 text-xs">
                   {loading ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-400 font-mono">
+                      <td colSpan={8} className="py-8 text-center text-slate-400 font-mono">
                         Cargando directorio de operadores...
                       </td>
                     </tr>
                   ) : operators.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-400 font-mono">
+                      <td colSpan={8} className="py-8 text-center text-slate-400 font-mono">
                         No hay operadores registrados.
                       </td>
                     </tr>
@@ -762,16 +774,44 @@ export default function SettingsSecurityPage() {
                     operators.map((op) => {
                       const isEnvImmutable =
                         op.permission_source?.includes("Inmutable") ?? false;
+                      const tgLinked =
+                        op.telegram_linked ?? Boolean(op.telegram_id);
+                      const apiConfigured = Boolean(op.binance_api_configured);
+                      const sheetConfigured =
+                        op.google_sheet_configured ?? Boolean(op.google_sheet_id);
+
                       return (
                         <tr
                           key={op.id}
                           className="hover:bg-surface-container/70 transition-colors"
                         >
                           <td className="py-3 px-4 font-semibold text-white">
-                            {op.username}
+                            <div>{op.username}</div>
+                            <div className="text-[10px] font-mono text-slate-400">
+                              Datos aislados (ID #{op.id})
+                            </div>
                           </td>
-                          <td className="py-3 px-4 font-mono tabular-nums text-secondary">
-                            {op.telegram_id || "—"}
+                          <td className="py-3 px-4 font-mono tabular-nums">
+                            {tgLinked ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-secondary/15 text-secondary text-[10px] font-bold">
+                                ● {op.telegram_id}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">
+                                Sin vincular
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-mono">
+                            {apiConfigured ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-bold">
+                                ● Conectada ({op.binance_key_type || "AES"})
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-container-high text-slate-400 text-[10px]">
+                                ○ Sin API
+                              </span>
+                            )}
                           </td>
                           <td className="py-3 px-4">
                             <select
@@ -785,8 +825,8 @@ export default function SettingsSecurityPage() {
                               }
                               className="px-2 py-1 rounded bg-surface-container border border-[#1e2430] text-xs font-mono font-bold text-white disabled:opacity-60"
                             >
-                              <option value="ADMIN">ADMIN</option>
-                              <option value="TRADER">TRADER</option>
+                              <option value="ADMIN">ADMINISTRADOR</option>
+                              <option value="TRADER">COMERCIANTE</option>
                               <option value="INVITADO">INVITADO</option>
                             </select>
                           </td>
@@ -808,7 +848,7 @@ export default function SettingsSecurityPage() {
                                   type="text"
                                   value={editingSheetVal}
                                   onChange={(e) => setEditingSheetVal(e.target.value)}
-                                  placeholder="URL o ID Sheet"
+                                  placeholder="Enlace o ID Hoja"
                                   className="w-36 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-white text-[11px]"
                                 />
                                 <button
@@ -816,7 +856,7 @@ export default function SettingsSecurityPage() {
                                   onClick={() => handleSaveUserSheet(op.id)}
                                   className="px-2 py-1 rounded bg-tertiary text-on-tertiary font-bold text-[10px]"
                                 >
-                                  OK
+                                  Guardar
                                 </button>
                                 <button
                                   type="button"
@@ -828,11 +868,18 @@ export default function SettingsSecurityPage() {
                               </div>
                             ) : (
                               <div className="flex items-center gap-2">
-                                <span className="text-slate-400 truncate max-w-[130px]">
-                                  {op.google_sheet_id
-                                    ? `${op.google_sheet_id.slice(0, 12)}…`
-                                    : "Sin hoja"}
-                                </span>
+                                {sheetConfigured ? (
+                                  <span
+                                    title={op.google_sheet_id || ""}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-bold truncate max-w-[140px]"
+                                  >
+                                    ● {op.google_sheet_id?.slice(0, 10)}…
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 text-[11px]">
+                                    ○ Sin hoja
+                                  </span>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -865,7 +912,7 @@ export default function SettingsSecurityPage() {
                                   onClick={() => handleRoleChange(op, "TRADER")}
                                   className="px-2.5 py-1 rounded bg-tertiary/15 hover:bg-tertiary/25 text-tertiary border border-tertiary/30 text-[10px] font-mono font-bold whitespace-nowrap"
                                 >
-                                  Aprobar Trader
+                                  Aprobar Comerciante
                                 </button>
                               )}
                               {op.id !== currentUser.id && !isEnvImmutable && (

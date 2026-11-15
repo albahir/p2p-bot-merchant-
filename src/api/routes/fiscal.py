@@ -61,10 +61,11 @@ def get_fiscal_summary(
     actual_final_balance: float | None = Query(default=None, ge=0.0),
     cost_method: str = Query(default="FIFO", description="Método de costeo fiscal: FIFO o AVG"),
 ) -> FiscalReconciliationResponse:
-    """Calcula y retorna la ecuación contable de 6 piezas para auditoría fiscal P2P."""
+    """Calcula y retorna la ecuación contable de 6 piezas para auditoría fiscal P2P del operador."""
     try:
+        uid = int(current_user.id) if current_user and current_user.id is not None else None
         bcv_svc = BCVService()
-        reconciler = FiscalReconciler(db_session=db, bcv_service=bcv_svc)
+        reconciler = FiscalReconciler(db_session=db, bcv_service=bcv_svc, user_id=uid)
         res = reconciler.reconcile_period(
             period=period,
             initial_balance=initial_balance,
@@ -116,10 +117,11 @@ def execute_fiscal_reconciliation(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_trader)],
 ) -> FiscalReconciliationResponse:
-    """Ejecuta y persiste la reconciliación patrimonial del período especificado."""
+    """Ejecuta y persiste la reconciliación patrimonial del período especificado para el operador."""
     try:
+        uid = int(current_user.id) if current_user and current_user.id is not None else None
         bcv_svc = BCVService()
-        reconciler = FiscalReconciler(db_session=db, bcv_service=bcv_svc)
+        reconciler = FiscalReconciler(db_session=db, bcv_service=bcv_svc, user_id=uid)
         res = reconciler.reconcile_period(
             period=req.period,
             initial_balance=req.initial_balance,
@@ -173,12 +175,12 @@ def get_fiscal_snapshot(
     current_user: Annotated[User, Depends(require_trader)],
     period: str = Query(default=datetime.now(UTC).strftime("%Y-%m"), description="Período en formato YYYY-MM"),
 ) -> dict[str, Any]:
-    """Consulta si un período mensual ya fue cerrado y sellado en la base de datos."""
-    _ = current_user
+    """Consulta si un período mensual ya fue cerrado y sellado en la base de datos por el operador."""
     from src.data.repositories import FiscalSnapshotRepository
 
-    snap_repo = FiscalSnapshotRepository(db)
-    snap = snap_repo.get_by_period(period)
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    snap_repo = FiscalSnapshotRepository(db, user_id=uid)
+    snap = snap_repo.get_by_period(period, user_id=uid)
     if not snap:
         return {"period": period, "is_closed": False, "snapshot": None}
 

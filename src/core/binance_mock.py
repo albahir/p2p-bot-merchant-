@@ -230,7 +230,7 @@ class MockBinanceP2PClient:
             calculated_price = round(base_price - price_offset if trade_type == "BUY" else base_price + price_offset, 2)
 
             min_amt = 500.0 + (i * 200.0)
-            max_amt = 50000.0 + (i * 5000.0)
+            max_amt = 5000000.0 + (i * 500000.0)
             if trans_amount is not None and (trans_amount < min_amt or trans_amount > max_amt):
                 continue
 

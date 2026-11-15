@@ -57,12 +57,13 @@ async def websocket_live_endpoint(websocket: WebSocket) -> None:
         })
 
         while True:
-            # Mantener conexión abierta y escuchar comandos de cliente si los envía
+            # Mantener conexión abierta y escuchar únicamente pulsos ping acotados (<= 256 bytes)
             data_text = await websocket.receive_text()
+            if len(data_text) > 256:
+                continue
             try:
                 msg = json.loads(data_text)
-                action = msg.get("action")
-                if action == "ping":
+                if isinstance(msg, dict) and msg.get("action") == "ping":
                     await websocket.send_json({"type": "pong"})
             except json.JSONDecodeError:
                 pass

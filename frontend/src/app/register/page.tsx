@@ -95,7 +95,7 @@ export default function RegisterPage() {
           </div>
           <div>
             <span className="text-sm font-bold text-white tracking-tight">
-              P2P Merchant OS
+              Sistema Comerciante P2P
             </span>
             <span className="hidden sm:inline ml-2 text-[10px] font-mono uppercase tracking-widest text-slate-400">
               Registro de Operadores
@@ -150,7 +150,7 @@ export default function RegisterPage() {
                 Crear Cuenta de Operador
               </h1>
               <p className="text-xs text-slate-400 mt-1">
-                Vincula tu ID de Telegram para heredar permisos TRADER/ADMIN autorizados y alertas BCV.
+                Vincula tu ID de Telegram para heredar permisos de Comerciante o Administrador autorizados y alertas BCV.
               </p>
             </div>
             <div className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] text-right">
@@ -194,7 +194,7 @@ export default function RegisterPage() {
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                    Telegram ID (Numérico)
+                    ID de Telegram (Numérico)
                   </label>
                   {isTelegramValid && (
                     <span className="text-[10px] font-mono text-tertiary flex items-center gap-0.5">
@@ -295,7 +295,7 @@ export default function RegisterPage() {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                  Google Sheet Contable (Opcional)
+                  Hoja Contable de Google Sheets (Opcional)
                 </label>
                 <span className="text-[10px] font-mono text-slate-500">
                   Sincronización Libro Diario
@@ -309,7 +309,7 @@ export default function RegisterPage() {
                   type="text"
                   value={googleSheetId}
                   onChange={(e) => setGoogleSheetId(e.target.value)}
-                  placeholder="Pega URL completa de Google Sheets o ID del documento"
+                  placeholder="Pega el enlace completo de Google Sheets o ID del documento"
                   className="w-full pl-10 pr-3 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-tertiary focus:outline-hidden text-xs text-white font-mono placeholder:text-slate-600"
                 />
               </div>
@@ -335,7 +335,7 @@ export default function RegisterPage() {
       </main>
 
       <footer className="relative z-10 py-4 px-6 border-t border-[#1e2430] bg-surface/60 text-center text-[11px] font-mono text-slate-500">
-        Permisos RBAC (ADMIN / TRADER / INVITADO) verificados contra Base de Datos y lista inmutable .env
+        Permisos de rol (ADMINISTRADOR / COMERCIANTE / INVITADO) verificados contra Base de Datos y lista inmutable .env
       </footer>
     </div>
   );

@@ -2,7 +2,16 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://127.0.0.1:8000/ws/live";
+function getWsUrl(): string {
+  if (process.env.NEXT_PUBLIC_WS_URL) {
+    return process.env.NEXT_PUBLIC_WS_URL;
+  }
+  if (typeof window !== "undefined" && window.location?.hostname) {
+    const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProto}//${window.location.hostname}:8000/ws/live`;
+  }
+  return "ws://127.0.0.1:8000/ws/live";
+}
 
 export interface WebSocketMessage {
   type: string;
@@ -24,7 +33,7 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
   const connect = useCallback(() => {
     if (unmountedRef.current) return;
     try {
-      const socket = new WebSocket(WS_URL);
+      const socket = new WebSocket(getWsUrl());
       wsRef.current = socket;
 
       socket.onopen = () => {
@@ -65,7 +74,11 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
 
   useEffect(() => {
     unmountedRef.current = false;
-    connect();
+    // Pequeño retardo (50ms) para evitar que el doble montaje de React StrictMode en desarrollo
+    // cierre el WebSocket antes de terminar el handshake ("WebSocket is closed before connection is established").
+    const initialConnectTimer = setTimeout(() => {
+      connect();
+    }, 50);
 
     // Heartbeat ping cada 25 segundos
     const interval = setInterval(() => {
@@ -76,9 +89,17 @@ export function useWebSocket(onMessageReceived?: (msg: WebSocketMessage) => void
 
     return () => {
       unmountedRef.current = true;
+      clearTimeout(initialConnectTimer);
       clearInterval(interval);
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) wsRef.current.close();
+      const sock = wsRef.current;
+      if (sock) {
+        if (sock.readyState === WebSocket.CONNECTING) {
+          sock.onopen = () => sock.close();
+        } else if (sock.readyState === WebSocket.OPEN) {
+          sock.close();
+        }
+      }
     };
   }, [connect]);
 

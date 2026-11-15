@@ -138,6 +138,10 @@ class P2PBotEngine:
                 self.seeded_counts["admins"],
                 self.seeded_counts["traders"],
             )
+            # Sincronizar y persistir tasa oficial BCV en `bcv_rate_history` (Neon / SQLite) desde el arranque
+            from src.reporting.bcv_history_service import BCVHistoryService
+
+            BCVHistoryService(db_session=db_seed).get_or_fetch_current_rates()
         except (ValueError, RuntimeError, OSError) as seed_err:
             logger.warning(f"Aviso al sincronizar operadores de entorno en BD: {seed_err}")
         finally:

@@ -85,6 +85,7 @@ class BinanceAdvertiserInfo(BaseModel):
     nickName: str
     monthOrderCount: int = 0
     monthFinishRate: float = 0.0
+    userType: str | None = None
 
 
 class BinanceTradeMethod(BaseModel):

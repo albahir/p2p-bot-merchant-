@@ -4,6 +4,7 @@ import React, { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
+import { BankAmountInput } from "@/components/bank-amount-input";
 import {
   BCVRates,
   RateQuote,
@@ -56,13 +57,19 @@ function CalculatorContent() {
       if (!mounted) return;
       if (bcvData) setBcv(bcvData);
       if (matrixData?.quotes?.length) {
-        setQuotes(matrixData.quotes);
+        const seen = new Set<string>();
+        const deduped = matrixData.quotes.filter((q) => {
+          if (seen.has(q.bank_name)) return false;
+          seen.add(q.bank_name);
+          return true;
+        });
+        setQuotes(deduped);
         // Autocompletar tasas iniciales si no vinieron por query params
-        setBuyRate((prev) => (prev > 0 ? prev : matrixData.quotes[0].buy_rate));
+        setBuyRate((prev) => (prev > 0 ? prev : deduped[0].buy_rate));
         setSellRate((prev) =>
           prev > 0
             ? prev
-            : matrixData.quotes[Math.min(1, matrixData.quotes.length - 1)].sell_rate
+            : deduped[Math.min(1, deduped.length - 1)].sell_rate
         );
       } else {
         setBuyRate((prev) => (prev > 0 ? prev : 45.2));
@@ -168,7 +175,7 @@ function CalculatorContent() {
     <AppShell
       title="Calculadora Instantánea de Ciclos P2P"
       badge="BINANCE P2P • VES"
-      subtitle="Simulación exacta de arbitraje de ida y vuelta con punto de equilibrio, comisiones Maker/Taker y deducción Pago Móvil (0.3%)."
+      subtitle="Simulación exacta de arbitraje de ida y vuelta con punto de equilibrio, comisiones por rol y deducción Pago Móvil (0,30%)."
       actions={
         <Link
           href="/"
@@ -182,6 +189,32 @@ function CalculatorContent() {
       }
     >
       <div className="space-y-5">
+        {/* Alerta de Cobertura de Riesgo Cambiario cuando el Spread se vuelve negativo o insuficiente */}
+        {!isProfitable && buyRate > 0 && sellRate > 0 && (
+          <div className="p-3.5 rounded-xl bg-error/15 border border-error/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-start sm:items-center gap-2.5">
+              <span className="material-symbols-outlined text-[20px] text-error shrink-0">
+                warning
+              </span>
+              <div>
+                <div className="font-bold text-white">
+                  Alerta de Riesgo Cambiario — Ciclo en Pérdida ({simulation.netRoiPct.toFixed(2)}% Retorno)
+                </div>
+                <div className="text-slate-300 mt-0.5">
+                  La tasa de venta actual (<span className="font-mono text-error font-semibold">Bs. {sellRate.toFixed(2)}</span>) está por debajo del punto de equilibrio (<span className="font-mono text-primary font-semibold">Bs. {simulation.breakEvenSellRate.toFixed(2)}</span>), generando una pérdida neta de <span className="font-mono text-error font-semibold">Bs. {Math.abs(simulation.netProfitVes).toFixed(2)}</span>.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSellRate(Number((simulation.breakEvenSellRate * 1.008).toFixed(2)))}
+              className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary font-mono text-[11px] font-bold hover:brightness-110 transition-all shrink-0 cursor-pointer"
+            >
+              Ajustar a Tasa Objetivo (+0,8%)
+            </button>
+          </div>
+        )}
+
         {/* 4 KPIs Principales Corregidos (Sin duplicar título de Ruta de Venta) */}
         <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           {/* KPI 1 */}
@@ -196,14 +229,14 @@ function CalculatorContent() {
               Bs. {simulation.totalVesInvested.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              Base: {capitalUsdt} USDT • Fee Banco: Bs. {simulation.bankFeeVes.toFixed(2)}
+              Base: {capitalUsdt} USDT • Comisión Banco: Bs. {simulation.bankFeeVes.toFixed(2)}
             </div>
           </div>
 
           {/* KPI 2 */}
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Tasa Mínima Break-Even</span>
+              <span>Tasa Mínima de Equilibrio</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 balance
               </span>
@@ -244,7 +277,7 @@ function CalculatorContent() {
           {/* KPI 4 */}
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>ROI Neto Real por Vuelta</span>
+              <span>Retorno Neto Real por Vuelta</span>
               <span className="material-symbols-outlined text-[16px] text-tertiary">
                 monitoring
               </span>
@@ -287,12 +320,10 @@ function CalculatorContent() {
                 Volumen Operativo por Ciclo (USDT)
               </label>
               <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={1}
-                  step="10"
+                <BankAmountInput
                   value={capitalUsdt}
-                  onChange={(e) => setCapitalUsdt(Number(e.target.value))}
+                  onChange={setCapitalUsdt}
+                  ariaLabel="Volumen Operativo por Ciclo (USDT)"
                   className="flex-1 px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm font-mono font-bold text-white tabular-nums"
                 />
                 {[100, 250, 500, 1000].map((preset) => (
@@ -328,7 +359,7 @@ function CalculatorContent() {
                         : "text-slate-400"
                     }`}
                   >
-                    Maker 0%
+                    Anuncio 0%
                   </button>
                   <button
                     type="button"
@@ -339,7 +370,7 @@ function CalculatorContent() {
                         : "text-slate-400"
                     }`}
                   >
-                    Taker 0.1%
+                    Directo 0,1%
                   </button>
                 </div>
               </div>
@@ -374,11 +405,10 @@ function CalculatorContent() {
                   <label className="block text-[10px] font-mono text-slate-400 mb-1">
                     Tasa Compra (Bs/USDT)
                   </label>
-                  <input
-                    type="number"
-                    step="0.01"
+                  <BankAmountInput
                     value={buyRate}
-                    onChange={(e) => setBuyRate(Number(e.target.value))}
+                    onChange={setBuyRate}
+                    ariaLabel="Tasa Compra (Bs/USDT)"
                     className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono font-bold text-white tabular-nums focus:border-primary-container focus:outline-hidden"
                   />
                 </div>
@@ -401,7 +431,7 @@ function CalculatorContent() {
                         : "text-slate-400"
                     }`}
                   >
-                    Maker 0%
+                    Anuncio 0%
                   </button>
                   <button
                     type="button"
@@ -412,7 +442,7 @@ function CalculatorContent() {
                         : "text-slate-400"
                     }`}
                   >
-                    Taker 0.1%
+                    Directo 0,1%
                   </button>
                 </div>
               </div>
@@ -447,11 +477,10 @@ function CalculatorContent() {
                   <label className="block text-[10px] font-mono text-slate-400 mb-1">
                     Tasa Venta (Bs/USDT)
                   </label>
-                  <input
-                    type="number"
-                    step="0.01"
+                  <BankAmountInput
                     value={sellRate}
-                    onChange={(e) => setSellRate(Number(e.target.value))}
+                    onChange={setSellRate}
+                    ariaLabel="Tasa Venta (Bs/USDT)"
                     className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono font-bold text-primary tabular-nums focus:border-primary-container focus:outline-hidden"
                   />
                 </div>
@@ -514,7 +543,7 @@ function CalculatorContent() {
                       : "bg-error/15 text-error"
                   }`}
                 >
-                  {isProfitable ? "CICLO VIABLE" : "SPREAD INSUFICIENTE"}
+                  {isProfitable ? "CICLO VIABLE" : "MARGEN INSUFICIENTE"}
                 </span>
               </div>
 
@@ -535,7 +564,7 @@ function CalculatorContent() {
                       </span>
                     </div>
                     <div className="flex justify-between text-slate-400">
-                      <span>Fee Binance:</span>
+                      <span>Comisión Binance:</span>
                       <span>-{simulation.buyFeeUsdt.toFixed(3)} USDT</span>
                     </div>
                   </div>
@@ -557,7 +586,7 @@ function CalculatorContent() {
                       </span>
                     </div>
                     <div className="flex justify-between text-slate-400">
-                      <span>Break-Even:</span>
+                      <span>Equilibrio:</span>
                       <span>Bs. {simulation.breakEvenSellRate.toFixed(2)}</span>
                     </div>
                   </div>

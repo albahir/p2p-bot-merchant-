@@ -87,6 +87,7 @@ No flag runs the full static audit: phases 0-6 and 8-9, no DAST.
 | Phase 3/5 stack is Postgres, Redis, React, Next.js, Go or Node | `references/stack-checks.md` |
 | Phase 6a manual review of AI-code failure classes | `references/vibecoding-checklist.md` |
 | Phase 6b app calls an LLM API | `references/llm-app-security.md` |
+| Phase 3/6a/7 JWT & session token inspection, encoding & validation (`jwt-decode`, `jwt-encode`, `jwt-validate`) | `references/jwt-security.md` |
 | Phase 7 DAST, or probing authorization/IDOR | `references/dast-and-authz.md` |
 | Phase 9 compliance appendix requested | `references/compliance-mapping.md` |
 | A live credential was found and needs rotating | `references/credential-rotation.md` |

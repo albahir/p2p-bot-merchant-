@@ -12,7 +12,7 @@
   - `architect.md`: Arquitecto de Software.
   - `backend.md`: Desarrollador Backend.
   - `frontend.md`: Desarrollador Frontend y UI/UX (Streamlit).
-  - `security.md`: Ingeniero de Ciberseguridad y Auditor Criptográfico.
+  - `security.md`: Ingeniero de Ciberseguridad y Auditor Criptográfico (equipado con `security-review`, `jwt-decode`, `jwt-encode` y `jwt-validate`).
   - `qa.md`: QA Tester.
   - `devops.md`: DevOps y Pipelines CI/CD.
   - `researcher.md`: Investigador Técnico & Especialista en Documentación (APIs, benchmarking y cloud).
@@ -693,18 +693,58 @@
       - Resueltos los 35 errores de tipado SQLAlchemy `Column[...]` reportados por GitHub Actions en [`src/reporting/accounting_engine.py`](file:///c:/p2p-bot-merchant/src/reporting/accounting_engine.py) (`Order.created_at.between(...)`), [`src/integrations/telegram_notifier.py`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py) y [`src/api/routes/accounting.py`](file:///c:/p2p-bot-merchant/src/api/routes/accounting.py) (`Success: no issues found in 82 source files`).
       - Mejorado [`TelegramNotifier._handle_admin_list_users`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py) (`/usuarios`), [`seed_env_operators`](file:///c:/p2p-bot-merchant/src/data/database.py) e inicialización en [`src/main.py`](file:///c:/p2p-bot-merchant/src/main.py) y [`src/api/main.py`](file:///c:/p2p-bot-merchant/src/api/main.py) para insertar automáticamente en BD desde el segundo 0 del arranque todos los operadores de `TELEGRAM_ALLOWED_USERS` y `TELEGRAM_TRADER_USERS`, reportar el conteo en el mensaje de inicio de Telegram y soportar PostgreSQL externo (`psycopg2-binary` + normalización `postgres://` → `postgresql://` + `pool_pre_ping=True`).
 
+54. **Aislamiento Confidencial Multi-Usuario (Cero Visibilidad Cruzada Admin/Trader), Estado Integral de Usuarios y Mejoras Tácticas UX/UI (ADR 054 / SPEC-022)**:
+    - **Aislamiento Confidencial Estricto por Usuario (`user_id` Multi-Tenant)**:
+      - Se agregó `user_id` (con migración automática en `init_db()`) a `Order`, `WalletMovement`, `BankVoucher`, `JournalEntry` y `FiscalPeriodSnapshot` en [`src/data/models.py`](file:///c:/p2p-bot-merchant/src/data/models.py) y [`src/data/database.py`](file:///c:/p2p-bot-merchant/src/data/database.py).
+      - Se aislaron las consultas en [`src/data/repositories.py`](file:///c:/p2p-bot-merchant/src/data/repositories.py), [`src/reporting/accounting_engine.py`](file:///c:/p2p-bot-merchant/src/reporting/accounting_engine.py), [`src/reporting/fiscal_reconciler.py`](file:///c:/p2p-bot-merchant/src/reporting/fiscal_reconciler.py), [`src/core/binance_history_syncer.py`](file:///c:/p2p-bot-merchant/src/core/binance_history_syncer.py), [`src/integrations/receipt_ocr.py`](file:///c:/p2p-bot-merchant/src/integrations/receipt_ocr.py) y rutas REST ([`orders.py`](file:///c:/p2p-bot-merchant/src/api/routes/orders.py), [`accounting.py`](file:///c:/p2p-bot-merchant/src/api/routes/accounting.py), [`fiscal.py`](file:///c:/p2p-bot-merchant/src/api/routes/fiscal.py)).
+      - **Regla de Confidencialidad**: El `ADMIN` **no puede ver** las órdenes, los saldos bancarios/cripto, los comprobantes ni la contabilidad de ningún `TRADER`. Cada operador (incluido el `ADMIN`) posee su propio espacio confidencial aislado.
+      - **Bóveda Personal de API Binance por Usuario (`user_{id}:binance_api_key`)**: En [`src/api/routes/settings.py`](file:///c:/p2p-bot-merchant/src/api/routes/settings.py) y [`frontend/src/app/settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx), tanto cada `TRADER` como el `ADMIN` pueden conectar, cifrar en `AES-256-GCM` y diagnosticar su propia API de Binance para evaluar y operar su propio sistema sin colisionar ni cruzar datos con otros operadores.
+    - **Visibilidad de Estatus Operativo Multi-Aspecto para el Admin**:
+      - En `GET /api/users` ([`src/api/routes/users.py`](file:///c:/p2p-bot-merchant/src/api/routes/users.py)), `/usuarios` en Telegram ([`src/integrations/telegram_notifier.py`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py)) y la tabla RBAC en [`frontend/src/app/settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx), el `ADMIN` visualiza el estado técnico de cada usuario en todos los aspectos:
+        1. **Telegram**: `telegram_linked` (`true/false` + ID).
+        2. **API Binance**: `binance_api_configured` (`true/false` + tipo `Ed25519` / `HMAC`).
+        3. **Google Sheets**: `google_sheet_configured` (`true/false` + ID de hoja).
+        4. **Estado y Rol**: `is_active`, `role`, `permission_source`.
+    - **Cobertura de Riesgo Cambiario y Mejoras UX/UI**:
+      - **Detector de Spread Intrabanco Negativo (`RateAlertService.check_negative_spread_risk`)**: Implementado en [`src/core/rate_alert_service.py`](file:///c:/p2p-bot-merchant/src/core/rate_alert_service.py) y alertas visuales en [`frontend/src/app/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/page.tsx) y [`frontend/src/app/calculator/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/calculator/page.tsx) con botón de ajuste inmediato a tasa objetivo (`Break-Even + 0.8%`).
+      - **Deep Linking de 1 Clic Inteligente (`Simular`) & Pinning de Bancos (`📌`)**: En [`frontend/src/app/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/page.tsx), el botón `Simular` pre-selecciona el banco destino óptimo (comparando intrabanco 0% vs interbancario 0.3% Pago Móvil) y permite fijar bancos favoritos en la parte superior (`localStorage`).
+      - **Conciliación Manual Ultrarrápida (`Alt+N` / `<5s` sin mouse)**: Nuevo endpoint `POST /api/accounting/vouchers/manual` en [`src/api/routes/accounting.py`](file:///c:/p2p-bot-merchant/src/api/routes/accounting.py) y modal con atajo `Alt+N` en [`frontend/src/app/accounting/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/accounting/page.tsx) para asentar y conciliar pagos en menos de 5 segundos cuando falle el OCR.
+      - **Indicador Global de Parada Fail-Closed y Barra Táctica Móvil**: Borde superior y banner constante de emergencia en [`frontend/src/components/app-shell.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/app-shell.tsx) en todas las pestañas cuando el motor está en pausa, más barra táctica móvil enfocada en `Calculadora`, `Confirmar Pago` y `Matriz P2P`.
+    - **Calidad, Seguridad y Verificación**:
+      - **233/233 pruebas automatizadas pasando al 100%** en `pytest` (incluyendo `test_multi_tenant_isolation_and_ux.py`, `test_user_simulation_audit.py` y `test_api_auth_routes.py`).
+      - `mypy src/ tests/ scripts/` limpio (**0 errores en 142 archivos**).
+      - `ruff check .` limpio (**All checks passed!**).
+      - `tsc -p frontend/tsconfig.json --noEmit` limpio (**0 errores**).
+      - `security-review` limpio (**0 hallazgos**).
+
+55. **Sistema Dual de Spread (Por Banco + Por Precio en Vivo con Filtros Oficiales Binance P2P) y Blindaje DevTools/API (ADR 055)**:
+    - **Motor Dual de Spread con Filtros Reales de Binance P2P (`transAmount`, `payTypes`, `merchantCheck`)**:
+      - [`SpreadMonitor.resolve_binance_pay_types`](file:///c:/p2p-bot-merchant/src/core/spread_monitor.py): Lista blanca estricta que mapea filtros bancarios (`Pago Móvil`, `Banesco`, `Banco de Venezuela`, `Mercantil`, `BBVA Provincial`, `BNC`, `Bancamiga`, `Transferencia Bancaria`) a los códigos oficiales `payTypes` de Binance P2P, bloqueando cualquier intento de inyección de parámetros.
+      - [`SpreadMonitor.fetch_filtered_orderbook`](file:///c:/p2p-bot-merchant/src/core/spread_monitor.py) y `GET /api/spreads/orderbook` ([`src/api/routes/spreads.py`](file:///c:/p2p-bot-merchant/src/api/routes/spreads.py)): Consulta en vivo las columnas **Comprar USDT (`BUY`)** y **Vender USDT (`SELL`)** de Binance P2P filtradas por monto exacto en Bolívares (`transAmount = amount_usdt * tasa_ref`), banco (`payTypes`) y **Solo Comerciantes Verificados (`merchant_only`)**, calculando tanto el **Spread Comerciante (Maker / Con Anuncio)** como el **Spread Directo (Taker / Sin Anuncio)** con caché en memoria de 12 segundos anti-rate-limit.
+      - [`SpreadMonitor.fetch_live_quotes`](file:///c:/p2p-bot-merchant/src/core/spread_monitor.py) y `GET /api/spreads/matrix`: Enriquecimiento en vivo por volumen (`trans_amount_ves`) y estado de comerciante verificado para ajustar las puntas de cada banco al ticket operativo seleccionado (`50`, `100`, `250`, `500`, `1000` USDT).
+      - [`frontend/src/app/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/page.tsx): Selector de Modo de Análisis (**`Vista Dual (Banco + Precio)`**, **`Spread por Banco`**, **`Spread por Precio (Libro Binance)`**), filtro **`Solo Comerciantes Verificados`**, visualización del libro de anuncios de Compra y Venta con límites `Mín Bs. – Máx Bs.` y botones de simulación directa en 1 clic.
+    - **Blindaje ante Inspección en Browser DevTools (`Sources`, `Network`, `WebSockets`)**:
+      - [`frontend/next.config.mjs`](file:///c:/p2p-bot-merchant/frontend/next.config.mjs): `productionBrowserSourceMaps: false`, `poweredByHeader: false` y cabeceras de seguridad (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`).
+      - [`frontend/src/lib/api.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/api.ts): Omisión estricta de la cabecera `Authorization: Bearer` en endpoints públicos de mercado (`/api/spreads/*`), evitando exponer el token JWT en consultas públicas de tasas.
+      - [`src/api/main.py`](file:///c:/p2p-bot-merchant/src/api/main.py): Ocultamiento automático de `/docs`, `/redoc` y `/openapi.json` en `ENVIRONMENT == "production"` y middleware de cabeceras de seguridad (`Cache-Control: no-store` en `/api/*`).
+      - [`src/api/routes/settings.py`](file:///c:/p2p-bot-merchant/src/api/routes/settings.py) y [`src/api/routes/websockets.py`](file:///c:/p2p-bot-merchant/src/api/routes/websockets.py): Restricción de `/api/settings/*` a `require_trader`, eliminación de fallbacks `.env` ajenos y límite de 256 bytes (`ping`-only) en tramas entrantes de WebSocket.
+
 ---
 
 ## 🎯 Guía Operativa Actual
 
 1. **Frontend Institucional "P2P Merchant OS" (Next.js 14)**:
    - Desarrollo: `cd frontend && npm run dev` (abre en `http://localhost:3000`).
-   - Compilación: `cd frontend && npm run build` (8 pantallas institucionales + redirecciones compiladas con 0 errores).
+   - Verificación de tipos: `node frontend/node_modules/typescript/bin/tsc -p frontend/tsconfig.json --noEmit`.
 2. **API REST y WebSockets (FastAPI)**:
-   - Iniciar API: `uvicorn src.api.main:app --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
+   - Iniciar API: `python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
 3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
 4. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
-5. **Suite de Pruebas Automatizadas**: `pytest` (**167/167 tests pasando al 100%**).
+5. **Suite de Pruebas Automatizadas**: `pytest` (**230/230 tests pasando al 100%**).
 6. **Calidad y Verificación**:
-   - `mypy src/` (0 errores en 69 archivos fuente).
-   - `ruff check .` (0 errores de linting).
+   - `python -m mypy src/ tests/ scripts/` (0 errores en 142 archivos fuente).
+   - `python -m ruff check .` (0 errores de linting).
+   - `node frontend/node_modules/typescript/bin/tsc -p frontend/tsconfig.json --noEmit` (0 errores TypeScript).
+7. **Entradas Bancarias Estilo Pago Móvil (`,00` sin spinners) y Localización Total en Español**:
+   - Componente [`frontend/src/components/bank-amount-input.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/bank-amount-input.tsx) con desplazamiento automático de centavos de derecha a izquierda (`0,00` → `0,05` → `0,50` → `5,00`) y ocultación global de flechas `spin` en CSS ([`frontend/src/app/globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css) y [`src/reporting/dashboard/theme.py`](file:///c:/p2p-bot-merchant/src/reporting/dashboard/theme.py)).
+   - Traducción integral al español de todas las etiquetas, insignias de rol (`ADMINISTRADOR`, `COMERCIANTE`, `INVITADO`), estados de órdenes (`COMPLETADA`, `CANCELADA`, `PENDIENTE`), estados de comprobantes (`CONCILIADO`, `SIN CONCILIAR`, `VERIFICADO`) y términos financieros en todas las vistas de Next.js.

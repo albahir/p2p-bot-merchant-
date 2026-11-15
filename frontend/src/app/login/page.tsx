@@ -175,10 +175,10 @@ export default function LoginPage() {
           </div>
           <div>
             <span className="text-sm font-bold text-white tracking-tight">
-              P2P Merchant OS
+              Sistema Comerciante P2P
             </span>
             <span className="hidden sm:inline ml-2 text-[10px] font-mono uppercase tracking-widest text-slate-400">
-              Institutional Arbitrage Engine
+              Motor Institucional de Arbitraje
             </span>
           </div>
         </Link>
@@ -225,16 +225,16 @@ export default function LoginPage() {
           <div className="mb-6">
             <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-primary-container/10 border border-primary-container/25 text-[10px] font-mono font-semibold uppercase tracking-wider text-primary mb-3">
               <span className="material-symbols-outlined text-[14px]">lock</span>
-              Terminal Segura RBAC
+              Terminal Segura de Operadores
             </div>
             <h1 className="text-xl font-bold text-white tracking-tight">
               {mode === "login"
                 ? "Acceso a la Mesa Operativa"
-                : "Recuperación vía Telegram OTP"}
+                : "Recuperación vía Código de Telegram"}
             </h1>
             <p className="text-xs text-slate-400 mt-1">
               {mode === "login"
-                ? "Ingresa tus credenciales de operador para gestionar spreads, órdenes y contabilidad SENIAT."
+                ? "Ingresa tus credenciales de operador para gestionar márgenes, órdenes y contabilidad SENIAT."
                 : "Recibe un código temporal de un solo uso en tu Telegram vinculado."}
             </p>
           </div>
@@ -342,7 +342,7 @@ export default function LoginPage() {
                     className="w-full py-2.5 px-4 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary font-semibold text-xs hover:bg-secondary/25 transition-all flex items-center justify-center gap-2"
                   >
                     <span className="material-symbols-outlined text-[18px]">send</span>
-                    <span>Acceso Instantáneo vía Telegram Mini App</span>
+                    <span>Acceso Instantáneo vía Mini App de Telegram</span>
                   </button>
                 </div>
               )}
@@ -372,7 +372,7 @@ export default function LoginPage() {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Tu usuario en P2P Merchant OS"
+                  placeholder="Tu usuario en Sistema Comerciante P2P"
                   className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
                 />
               </div>
@@ -464,10 +464,10 @@ export default function LoginPage() {
       <footer className="relative z-10 py-4 px-6 border-t border-[#1e2430] bg-surface/60 flex flex-wrap items-center justify-center gap-4 text-[11px] font-mono text-slate-500">
         <span className="flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-tertiary" />
-          AES-256-GCM Vault
+          Bóveda AES-256-GCM
         </span>
         <span>•</span>
-        <span>PBKDF2-HMAC-SHA256 (600k iter)</span>
+        <span>PBKDF2-HMAC-SHA256 (600.000 iteraciones)</span>
         <span>•</span>
         <span>API Oficial Binance P2P</span>
       </footer>

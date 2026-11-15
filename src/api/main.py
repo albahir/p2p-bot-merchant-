@@ -7,6 +7,8 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config.settings import Settings
 from src.api.routes import accounting, auth, bot, fiscal, orders, spreads, users, websockets
@@ -31,6 +33,11 @@ async def lifespan(app: FastAPI):
         admin_tg = settings.telegram_allowed_users[0] if settings.telegram_allowed_users else None
         auth_svc.ensure_default_admin(admin_telegram_id=admin_tg)
         seed_env_operators(db, settings)
+
+        # Garantizar que la tasa oficial BCV del día hábil esté persistida en `bcv_rate_history` al arrancar
+        from src.reporting.bcv_history_service import BCVHistoryService
+
+        BCVHistoryService(db_session=db).get_or_fetch_current_rates()
     except (RuntimeError, ValueError, KeyError, OSError) as err:
         logger.warning("Aviso durante la inicialización del administrador por defecto: %s", err)
     finally:
@@ -39,6 +46,32 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Deteniendo P2P Merchant API.")
+
+
+class SecurityHeadersMiddleware:
+    """Middleware ASGI puro que inyecta cabeceras defensivas OWASP sin depender de BaseHTTPMiddleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["X-Frame-Options"] = "DENY"
+                headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+                if path.startswith("/api/"):
+                    headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
 
 
 def create_app(skip_lifespan: bool = False, settings: Settings | None = None) -> FastAPI:
@@ -52,12 +85,18 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
             JWT_SECRET_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
 
+    is_prod = app_settings.ENVIRONMENT.strip().lower() == "production"
     app = FastAPI(
         title="P2P Bot Merchant API",
         description="API REST y WebSockets para el Panel Multi-Usuario de Arbitraje P2P y Gestión Fiscal.",
         version="1.0.0",
         lifespan=None if skip_lifespan else lifespan,
+        docs_url=None if is_prod else "/docs",
+        redoc_url=None if is_prod else "/redoc",
+        openapi_url=None if is_prod else "/openapi.json",
     )
+
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Configuración de CORS para Next.js (Local, Vercel y Cloudflare Tunnel)
     origins = app_settings.cors_origins_list

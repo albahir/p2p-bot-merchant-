@@ -279,5 +279,81 @@ def test_fetch_criptoya_rate_mock(monkeypatch):
     assert res["bid"] == 1011.50
 
 
+def test_resolve_binance_pay_types_whitelist():
+    """Valida que el filtro de bancos mapee únicamente a códigos oficiales permitidos de Binance P2P."""
+    assert SpreadMonitor.resolve_binance_pay_types("Todos") == []
+    assert SpreadMonitor.resolve_binance_pay_types("") == []
+    assert SpreadMonitor.resolve_binance_pay_types("Banesco") == ["Banesco"]
+    assert SpreadMonitor.resolve_binance_pay_types("Pago Móvil") == ["PagoMovil"]
+    assert "BancoDeVenezuela" in SpreadMonitor.resolve_binance_pay_types("Venezuela")
+    assert "Provincial" in SpreadMonitor.resolve_binance_pay_types("Provincial")
+    # Cualquier texto malicioso o desconocido debe ser rechazado (lista vacía segura)
+    assert SpreadMonitor.resolve_binance_pay_types("'; DROP TABLE users; --") == []
+
+
+def test_fetch_filtered_orderbook_by_price_and_bank():
+    """Valida el cálculo de Spread por Precio y libro de órdenes filtrado como en Binance P2P."""
+    from src.core.binance_mock import MockBinanceP2PClient
+
+    client = MockBinanceP2PClient()
+    monitor = SpreadMonitor()
+
+    result = monitor.fetch_filtered_orderbook(
+        amount_usdt=250.0,
+        bank="Banesco",
+        merchant_only=True,
+        rows=10,
+        client=client,
+    )
+
+    assert result["amount_usdt"] == 250.0
+    assert result["trans_amount_ves"] > 0
+    assert result["bank_filter"] == "Banesco"
+    assert result["merchant_only"] is True
+    assert isinstance(result["buy_ads"], list)
+    assert isinstance(result["sell_ads"], list)
+    assert len(result["buy_ads"]) > 0
+    assert len(result["sell_ads"]) > 0
+    assert result["best_buy_price"] > 0
+    assert result["best_sell_price"] > 0
+    assert "price_spread_ves" in result
+    assert "price_spread_pct" in result
+    assert "net_profit_ves" in result
+
+
+def test_api_get_filtered_orderbook_route_handler(monkeypatch):
+    """Valida el handler de ruta FastAPI GET /api/spreads/orderbook y su esquema Pydantic."""
+    from src.api.routes.spreads import get_filtered_orderbook
+    from src.core.binance_mock import MockBinanceP2PClient
+
+    real_monitor = SpreadMonitor()
+    mock_data = real_monitor.fetch_filtered_orderbook(
+        amount_usdt=500.0,
+        bank="Pago Móvil",
+        merchant_only=True,
+        rows=5,
+        client=MockBinanceP2PClient(),
+    )
+
+    monkeypatch.setattr(SpreadMonitor, "fetch_filtered_orderbook", lambda self, **kwargs: mock_data)
+
+    resp = get_filtered_orderbook(
+        amount_usdt=500.0,
+        amount_ves=None,
+        bank="Pago Móvil",
+        merchant_only=True,
+        rows=5,
+    )
+    assert resp.amount_usdt == 500.0
+    assert resp.bank_filter == "Pago Móvil"
+    assert resp.merchant_only is True
+    assert len(resp.buy_ads) > 0
+    assert len(resp.sell_ads) > 0
+    assert resp.best_buy_price > 0
+    assert resp.best_sell_price > 0
+
+
+
+
 
 

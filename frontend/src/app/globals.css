@@ -66,3 +66,15 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #2b3545;
 }
+
+/* Eliminar spinners (flechas arriba/abajo) en cualquier input numérico */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}

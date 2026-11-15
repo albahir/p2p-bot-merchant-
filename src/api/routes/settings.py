@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import Settings
-from src.api.deps import get_db, get_settings, require_admin, require_authenticated
+from src.api.deps import get_db, get_settings, require_authenticated, require_trader
 from src.api.schemas.settings import (
     BinanceStatusResponse,
     GoogleSheetsConfigResponse,
@@ -36,18 +36,31 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}••••{key[-4:]}"
 
 
+def _user_binance_key_names(user_id: int | None) -> tuple[str, str, str]:
+    """Retorna los identificadores de secretos de Binance aislados por usuario."""
+    if user_id is not None:
+        return (
+            f"user_{user_id}:binance_api_key",
+            f"user_{user_id}:binance_private_key",
+            f"user_{user_id}:binance_key_type",
+        )
+    return ("binance_api_key", "binance_private_key", "binance_key_type")
+
+
 @router.get("/binance", response_model=BinanceStatusResponse)
 def get_binance_status(
-    _current_user: Annotated[User, Depends(require_authenticated)],
+    _current_user: Annotated[User, Depends(require_trader)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> BinanceStatusResponse:
-    """Consulta el estado de las credenciales de Binance API sin exponer texto plano."""
+    """Consulta el estado de las credenciales personales de Binance API del usuario sin exponer texto plano."""
     factory = sessionmaker(bind=db.get_bind())
     km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+    uid = int(_current_user.id) if _current_user and _current_user.id is not None else None
+    k_api, _, k_type = _user_binance_key_names(uid)
     try:
-        api_key = km.get_secret("binance_api_key")
-        key_type = km.get_secret("binance_key_type")
+        api_key = km.get_secret(k_api)
+        key_type = km.get_secret(k_type)
     except (KeyError, RuntimeError):
         api_key = ""
         key_type = "HMAC"
@@ -66,9 +79,9 @@ def get_binance_status(
         max_weight=5000,
         permissions=["Lectura", "P2P Trading"] if is_configured else [],
         message=(
-            "Credenciales de Binance configuradas y cifradas en reposo (AES-256-GCM)."
+            "Credenciales personales de Binance configuradas y cifradas en reposo (AES-256-GCM)."
             if is_configured
-            else "No se han suministrado credenciales API de Binance todavía."
+            else "No has suministrado tus credenciales API de Binance todavía."
         ),
     )
 
@@ -77,20 +90,22 @@ def get_binance_status(
 def save_binance_keys(
     req: SaveBinanceKeysRequest,
     request: Request,
-    _current_user: Annotated[User, Depends(require_admin)],
+    _current_user: Annotated[User, Depends(require_trader)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> BinanceStatusResponse:
-    """Almacena de forma cifrada (AES-256-GCM) las credenciales de la API de Binance."""
+    """Almacena de forma cifrada (AES-256-GCM) y aislada por operador las credenciales de la API de Binance."""
     operator_username = str(_current_user.username)
+    uid = int(_current_user.id) if _current_user and _current_user.id is not None else None
+    k_api, k_priv, k_type = _user_binance_key_names(uid)
     client_ip = request.client.host if request.client else "127.0.0.1"
     factory = sessionmaker(bind=db.get_bind())
     km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
 
     try:
-        km.store_secret("binance_api_key", req.api_key.strip(), ip_address=client_ip)
-        km.store_secret("binance_private_key", req.secret_key.strip(), ip_address=client_ip)
-        km.store_secret("binance_key_type", req.key_type, ip_address=client_ip)
+        km.store_secret(k_api, req.api_key.strip(), ip_address=client_ip)
+        km.store_secret(k_priv, req.secret_key.strip(), ip_address=client_ip)
+        km.store_secret(k_type, req.key_type, ip_address=client_ip)
     except (RuntimeError, ValueError) as err:
         logger.error("Error al cifrar credenciales de Binance: %s", err)
         raise HTTPException(
@@ -99,7 +114,7 @@ def save_binance_keys(
         ) from err
 
     masked = _mask_key(req.api_key.strip())
-    logger.info("Credenciales de Binance actualizadas de forma segura por usuario '%s'", operator_username)
+    logger.info("Credenciales personales de Binance actualizadas por usuario '%s'", operator_username)
 
     return BinanceStatusResponse(
         is_configured=True,
@@ -111,7 +126,7 @@ def save_binance_keys(
         used_weight=0,
         max_weight=5000,
         permissions=["Lectura", "P2P Trading"],
-        message="Credenciales de Binance cifradas y almacenadas exitosamente con AES-256-GCM.",
+        message="Tus credenciales personales de Binance fueron cifradas y almacenadas con AES-256-GCM.",
     )
 
 
@@ -121,11 +136,13 @@ def verify_binance_connection(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> VerifyBinanceResponse:
-    """Realiza un diagnóstico en caliente: ping, deriva horaria (clock drift) y límite de API weight."""
+    """Realiza un diagnóstico en caliente de la API personal del usuario: ping, deriva horaria y API weight."""
     factory = sessionmaker(bind=db.get_bind())
     km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+    uid = int(_current_user.id) if _current_user and _current_user.id is not None else None
+    k_api, _, _ = _user_binance_key_names(uid)
     try:
-        api_key = km.get_secret("binance_api_key")
+        api_key = km.get_secret(k_api)
     except (KeyError, RuntimeError):
         api_key = ""
 
@@ -203,6 +220,7 @@ def verify_binance_connection(
             message="Tiempo de espera agotado al conectar con Binance API (Timeout de 6s).",
         )
     except (httpx.RequestError, ValueError, OSError) as exc:
+        logger.warning("Error verificando conexión con Binance: %s", exc)
         return VerifyBinanceResponse(
             success=False,
             is_connected=False,
@@ -212,7 +230,7 @@ def verify_binance_connection(
             max_weight=5000,
             is_weight_safe=True,
             server_time_utc=None,
-            message=f"Error al verificar conexión con Binance: {exc}",
+            message="Error de red al verificar conexión con la API oficial de Binance.",
         )
 
 
@@ -230,16 +248,16 @@ def _extract_sheet_id(raw_input: str | None) -> str | None:
 
 @router.get("/sheets", response_model=GoogleSheetsConfigResponse)
 def get_user_sheets_config(
-    current_user: Annotated[User, Depends(require_authenticated)],
+    current_user: Annotated[User, Depends(require_trader)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> GoogleSheetsConfigResponse:
-    """Retorna la configuración de Google Sheets personal del usuario autenticado."""
+    """Retorna la configuración de Google Sheets personal del usuario autenticado (sin heredar hojas globales)."""
     exporter = SheetsExporter(
         credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
         credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
     )
-    raw_sheet_id = current_user.google_sheet_id or settings.GOOGLE_SHEET_ID
-    user_sheet_id = str(raw_sheet_id) if raw_sheet_id else None
+    raw_sheet_id = current_user.google_sheet_id
+    user_sheet_id = str(raw_sheet_id).strip() if raw_sheet_id else None
     is_connected = bool(user_sheet_id)
     sheet_url = SheetsExporter.get_sheet_url(user_sheet_id) if user_sheet_id else None
     auth_type_str = str(current_user.google_auth_type or "SERVICE_ACCOUNT")
@@ -261,7 +279,7 @@ def get_user_sheets_config(
 @router.post("/sheets", response_model=GoogleSheetsConfigResponse)
 def update_user_sheets_config(
     payload: UpdateGoogleSheetsConfigRequest,
-    current_user: Annotated[User, Depends(require_authenticated)],
+    current_user: Annotated[User, Depends(require_trader)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> GoogleSheetsConfigResponse:
@@ -291,16 +309,16 @@ def update_user_sheets_config(
 
 @router.post("/sheets/sync", response_model=GoogleSheetsSyncResponse)
 def sync_user_sheets_now(
-    current_user: Annotated[User, Depends(require_authenticated)],
+    current_user: Annotated[User, Depends(require_trader)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> GoogleSheetsSyncResponse:
-    """Dispara en vivo la exportación del historial fiscal y contable hacia Google Sheets."""
+    """Dispara en vivo la exportación del historial fiscal y contable hacia la hoja personal de Google Sheets."""
     from src.data.repositories import JournalEntryRepository, OrderRepository
     from src.reporting.accounting_engine import AccountingEngine
     from src.reporting.tax_engine import FIFOCostMethod
 
-    sheet_id = str(current_user.google_sheet_id or settings.GOOGLE_SHEET_ID or "").strip()
+    sheet_id = str(current_user.google_sheet_id or "").strip()
     exporter = SheetsExporter(
         credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
         credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
@@ -312,19 +330,20 @@ def sync_user_sheets_now(
             google_sheet_id=None,
             google_sheet_url=None,
             service_account_email=exporter.client_email,
-            message="No hay ningún Google Sheet ID vinculado. Ingresa el enlace o ID primero.",
+            message="No hay ningún Google Sheet ID personal vinculado. Ingresa el enlace o ID primero.",
         )
 
-    order_repo = OrderRepository(db)
-    completed_orders = order_repo.list_completed()
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    order_repo = OrderRepository(db, user_id=uid)
+    completed_orders = order_repo.list_completed(user_id=uid)
     trade_results = FIFOCostMethod().process_orders(completed_orders)
 
     ok_fiscal = exporter.export(sheet_id, trade_results)
 
     now = datetime.now(UTC)
-    journal_repo = JournalEntryRepository(db)
-    journal_entries = journal_repo.list_entries()
-    acc_engine = AccountingEngine(db=db)
+    journal_repo = JournalEntryRepository(db, user_id=uid)
+    journal_entries = journal_repo.list_entries(user_id=uid)
+    acc_engine = AccountingEngine(db=db, user_id=uid)
     ledger_summaries = acc_engine.get_monthly_ledger_report(year=now.year, month=now.month)
     ok_acc = exporter.export_accounting(sheet_id, journal_entries, ledger_summaries) if ok_fiscal else False
 
@@ -362,13 +381,13 @@ def _mask_bot_token(token: str | None) -> str:
 
 @router.get("/telegram", response_model=TelegramStatusResponse)
 def get_telegram_status(
-    current_user: Annotated[User, Depends(require_authenticated)],
+    current_user: Annotated[User, Depends(require_trader)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> TelegramStatusResponse:
-    """Retorna el estado sanitizado del bot de Telegram sin exponer jamás el token real."""
+    """Retorna el estado sanitizado del bot de Telegram sin exponer jamás el token real ni Chat IDs ajenos."""
     raw_token = (settings.TELEGRAM_BOT_TOKEN or "").strip()
     is_configured = bool(raw_token and ":" in raw_token)
-    linked_chat = str(current_user.telegram_id or settings.TELEGRAM_ALERT_CHAT_ID or "").strip() or None
+    linked_chat = str(current_user.telegram_id or "").strip() or None
 
     return TelegramStatusResponse(
         is_configured=is_configured,
@@ -387,11 +406,11 @@ def get_telegram_status(
 
 @router.post("/telegram/test")
 def send_telegram_test_alert(
-    current_user: Annotated[User, Depends(require_authenticated)],
-    settings: Annotated[Settings, Depends(get_settings)],
+    current_user: Annotated[User, Depends(require_trader)],
+    _settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, str | bool]:
-    """Despacha una alerta de prueba sanitizada al Chat ID vinculado del operador."""
-    target_chat = str(current_user.telegram_id or settings.TELEGRAM_ALERT_CHAT_ID or "").strip()
+    """Despacha una alerta de prueba sanitizada exclusivamente al Chat ID personal del operador."""
+    target_chat = str(current_user.telegram_id or "").strip()
     if not target_chat:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -15,4 +15,10 @@ Garantizar la impenetrabilidad del bot, la protección de fondos, la estricta cu
 - **Ejecución del Skill `security-review`**:
   - Ejecutar activamente el skill `.agents/skills/security-review` (SAST con Semgrep, escaneo de secretos en git history con Gitleaks/TruffleHog, análisis de dependencias SCA con Trivy/OSV-Scanner).
   - Activar auditorías preventivas siempre que se modifiquen endpoints de la API, flujos de autenticación/JWT, variables de entorno, Dockerfile o previo a despliegues en producción.
+- **Auditoría y Pruebas Criptográficas de JWT (`jwt-decode`, `jwt-encode`, `jwt-validate`)**:
+  - Integrar y ejecutar las habilidades oficiales de `jsonwebtoken/jwt-skills` instaladas en `.agents/skills/jwt-decode`, `.agents/skills/jwt-encode` y `.agents/skills/jwt-validate`:
+    - **`jwt-decode`**: Decodificar encabezados, payloads y tokens anidados (`cty: "JWT"`), auditar tiempos (`exp`, `nbf`, `iat`) y detectar vulnerabilidades críticas como `alg: none` (CVE-2015-9235), exposición de secretos/PII en claims, ausencia de `exp` e inyección de encabezados `jku`, `jwk` o `x5u`.
+    - **`jwt-encode`**: Generar tokens firmados de prueba para vectores de auditoría en `HS256` (HMAC), `RS256` (RSA) y `ES256` (ECDSA) inyectando secretos únicamente por variables de entorno.
+    - **`jwt-validate`**: Verificar estructura RFC 7519, vigencia de claims con tolerancia de *clock skew* (60s), validación de firmas contra claves simétricas, llaves PEM o endpoints JWKS, y bloqueo estricto de ataques de confusión de algoritmo (`RS256` → `HS256`).
+
 

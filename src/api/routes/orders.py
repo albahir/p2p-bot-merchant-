@@ -30,8 +30,9 @@ def list_orders(
     order_status: str | None = Query(default=None),
     search: str | None = Query(default=None, description="Búsqueda por número de orden o contraparte"),
 ) -> OrderListResponse:
-    """Retorna el listado paginado de órdenes registradas en el sistema."""
-    repo = OrderRepository(db)
+    """Retorna el listado paginado de órdenes registradas por el operador autenticado."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    repo = OrderRepository(db, user_id=uid)
     skip = (page - 1) * page_size
     total, items = repo.list_paginated(
         skip=skip,
@@ -39,6 +40,7 @@ def list_orders(
         trade_type=trade_type,
         order_status=order_status,
         search=search,
+        user_id=uid,
     )
 
     return OrderListResponse(
@@ -56,17 +58,23 @@ def sync_binance_orders(
     current_user: Annotated[User, Depends(require_trader)],
 ) -> SyncOrdersResponse:
     """Extrae el historial oficial de órdenes de Binance P2P vía API oficial."""
+    from sqlalchemy.orm import sessionmaker
+
     from config.settings import Settings
+    from src.api.routes.settings import _user_binance_key_names
     from src.core.binance_client import BinanceP2PClient
     from src.security.api_key_manager import ApiKeyManager
 
     settings = Settings()
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    k_api, k_priv, _ = _user_binance_key_names(uid)
     api_key = ""
     private_key = ""
     try:
-        km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY)
-        api_key = km.get_secret("binance_api_key") or ""
-        private_key = km.get_secret("binance_private_key") or ""
+        factory = sessionmaker(bind=db.get_bind())
+        km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+        api_key = km.get_secret(k_api) or ""
+        private_key = km.get_secret(k_priv) or ""
     except (ValueError, KeyError, OSError, RuntimeError, TypeError):
         pass
 
@@ -77,6 +85,7 @@ def sync_binance_orders(
         db=db,
         days=req.days,
         trade_type=req.trade_type or "ALL",
+        user_id=uid,
     )
 
     if not result.success:
@@ -112,11 +121,13 @@ async def upload_orders_file(
             detail="El archivo subido está vacío.",
         )
 
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
     syncer = BinanceHistorySyncer()
     result = syncer.import_orders_file(
         file_bytes=content,
         filename=file.filename or "orders.xlsx",
         db=db,
+        user_id=uid,
     )
 
     if not result.success:
@@ -148,9 +159,10 @@ def export_orders(
     current_user: Annotated[User, Depends(require_authenticated)],
     format: str = Query(default="xlsx", pattern="^(xlsx|csv_semicolon|csv_comma)$"),
 ) -> Response:
-    """Genera y descarga el archivo con el historial de órdenes en Excel o CSV."""
-    repo = OrderRepository(db)
-    orders = repo.list_completed()
+    """Genera y descarga el archivo con el historial de órdenes del operador autenticado en Excel o CSV."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    repo = OrderRepository(db, user_id=uid)
+    orders = repo.list_completed(user_id=uid)
 
     if format == "xlsx":
         file_bytes = BinanceHistorySyncer.generate_orders_excel(orders)

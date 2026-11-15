@@ -31,7 +31,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   {
     href: "/",
-    label: "Matriz de Spreads & Bancos",
+    label: "Matriz de Márgenes y Bancos",
     shortLabel: "Matriz",
     icon: "grid_view",
   },
@@ -43,28 +43,28 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     href: "/orders",
-    label: "Ganancias & Órdenes",
+    label: "Ganancias y Órdenes",
     shortLabel: "Órdenes",
     icon: "receipt_long",
     requiresTrader: true,
   },
   {
     href: "/accounting",
-    label: "Contabilidad & Diario",
+    label: "Contabilidad y Diario",
     shortLabel: "Contabilidad",
     icon: "menu_book",
     requiresTrader: true,
   },
   {
     href: "/sheets",
-    label: "Sincronización Sheets",
-    shortLabel: "Sheets",
+    label: "Hoja de Cálculo",
+    shortLabel: "Hoja",
     icon: "sync_alt",
     requiresTrader: true,
   },
   {
     href: "/settings",
-    label: "Configuración API & Seg",
+    label: "Configuración y Seguridad",
     shortLabel: "Seguridad",
     icon: "tune",
     requiresTrader: true,
@@ -101,11 +101,16 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
       // Silencioso en modo desconectado
     }
 
-    try {
-      const status = await getBotStatus();
-      setBotStatus(status);
-    } catch {
-      // Silencioso si backend aún no responde
+    if (currentUser) {
+      try {
+        const status = await getBotStatus();
+        setBotStatus(status);
+      } catch {
+        // Silencioso si la sesión expiró o el backend aún no responde
+        setUser(getCurrentUser());
+      }
+    } else {
+      setBotStatus(null);
     }
 
     if (currentUser && (currentUser.role === "ADMIN" || currentUser.role === "TRADER")) {
@@ -185,7 +190,11 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
       : "bg-slate-800 text-slate-400 border-slate-700";
 
   return (
-    <div className="min-h-screen bg-background text-on-surface flex flex-col lg:flex-row">
+    <div
+      className={`min-h-screen bg-background text-on-surface flex flex-col lg:flex-row ${
+        isPaused ? "border-t-4 border-error" : ""
+      }`}
+    >
       {/* Overlay móvil */}
       {mobileMenuOpen && (
         <div
@@ -209,10 +218,10 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               </div>
               <div>
                 <div className="text-sm font-bold tracking-tight text-white leading-none">
-                  P2P Merchant OS
+                  Sistema Comerciante P2P
                 </div>
                 <div className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mt-1">
-                  Binance Arbitrage
+                  Arbitraje Binance
                 </div>
               </div>
             </Link>
@@ -283,15 +292,15 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               <span className="material-symbols-outlined text-[15px] text-tertiary">
                 verified_user
               </span>
-              <span className="text-[10px] font-mono text-slate-400">
-                Fail-Closed • AES-256
+              <span className="text-[10px] font-mono text-slate-300">
+                Parada Segura • AES-256
               </span>
             </div>
             <span
               className={`w-2 h-2 rounded-full ${
                 wsConnected ? "bg-tertiary animate-pulse" : "bg-primary-container"
               }`}
-              title={wsConnected ? "WebSocket en vivo" : "Polling REST activo"}
+              title={wsConnected ? "Conexión en vivo activa" : "Consulta periódica activa"}
             />
           </div>
 
@@ -308,7 +317,11 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                   <span
                     className={`inline-block mt-0.5 px-1.5 py-0.2 text-[9px] font-mono font-bold uppercase rounded border ${roleBadgeStyle}`}
                   >
-                    {user.role}
+                    {user.role === "ADMIN"
+                      ? "ADMINISTRADOR"
+                      : user.role === "TRADER"
+                      ? "COMERCIANTE"
+                      : "INVITADO"}
                   </span>
                 </div>
               </div>
@@ -342,8 +355,39 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
 
       {/* Contenedor Principal */}
       <div className="flex-1 flex flex-col lg:pl-64 min-w-0">
+        {/* Indicador Global Constante de Parada de Seguridad en todas las pestañas */}
+        {isPaused && (
+          <div
+            role="alert"
+            className="sticky top-0 z-40 w-full bg-error/20 border-b border-error/50 backdrop-blur-md px-4 lg:px-6 py-2 flex items-center justify-between gap-3 text-xs text-error"
+          >
+            <div className="flex items-center gap-2 font-mono font-bold">
+              <span className="material-symbols-outlined text-[18px] animate-pulse">
+                warning
+              </span>
+              <span>
+                PARADA DE EMERGENCIA ACTIVA — El sistema se encuentra en pausa preventiva de seguridad.
+              </span>
+            </div>
+            {user?.role === "ADMIN" && (
+              <button
+                type="button"
+                onClick={handleToggleBot}
+                disabled={togglingBot}
+                className="px-2.5 py-1 rounded bg-error text-white font-mono text-[11px] font-bold hover:brightness-110 transition-all shrink-0 cursor-pointer"
+              >
+                Reanudar Sistema
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Topbar de Telemetría en Tiempo Real */}
-        <header className="sticky top-0 z-30 h-16 bg-surface/95 backdrop-blur-md border-b border-[#1e2430] px-4 lg:px-6 flex items-center justify-between gap-3">
+        <header
+          className={`sticky ${
+            isPaused ? "top-9" : "top-0"
+          } z-30 h-16 bg-surface/95 backdrop-blur-md border-b border-[#1e2430] px-4 lg:px-6 flex items-center justify-between gap-3`}
+        >
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
@@ -380,11 +424,11 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
 
               <div
                 className={`hidden md:flex px-2.5 py-1 rounded-md border items-center gap-1.5 shrink-0 ${weightColor}`}
-                title="Consumo x-mbx-used-weight de Binance API (Pausa automática > 5000)"
+                title="Consumo de cuota de API Binance (Pausa automática > 5000)"
               >
                 <span className="material-symbols-outlined text-[14px]">speed</span>
                 <span className="text-[11px] font-mono tabular-nums">
-                  Weight: {usedWeight}/{maxWeight}
+                  Peso API: {usedWeight}/{maxWeight}
                 </span>
               </div>
             </div>
@@ -400,7 +444,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 user?.role === "ADMIN"
                   ? isPaused
                     ? "Clic para reanudar motor operativo"
-                    : "Clic para activar pausa Fail-Closed"
+                    : "Clic para activar pausa de seguridad"
                   : "Estado del motor P2P"
               }
               className={`px-2.5 py-1 rounded-md border text-[11px] font-mono font-semibold flex items-center gap-1.5 transition-colors ${
@@ -415,7 +459,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 }`}
               />
               <span className="hidden sm:inline">
-                {isPaused ? "PAUSA FAIL-CLOSED" : "MOTOR ACTIVO"}
+                {isPaused ? "PAUSA DE SEGURIDAD" : "MOTOR ACTIVO"}
               </span>
             </button>
 
@@ -472,26 +516,47 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
         {/* Área de Contenido Denso */}
         <main className="flex-1 px-4 lg:px-6 py-4 pb-20 lg:pb-8">{children}</main>
 
-        {/* Navegación Inferior Móvil / Telegram Mini App */}
-        <nav className="lg:hidden fixed bottom-0 inset-x-0 z-30 h-14 bg-surface/95 backdrop-blur-md border-t border-[#1e2430] grid grid-cols-6">
-          {NAV_ITEMS.map((item) => {
-            const isActive =
-              item.href === "/"
-                ? pathname === "/"
-                : pathname === item.href || pathname?.startsWith(`${item.href}/`);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`flex flex-col items-center justify-center gap-0.5 text-[9px] font-medium ${
-                  isActive ? "text-primary" : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <span className="material-symbols-outlined text-[18px]">{item.icon}</span>
-                <span className="truncate max-w-[54px]">{item.shortLabel}</span>
-              </Link>
-            );
-          })}
+        {/* Barra Táctica Móvil Simplificada (Calculadora + Confirmación de Fondos + Matriz + Menú) */}
+        <nav className="lg:hidden fixed bottom-0 inset-x-0 z-30 h-16 bg-surface/95 backdrop-blur-md border-t border-[#1e2430] grid grid-cols-4 px-2">
+          <Link
+            href="/calculator"
+            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
+              pathname?.startsWith("/calculator")
+                ? "text-primary"
+                : "text-slate-300 hover:text-white"
+            }`}
+          >
+            <span className="material-symbols-outlined text-[20px]">calculate</span>
+            <span className="truncate">Calculadora</span>
+          </Link>
+          <Link
+            href="/accounting"
+            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
+              pathname?.startsWith("/accounting")
+                ? "text-tertiary"
+                : "text-slate-300 hover:text-white"
+            }`}
+          >
+            <span className="material-symbols-outlined text-[20px]">verified</span>
+            <span className="truncate">Confirmar Pago</span>
+          </Link>
+          <Link
+            href="/"
+            className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
+              pathname === "/" ? "text-primary" : "text-slate-300 hover:text-white"
+            }`}
+          >
+            <span className="material-symbols-outlined text-[20px]">grid_view</span>
+            <span className="truncate">Matriz P2P</span>
+          </Link>
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(true)}
+            className="flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold text-slate-300 hover:text-white"
+          >
+            <span className="material-symbols-outlined text-[20px]">apps</span>
+            <span className="truncate">Módulos</span>
+          </button>
         </nav>
       </div>
     </div>

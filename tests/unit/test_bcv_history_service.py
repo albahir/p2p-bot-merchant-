@@ -92,3 +92,47 @@ def test_backfill_historical_orders():
     assert updated_count == 2
     assert orders[0].bcv_rate == 40.50
     assert orders[1].bcv_rate == 41.80
+
+
+def test_get_or_fetch_current_rates_persists_to_db_and_reuses_cache():
+    """Verifica que al consultar la tasa BCV del día se guarde en bcv_rate_history y no vuelva a raspar el portal."""
+    db = setup_in_memory_db()
+
+    class CountingLiveBCV:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_full_rates(self):
+            self.calls += 1
+            return {
+                "usd": 914.02,
+                "eur": 1019.56,
+                "fecha_valor": "Viernes, 14 Noviembre 2026",
+            }
+
+        def fetch_current_rate(self):
+            self.calls += 1
+            return 914.02
+
+    live_mock = CountingLiveBCV()
+    service = BCVHistoryService(db_session=db, bcv_live_service=live_mock)  # type: ignore[arg-type]
+
+    # 1ra llamada: no existe en BD -> consulta en vivo y guarda en bcv_rate_history
+    first = service.get_or_fetch_current_rates()
+    assert first["usd"] == 914.02
+    assert first["eur"] == 1019.56
+    assert live_mock.calls == 1
+
+    # Verificar que quedó guardado en la tabla bcv_rate_history
+    repo = BCVHistoryRepository(db)
+    latest = repo.get_latest_rate()
+    assert latest is not None
+    assert float(latest.usd_rate) == 914.02
+    assert float(latest.eur_rate) == 1019.56
+
+    # 2da llamada: ya existe en bcv_rate_history -> se carga de BD en 0ms sin volver a llamar a live_mock
+    second = service.get_or_fetch_current_rates()
+    assert second["usd"] == 914.02
+    assert second["eur"] == 1019.56
+    assert live_mock.calls == 1
+

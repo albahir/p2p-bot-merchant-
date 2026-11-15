@@ -1,7 +1,7 @@
 """Repositorios de datos siguiendo el patrón Repository para acceso seguro y desacoplado."""
 
 from datetime import date, datetime
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
@@ -19,23 +19,53 @@ from src.data.models import (
 )
 
 
+def _apply_user_scope(db: Session, query: Any, model_cls: Any, user_id: int | None) -> Any:
+    """Aisla estrictamente las consultas por propietario confidencial (user_id).
+    Un usuario (incluso ADMIN) jamás puede leer registros cuyo user_id pertenezca a otro operador.
+    """
+    if user_id is None:
+        return query
+    has_other_user_rows = (
+        db.query(model_cls.id)
+        .filter(model_cls.user_id.is_not(None), model_cls.user_id != user_id)
+        .first()
+        is not None
+    )
+    if has_other_user_rows:
+        return query.filter(model_cls.user_id == user_id)
+    return query.filter((model_cls.user_id == user_id) | (model_cls.user_id.is_(None)))
+
+
 class OrderRepository:
     """Acceso a datos de órdenes para ingesta, motor fiscal y dashboard."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: int | None = None):
         self.db = db
+        self.user_id = user_id
 
-    def get_by_order_number(self, order_number: str) -> Order | None:
-        return self.db.query(Order).filter(Order.order_number == order_number).first()
+    def get_by_order_number(self, order_number: str, user_id: int | None = None) -> Order | None:
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(Order).filter(Order.order_number == order_number)
+        q = _apply_user_scope(self.db, q, Order, uid)
+        return q.first()
 
     def create(self, order: Order) -> Order:
+        if order.user_id is None and self.user_id is not None:
+            order.user_id = self.user_id  # type: ignore[assignment]
         self.db.add(order)
         self.db.commit()
         self.db.refresh(order)
         return order
 
-    def list_completed(self, start_date: datetime | None = None, end_date: datetime | None = None) -> list[Order]:
+    def list_completed(
+        self,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        user_id: int | None = None,
+    ) -> list[Order]:
+        uid = user_id if user_id is not None else self.user_id
         query = self.db.query(Order).filter(Order.order_status == "COMPLETED")
+        query = _apply_user_scope(self.db, query, Order, uid)
         if start_date:
             query = query.filter(Order.created_at >= start_date)  # type: ignore[arg-type]
         if end_date:
@@ -51,8 +81,10 @@ class OrderRepository:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         search: str | None = None,
+        user_id: int | None = None,
     ) -> tuple[int, list[Order]]:
-        query = self.db.query(Order)
+        uid = user_id if user_id is not None else self.user_id
+        query = _apply_user_scope(self.db, self.db.query(Order), Order, uid)
         if trade_type:
             query = query.filter(Order.trade_type == trade_type.upper())
         if order_status:
@@ -111,17 +143,23 @@ class SecurityRepository:
 class WalletMovementRepository:
     """Acceso a movimientos de billetera (Depósitos y Retiros on-chain)."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: int | None = None):
         self.db = db
+        self.user_id = user_id
 
     def create(self, movement: WalletMovement) -> WalletMovement:
+        if movement.user_id is None and self.user_id is not None:
+            movement.user_id = self.user_id  # type: ignore[assignment]
         self.db.add(movement)
         self.db.commit()
         self.db.refresh(movement)
         return movement
 
-    def get_by_txid(self, txid: str) -> WalletMovement | None:
-        return self.db.query(WalletMovement).filter(WalletMovement.txid == txid).first()
+    def get_by_txid(self, txid: str, user_id: int | None = None) -> WalletMovement | None:
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(WalletMovement).filter(WalletMovement.txid == txid)
+        q = _apply_user_scope(self.db, q, WalletMovement, uid)
+        return q.first()
 
     def list_by_period(
         self,
@@ -129,8 +167,10 @@ class WalletMovementRepository:
         end_date: datetime | None = None,
         asset: str | None = None,
         movement_type: str | None = None,
+        user_id: int | None = None,
     ) -> list[WalletMovement]:
-        query = self.db.query(WalletMovement)
+        uid = user_id if user_id is not None else self.user_id
+        query = _apply_user_scope(self.db, self.db.query(WalletMovement), WalletMovement, uid)
         if start_date:
             query = query.filter(WalletMovement.timestamp >= start_date)  # type: ignore[arg-type]
         if end_date:
@@ -147,8 +187,11 @@ class WalletMovementRepository:
         end_date: datetime | None = None,
         asset: str | None = None,
         movement_type: str | None = None,
+        user_id: int | None = None,
     ) -> list[WalletMovement]:
+        uid = user_id if user_id is not None else self.user_id
         query = self.db.query(WalletMovement).filter(WalletMovement.status == "COMPLETED")
+        query = _apply_user_scope(self.db, query, WalletMovement, uid)
         if start_date:
             query = query.filter(WalletMovement.timestamp >= start_date)  # type: ignore[arg-type]
         if end_date:
@@ -163,28 +206,32 @@ class WalletMovementRepository:
 class BankVoucherRepository:
     """Acceso a comprobantes bancarios en bolívares (Pago Móvil / Transferencias)."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: int | None = None):
         self.db = db
+        self.user_id = user_id
 
     def create(self, voucher: BankVoucher) -> BankVoucher:
+        if voucher.user_id is None and self.user_id is not None:
+            voucher.user_id = self.user_id  # type: ignore[assignment]
         self.db.add(voucher)
         self.db.commit()
         self.db.refresh(voucher)
         return voucher
 
-    def get_by_reference(self, reference_number: str) -> BankVoucher | None:
-        return self.db.query(BankVoucher).filter(BankVoucher.reference_number == reference_number).first()
+    def get_by_reference(self, reference_number: str, user_id: int | None = None) -> BankVoucher | None:
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(BankVoucher).filter(BankVoucher.reference_number == reference_number)
+        q = _apply_user_scope(self.db, q, BankVoucher, uid)
+        return q.first()
 
-    def list_unmatched(self) -> list[BankVoucher]:
-        return (
-            self.db.query(BankVoucher)
-            .filter(BankVoucher.verification_status == "UNMATCHED")
-            .order_by(BankVoucher.created_at.desc())
-            .all()
-        )
+    def list_unmatched(self, user_id: int | None = None) -> list[BankVoucher]:
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(BankVoucher).filter(BankVoucher.verification_status == "UNMATCHED")
+        q = _apply_user_scope(self.db, q, BankVoucher, uid)
+        return q.order_by(BankVoucher.created_at.desc()).all()
 
     def match_with_order(self, voucher_id: int, order_number: str) -> BankVoucher | None:
-        voucher = self.db.query(BankVoucher).filter(BankVoucher.id == voucher_id).first()
+        voucher = self.get_by_id(voucher_id)
         if voucher:
             voucher.associated_order_number = order_number  # type: ignore[assignment]
             voucher.verification_status = "MATCHED"  # type: ignore[assignment]
@@ -193,47 +240,53 @@ class BankVoucherRepository:
             return voucher
         return None
 
-    def get_by_id(self, voucher_id: int) -> BankVoucher | None:
-        return self.db.query(BankVoucher).filter(BankVoucher.id == voucher_id).first()
+    def get_by_id(self, voucher_id: int, user_id: int | None = None) -> BankVoucher | None:
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(BankVoucher).filter(BankVoucher.id == voucher_id)
+        q = _apply_user_scope(self.db, q, BankVoucher, uid)
+        return q.first()
 
     def update(self, voucher: BankVoucher) -> BankVoucher:
         self.db.commit()
         self.db.refresh(voucher)
         return voucher
 
-    def list_all(self, limit: int = 500) -> list[BankVoucher]:
-        return (
-            self.db.query(BankVoucher)
-            .order_by(BankVoucher.created_at.desc())
-            .limit(limit)
-            .all()
-        )
+    def list_all(self, limit: int = 500, user_id: int | None = None) -> list[BankVoucher]:
+        uid = user_id if user_id is not None else self.user_id
+        q = _apply_user_scope(self.db, self.db.query(BankVoucher), BankVoucher, uid)
+        return q.order_by(BankVoucher.created_at.desc()).limit(limit).all()
 
 
 class FiscalSnapshotRepository:
     """Gestor de snapshots mensuales y reconciliación contable de 6 piezas."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: int | None = None):
         self.db = db
+        self.user_id = user_id
 
-    def get_by_period(self, period: str) -> FiscalPeriodSnapshot | None:
-        return self.db.query(FiscalPeriodSnapshot).filter(FiscalPeriodSnapshot.period == period).first()
+    def get_by_period(self, period: str, user_id: int | None = None) -> FiscalPeriodSnapshot | None:
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(FiscalPeriodSnapshot).filter(FiscalPeriodSnapshot.period == period)
+        q = _apply_user_scope(self.db, q, FiscalPeriodSnapshot, uid)
+        return q.first()
 
-    def get_latest_snapshot(self) -> FiscalPeriodSnapshot | None:
-        return (
-            self.db.query(FiscalPeriodSnapshot)
-            .order_by(FiscalPeriodSnapshot.period.desc())
-            .first()
-        )
+    def get_latest_snapshot(self, user_id: int | None = None) -> FiscalPeriodSnapshot | None:
+        uid = user_id if user_id is not None else self.user_id
+        q = _apply_user_scope(self.db, self.db.query(FiscalPeriodSnapshot), FiscalPeriodSnapshot, uid)
+        return q.order_by(FiscalPeriodSnapshot.period.desc()).first()
 
     def upsert_snapshot(self, snapshot: FiscalPeriodSnapshot) -> FiscalPeriodSnapshot:
-        existing = self.get_by_period(str(snapshot.period))
+        if snapshot.user_id is None and self.user_id is not None:
+            snapshot.user_id = self.user_id  # type: ignore[assignment]
+        uid = int(snapshot.user_id) if snapshot.user_id is not None else self.user_id
+        existing = self.get_by_period(str(snapshot.period), user_id=uid)
         if not existing:
             self.db.add(snapshot)
             self.db.commit()
             self.db.refresh(snapshot)
             return snapshot
 
+        existing.user_id = snapshot.user_id  # type: ignore[assignment]
         existing.initial_balance = snapshot.initial_balance  # type: ignore[assignment]
         existing.inflows_deposits = snapshot.inflows_deposits  # type: ignore[assignment]
         existing.inflows_p2p_buys = snapshot.inflows_p2p_buys  # type: ignore[assignment]
@@ -450,37 +503,40 @@ class BCVHistoryRepository:
 class JournalEntryRepository:
     """Gestor de asientos contables del Libro Diario con trazabilidad y encadenamiento criptográfico."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: int | None = None):
         self.db = db
+        self.user_id = user_id
 
     def create_entry(self, entry: JournalEntry) -> JournalEntry:
         """Persiste un asiento contable en el Libro Diario."""
+        if entry.user_id is None and self.user_id is not None:
+            entry.user_id = self.user_id  # type: ignore[assignment]
         self.db.add(entry)
         self.db.commit()
         self.db.refresh(entry)
         return entry
 
-    def get_next_entry_number(self) -> int:
+    def get_next_entry_number(self, user_id: int | None = None) -> int:
         """Retorna el siguiente número consecutivo de asiento."""
-        last = self.get_last_entry()
+        last = self.get_last_entry(user_id=user_id)
         return int(last.entry_number + 1) if last else 1
 
-    def get_last_entry(self) -> JournalEntry | None:
+    def get_last_entry(self, user_id: int | None = None) -> JournalEntry | None:
         """Retorna la última línea asentada en el Libro Diario para mantener la cadena SHA-256 lineal."""
-        return (
-            self.db.query(JournalEntry)
-            .order_by(JournalEntry.entry_number.desc(), JournalEntry.id.desc())
-            .first()
-        )
+        uid = user_id if user_id is not None else self.user_id
+        q = _apply_user_scope(self.db, self.db.query(JournalEntry), JournalEntry, uid)
+        return q.order_by(JournalEntry.entry_number.desc(), JournalEntry.id.desc()).first()
 
     def list_entries(
         self,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         account_code: str | None = None,
+        user_id: int | None = None,
     ) -> list[JournalEntry]:
         """Consulta asientos del Libro Diario dentro de un rango temporal opcional."""
-        query = self.db.query(JournalEntry)
+        uid = user_id if user_id is not None else self.user_id
+        query = _apply_user_scope(self.db, self.db.query(JournalEntry), JournalEntry, uid)
         if start_date:
             query = query.filter(JournalEntry.date_time >= start_date)  # type: ignore[arg-type]
         if end_date:
@@ -489,13 +545,12 @@ class JournalEntryRepository:
             query = query.filter(JournalEntry.account_code == account_code)  # type: ignore[arg-type]
         return query.order_by(JournalEntry.entry_number.asc(), JournalEntry.id.asc()).all()
 
-    def get_by_reference(self, reference: str) -> list[JournalEntry]:
+    def get_by_reference(self, reference: str, user_id: int | None = None) -> list[JournalEntry]:
         """Busca asientos asociados a una referencia bancaria específica."""
-        return (
-            self.db.query(JournalEntry)
-            .filter(JournalEntry.reference == reference)
-            .all()
-        )
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(JournalEntry).filter(JournalEntry.reference == reference)
+        q = _apply_user_scope(self.db, q, JournalEntry, uid)
+        return q.all()
 
 
 
