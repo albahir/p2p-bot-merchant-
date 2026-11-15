@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
+import { BankAmountInput } from "@/components/bank-amount-input";
 import {
   FiscalSummary,
   JournalEntryItem,
@@ -10,6 +11,7 @@ import {
   UploadVoucherResponse,
   User,
   closeFiscalPeriod,
+  createManualVoucher,
   downloadAccountingExcel,
   downloadAccountingPdf,
   getCurrentUser,
@@ -88,6 +90,18 @@ export default function AccountingPage() {
   const [closeConfirmText, setCloseConfirmText] = useState<string>("");
   const [periodClosed, setPeriodClosed] = useState<boolean>(false);
 
+  // Flujo de Conciliación Manual Ultrarrápido (<5s con atajo Alt+N)
+  const [showManualModal, setShowManualModal] = useState<boolean>(false);
+  const [savingManual, setSavingManual] = useState<boolean>(false);
+  const [manualBank, setManualBank] = useState<string>("Banesco");
+  const [manualRef, setManualRef] = useState<string>("");
+  const [manualAmountVes, setManualAmountVes] = useState<number>(0);
+  const [manualMovementType, setManualMovementType] = useState<"DEBIT" | "CREDIT">("DEBIT");
+  const [manualPaymentMethod, setManualPaymentMethod] = useState<
+    "PAGO_MOVIL" | "TRANSFER" | "INTERBANK"
+  >("PAGO_MOVIL");
+  const [manualOrderLink, setManualOrderLink] = useState<string>("");
+
   const [feedback, setFeedback] = useState<{
     type: "success" | "error";
     text: string;
@@ -134,6 +148,65 @@ export default function AccountingPage() {
   useEffect(() => {
     loadAccountingData();
   }, [loadAccountingData]);
+
+  // Atajo de teclado global Alt+N para abrir el Asiento Manual Ultrarrápido en <5s
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.altKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        if (!periodClosed) {
+          setShowManualModal((prev) => !prev);
+        }
+      } else if (e.key === "Escape" && showManualModal) {
+        setShowManualModal(false);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [periodClosed, showManualModal]);
+
+  async function handleCreateManualVoucher(e: React.FormEvent) {
+    e.preventDefault();
+    const amountNum = Number(manualAmountVes);
+    if (!manualRef.trim() || !amountNum || amountNum <= 0) {
+      setFeedback({
+        type: "error",
+        text: "Ingresa una referencia bancaria válida y un monto mayor a 0,00 VES.",
+      });
+      return;
+    }
+
+    setFeedback(null);
+    setSavingManual(true);
+    try {
+      const res = await createManualVoucher({
+        bank_name: manualBank,
+        reference_number: manualRef.trim(),
+        amount_ves: amountNum,
+        movement_type: manualMovementType,
+        payment_method: manualPaymentMethod,
+        order_number: manualOrderLink.trim() || undefined,
+      });
+      setShowManualModal(false);
+      setManualRef("");
+      setManualAmountVes(0);
+      setManualOrderLink("");
+      setFeedback({
+        type: "success",
+        text: `Pago manual #${res.reference_number} (${res.bank_name} • Bs. ${res.amount_ves.toFixed(
+          2
+        )}) asentado (${res.verification_status}).`,
+      });
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "Error al registrar el comprobante manual.",
+      });
+    } finally {
+      setSavingManual(false);
+    }
+  }
 
   async function handleUploadReceipt(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -206,16 +279,16 @@ export default function AccountingPage() {
   if (!user || user.role === "INVITADO") {
     return (
       <AppShell
-        title="Contabilidad & Libro Diario SENIAT"
+        title="Contabilidad y Libro Diario SENIAT"
         badge="ACCESO RESTRINGIDO"
-        subtitle="Módulo contable en partida doble reservado para operadores TRADER y ADMIN."
+        subtitle="Módulo contable en partida doble reservado para operadores Comerciante y Administrador."
       >
         <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
           <span className="material-symbols-outlined text-[36px] text-primary">
             menu_book
           </span>
           <h2 className="text-base font-bold text-white">
-            Inicia sesión con rol TRADER o ADMIN
+            Inicia sesión con rol Comerciante o Administrador
           </h2>
           <p className="text-xs text-slate-400">
             Accede al Libro Diario encadenado con SHA-256, Libro Mayor mensual y conciliación OCR de recibos bancarios.
@@ -261,7 +334,7 @@ export default function AccountingPage() {
 
   return (
     <AppShell
-      title="Contabilidad, Libro Diario & Conciliación OCR"
+      title="Contabilidad, Libro Diario y Conciliación OCR"
       badge={periodClosed ? "PERÍODO CERRADO" : "PARTIDA DOBLE SHA-256"}
       subtitle="Libros contables auditables (formato SENIAT), saldos teóricos en vivo y conciliación de comprobantes bancarios."
       actions={
@@ -384,14 +457,14 @@ export default function AccountingPage() {
                 </div>
               </div>
               <div className="text-right">
-                <label className="block text-[9px] font-mono uppercase text-slate-500">
+                <label className="block text-[9px] font-mono uppercase text-slate-400">
                   Inicial VES
                 </label>
-                <input
-                  type="number"
+                <BankAmountInput
                   value={initialVes}
-                  onChange={(e) => setInitialVes(Number(e.target.value))}
-                  className="w-28 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-right text-xs font-mono text-primary tabular-nums"
+                  onChange={setInitialVes}
+                  ariaLabel="Saldo Inicial VES"
+                  className="w-32 mt-0.5 px-2.5 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-primary tabular-nums"
                 />
               </div>
             </div>
@@ -429,14 +502,14 @@ export default function AccountingPage() {
                 </div>
               </div>
               <div className="text-right">
-                <label className="block text-[9px] font-mono uppercase text-slate-500">
+                <label className="block text-[9px] font-mono uppercase text-slate-400">
                   Inicial USDT
                 </label>
-                <input
-                  type="number"
+                <BankAmountInput
                   value={initialUsdt}
-                  onChange={(e) => setInitialUsdt(Number(e.target.value))}
-                  className="w-20 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-right text-xs font-mono text-tertiary tabular-nums"
+                  onChange={setInitialUsdt}
+                  ariaLabel="Saldo Inicial USDT"
+                  className="w-24 mt-0.5 px-2.5 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-tertiary tabular-nums"
                 />
               </div>
             </div>
@@ -490,7 +563,7 @@ export default function AccountingPage() {
                 type="button"
                 onClick={() => voucherInputRef.current?.click()}
                 disabled={uploadingOcr || periodClosed}
-                className="flex-1 px-3 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap"
+                className="flex-1 px-3 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px]">
                   add_photo_alternate
@@ -500,9 +573,22 @@ export default function AccountingPage() {
 
               <button
                 type="button"
+                onClick={() => setShowManualModal(true)}
+                disabled={periodClosed}
+                title="Atajo rápido: Alt+N (Asentar pago sin mouse cuando falle el OCR)"
+                className="px-3 py-2 rounded-lg bg-surface-container-high border border-slate-700 hover:border-primary-container/60 text-xs font-mono text-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px] text-primary">
+                  keyboard
+                </span>
+                <span>Manual (Alt+N)</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={handleAutoReconcile}
                 disabled={reconciling || periodClosed}
-                className="px-3 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 whitespace-nowrap"
+                className="px-3 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px] text-secondary">
                   auto_fix_high
@@ -527,7 +613,15 @@ export default function AccountingPage() {
               <div className="font-mono text-slate-300 tabular-nums">
                 Monto: Bs. {lastVoucher.amount_ves.toFixed(2)} | Comisión Bancaria: Bs.{" "}
                 {lastVoucher.bank_fee_ves.toFixed(2)} | Estado:{" "}
-                <span className="text-primary">{lastVoucher.verification_status}</span>
+                <span className="text-primary">
+                  {lastVoucher.verification_status === "MATCHED"
+                    ? "CONCILIADO"
+                    : lastVoucher.verification_status === "UNMATCHED"
+                    ? "SIN CONCILIAR"
+                    : lastVoucher.verification_status === "VERIFIED"
+                    ? "VERIFICADO"
+                    : lastVoucher.verification_status}
+                </span>
               </div>
             </div>
 
@@ -793,13 +887,147 @@ export default function AccountingPage() {
           )}
         </section>
 
-        {/* Modal Fail-Closed de Cierre Mensual */}
+        {/* Modal de Conciliación Manual Ultrarrápida (<5s sin mouse • Atajo Alt+N) */}
+        {showManualModal && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+            <form
+              onSubmit={handleCreateManualVoucher}
+              className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-primary font-bold text-base">
+                  <span className="material-symbols-outlined">bolt</span>
+                  <span>Asiento Manual Ultrarrápido (Respaldo sin OCR)</span>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-surface-container-high text-[10px] font-mono text-slate-300">
+                  Alt+N • Intro
+                </span>
+              </div>
+              <p className="text-xs text-slate-300">
+                Registra un pago o cobro bancario en menos de 5 segundos usando solo el teclado (<kbd className="text-primary font-mono">Tab</kbd> para navegar, <kbd className="text-primary font-mono">Intro</kbd> para guardar y conciliar).
+              </p>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                    Referencia Bancaria *
+                  </label>
+                  <input
+                    type="text"
+                    autoFocus
+                    required
+                    value={manualRef}
+                    onChange={(e) => setManualRef(e.target.value)}
+                    placeholder="Ej. 00998877"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                    Monto (VES) *
+                  </label>
+                  <BankAmountInput
+                    required
+                    value={manualAmountVes}
+                    onChange={setManualAmountVes}
+                    ariaLabel="Monto en Bolívares (VES)"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-primary font-bold text-right tabular-nums"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                    Banco
+                  </label>
+                  <select
+                    value={manualBank}
+                    onChange={(e) => setManualBank(e.target.value)}
+                    className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
+                  >
+                    <option value="Banesco">Banesco</option>
+                    <option value="Banco de Venezuela">BDV</option>
+                    <option value="Mercantil">Mercantil</option>
+                    <option value="Provincial">Provincial</option>
+                    <option value="BNC">BNC</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                    Operación
+                  </label>
+                  <select
+                    value={manualMovementType}
+                    onChange={(e) =>
+                      setManualMovementType(e.target.value as "DEBIT" | "CREDIT")
+                    }
+                    className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  >
+                    <option value="DEBIT">Egreso (Compra)</option>
+                    <option value="CREDIT">Ingreso (Venta)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                    Canal
+                  </label>
+                  <select
+                    value={manualPaymentMethod}
+                    onChange={(e) =>
+                      setManualPaymentMethod(
+                        e.target.value as "PAGO_MOVIL" | "TRANSFER" | "INTERBANK"
+                      )
+                    }
+                    className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  >
+                    <option value="PAGO_MOVIL">Pago Móvil (0.3%)</option>
+                    <option value="TRANSFER">Mismo Banco (0%)</option>
+                    <option value="INTERBANK">Interbancario</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                  Nº Orden Binance P2P (Opcional — si se omite, cruza por monto)
+                </label>
+                <input
+                  type="text"
+                  value={manualOrderLink}
+                  onChange={(e) => setManualOrderLink(e.target.value)}
+                  placeholder="Ej. 20261114000123"
+                  className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowManualModal(false)}
+                  className="px-3.5 py-2 rounded-lg bg-surface-container text-xs text-slate-300 hover:text-white"
+                >
+                  Cancelar (Esc)
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingManual}
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                >
+                  {savingManual ? "Asentando..." : "Asentar y Conciliar (Intro)"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* Modal de Seguridad de Cierre Mensual */}
         {showCloseModal && (
           <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl">
               <div className="flex items-center gap-2 text-primary font-bold text-base">
                 <span className="material-symbols-outlined">gpp_maybe</span>
-                <span>Confirmación Fail-Closed de Cierre Contable</span>
+                <span>Confirmación de Seguridad de Cierre Contable</span>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
                 Estás sellando el período{" "}

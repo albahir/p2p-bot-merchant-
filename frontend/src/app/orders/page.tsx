@@ -150,16 +150,16 @@ export default function OrdersPage() {
   if (!user || user.role === "INVITADO") {
     return (
       <AppShell
-        title="Ganancias Reales & Órdenes"
+        title="Ganancias Reales y Órdenes"
         badge="ACCESO RESTRINGIDO"
-        subtitle="Módulo protegido por control RBAC para operadores TRADER y ADMIN."
+        subtitle="Módulo protegido por control de roles para operadores Comerciante y Administrador."
       >
         <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
           <span className="material-symbols-outlined text-[36px] text-primary">
             lock
           </span>
           <h2 className="text-base font-bold text-white">
-            Se requiere sesión activa con rol TRADER o ADMIN
+            Se requiere sesión activa con rol Comerciante o Administrador
           </h2>
           <p className="text-xs text-slate-400">
             Inicia sesión con tu cuenta autorizada para sincronizar órdenes de Binance P2P y auditar utilidades netas.
@@ -185,9 +185,9 @@ export default function OrdersPage() {
 
   return (
     <AppShell
-      title="Ganancias Reales & Órdenes"
-      badge={`MOTOR ${costMethod}`}
-      subtitle="Ingesta histórica oficial Binance C2C, importación manual y cálculo de utilidad neta realizada."
+      title="Ganancias Reales y Órdenes"
+      badge={costMethod === "AVERAGE" ? "MOTOR COSTO PROMEDIO" : "MOTOR PEPS (PRIMERAS ENTRADAS)"}
+      subtitle="Ingesta histórica oficial Binance P2P, importación manual y cálculo de utilidad neta realizada."
       actions={
         /* Grupo Único de Exportación Autenticada (Bearer sin fuga de JWT en URL) */
         <div className="flex items-center gap-2">
@@ -263,9 +263,9 @@ export default function OrdersPage() {
                 <span className="material-symbols-outlined text-[16px] animate-spin">
                   sync
                 </span>
-                Sincronizando historial oficial Binance C2C ({syncDays} días)...
+                Sincronizando historial oficial Binance P2P ({syncDays} días)...
               </span>
-              <span className="text-slate-400">Monitoreando x-mbx-used-weight</span>
+              <span className="text-slate-400">Monitoreando cuota de peso API</span>
             </div>
             <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
               <div className="h-full w-2/3 bg-primary-container animate-pulse rounded-full" />
@@ -277,7 +277,7 @@ export default function OrdersPage() {
         <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Utilidad Neta ({costMethod})</span>
+              <span>Utilidad Neta ({costMethod === "AVERAGE" ? "PROMEDIO" : "PEPS"})</span>
               <span className="material-symbols-outlined text-[16px] text-tertiary">
                 trending_up
               </span>
@@ -453,7 +453,7 @@ export default function OrdersPage() {
               ))}
             </div>
 
-            {/* Selector Método Fiscal FIFO / Costo Promedio */}
+            {/* Selector Método Fiscal PEPS / Costo Promedio */}
             <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center text-xs font-mono">
               <button
                 type="button"
@@ -464,7 +464,7 @@ export default function OrdersPage() {
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                FIFO (PEPS)
+                PEPS (Primeras Entradas)
               </button>
               <button
                 type="button"
@@ -581,7 +581,13 @@ export default function OrdersPage() {
                         </td>
                         <td className="py-3 px-4 text-right">
                           <span className="px-2 py-0.5 rounded bg-surface-container-high text-[10px] font-mono text-slate-300">
-                            {o.order_status}
+                            {o.order_status === "COMPLETED"
+                              ? "COMPLETADA"
+                              : o.order_status === "CANCELLED"
+                              ? "CANCELADA"
+                              : o.order_status === "PENDING"
+                              ? "PENDIENTE"
+                              : o.order_status}
                           </span>
                         </td>
                       </tr>

@@ -46,6 +46,7 @@ class Order(Base):
     __tablename__ = "orders"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial de la orden
     order_number = Column(String(50), unique=True, index=True, nullable=False)
     trade_type = Column(String(10), nullable=False)  # BUY, SELL
     asset = Column(String(20), nullable=False)        # USDT, BTC
@@ -82,6 +83,7 @@ class WalletMovement(Base):
     __tablename__ = "wallet_movements"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del movimiento
     movement_type = Column(String(20), nullable=False)  # DEPOSIT, WITHDRAWAL
     asset = Column(String(20), nullable=False)          # USDT, BTC, ETH
     amount = Column(Float, nullable=False)
@@ -99,6 +101,7 @@ class BankVoucher(Base):
     __tablename__ = "bank_vouchers"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del comprobante
     bank_name = Column(String(100), nullable=False)     # Banco de Venezuela, Banesco, etc.
     destination_bank = Column(String(100), nullable=True) # Banco receptor del pago
     reference_number = Column(String(50), index=True, nullable=False)
@@ -123,7 +126,8 @@ class FiscalPeriodSnapshot(Base):
     __tablename__ = "fiscal_period_snapshots"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    period = Column(String(7), unique=True, index=True, nullable=False)  # YYYY-MM
+    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del cierre
+    period = Column(String(32), index=True, nullable=False)  # YYYY-MM
     initial_balance = Column(Float, default=0.0, nullable=False)
     inflows_deposits = Column(Float, default=0.0, nullable=False)
     inflows_p2p_buys = Column(Float, default=0.0, nullable=False)
@@ -174,6 +178,7 @@ class JournalEntry(Base):
     __tablename__ = "journal_entries"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del asiento
     entry_number = Column(Integer, index=True, nullable=False)
     date_time = Column(DateTime, index=True, nullable=False)
     account_code = Column(String(30), nullable=False)   # 1.1.01, 1.1.05, 5.2.01, etc.

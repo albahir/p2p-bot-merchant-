@@ -150,6 +150,7 @@ class BinanceHistorySyncer:
         days: int = 30,
         trade_type: str = "ALL",
         page_size: int = 50,
+        user_id: int | None = None,
     ) -> SyncHistoryResult:
         """Extrae el historial de órdenes desde Binance API en ventanas de 30 días, las inserta en BD y genera el CSV."""
         safe_days = max(1, min(days, 365))
@@ -213,7 +214,7 @@ class BinanceHistorySyncer:
 
 
         # Mapear e insertar en base de datos
-        repo = OrderRepository(db)
+        repo = OrderRepository(db, user_id=user_id)
         orders: list[Order] = []
         inserted_count = 0
         existing_count = 0
@@ -282,10 +283,11 @@ class BinanceHistorySyncer:
         file_bytes: bytes,
         filename: str,
         db: Session,
+        user_id: int | None = None,
     ) -> SyncHistoryResult:
         """Parsea e importa órdenes de Binance P2P desde archivos Excel (.xlsx) o CSV descargados por el usuario."""
         import io
-        repo = OrderRepository(db)
+        repo = OrderRepository(db, user_id=user_id)
         orders: list[Order] = []
         inserted_count = 0
         existing_count = 0
@@ -380,7 +382,7 @@ class BinanceHistorySyncer:
             # Auto-conciliar huérfanos con estas nuevas órdenes
             try:
                 from src.integrations.receipt_ocr import BankReceiptOCR
-                BankReceiptOCR().reconcile_orphan_vouchers(db=db, tolerance_hours=48)
+                BankReceiptOCR().reconcile_orphan_vouchers(db=db, tolerance_hours=48, user_id=user_id)
             except (SQLAlchemyError, ValueError, TypeError, KeyError, OSError) as e:
                 logger.warning(f"Error al auto-conciliar huérfanos tras importar archivo: {e}")
 

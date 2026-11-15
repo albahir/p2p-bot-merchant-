@@ -31,6 +31,11 @@ async def lifespan(app: FastAPI):
         admin_tg = settings.telegram_allowed_users[0] if settings.telegram_allowed_users else None
         auth_svc.ensure_default_admin(admin_telegram_id=admin_tg)
         seed_env_operators(db, settings)
+
+        # Garantizar que la tasa oficial BCV del día hábil esté persistida en `bcv_rate_history` al arrancar
+        from src.reporting.bcv_history_service import BCVHistoryService
+
+        BCVHistoryService(db_session=db).get_or_fetch_current_rates()
     except (RuntimeError, ValueError, KeyError, OSError) as err:
         logger.warning("Aviso durante la inicialización del administrador por defecto: %s", err)
     finally:
@@ -52,12 +57,27 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
             JWT_SECRET_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
 
+    is_prod = app_settings.ENVIRONMENT.strip().lower() == "production"
     app = FastAPI(
         title="P2P Bot Merchant API",
         description="API REST y WebSockets para el Panel Multi-Usuario de Arbitraje P2P y Gestión Fiscal.",
         version="1.0.0",
         lifespan=None if skip_lifespan else lifespan,
+        docs_url=None if is_prod else "/docs",
+        redoc_url=None if is_prod else "/redoc",
+        openapi_url=None if is_prod else "/openapi.json",
     )
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        """Inyecta cabeceras defensivas OWASP y evita almacenamiento en caché de datos confidenciales."""
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        return response
 
     # Configuración de CORS para Next.js (Local, Vercel y Cloudflare Tunnel)
     origins = app_settings.cors_origins_list

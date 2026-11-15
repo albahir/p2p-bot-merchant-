@@ -152,17 +152,17 @@ export default function SheetsSyncPage() {
       <AppShell
         title="Sincronización Google Sheets"
         badge="ACCESO RESTRINGIDO"
-        subtitle="Exportación automática en la nube reservada para operadores TRADER y ADMIN."
+        subtitle="Exportación automática en la nube reservada para operadores Comerciante y Administrador."
       >
         <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
           <span className="material-symbols-outlined text-[36px] text-tertiary">
             sync_alt
           </span>
           <h2 className="text-base font-bold text-white">
-            Inicia sesión con rol TRADER o ADMIN
+            Inicia sesión con rol Comerciante o Administrador
           </h2>
           <p className="text-xs text-slate-400">
-            Vincula tu propia hoja de Google Sheets para recibir órdenes FIFO, Libro Diario y Libro Mayor en tiempo real.
+            Vincula tu propia hoja de Google Sheets para recibir órdenes PEPS, Libro Diario y Libro Mayor en tiempo real.
           </p>
           <Link
             href="/login"
@@ -181,7 +181,7 @@ export default function SheetsSyncPage() {
     <AppShell
       title="Sincronización Google Sheets"
       badge={isConnected ? "CONECTADO" : "PENDIENTE DE VÍNCULO"}
-      subtitle="Puente directo entre el motor contable FIFO/SENIAT y tu hoja de cálculo individual en Google Cloud."
+      subtitle="Puente directo entre el motor contable PEPS/SENIAT y tu hoja de cálculo individual en la nube."
       actions={
         <div className="flex items-center gap-2">
           {config?.google_sheet_url && (
@@ -194,7 +194,7 @@ export default function SheetsSyncPage() {
               <span className="material-symbols-outlined text-[15px] text-tertiary">
                 open_in_new
               </span>
-              <span>Abrir Google Sheet</span>
+              <span>Abrir Hoja de Cálculo</span>
             </a>
           )}
           <button
@@ -271,10 +271,10 @@ export default function SheetsSyncPage() {
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              Modo de Autenticación Cloud
+              Modo de Autenticación en la Nube
             </div>
             <div className="mt-2 text-lg font-mono font-bold text-white">
-              {authType === "SERVICE_ACCOUNT" ? "Service Account" : "OAuth 2.0"}
+              {authType === "SERVICE_ACCOUNT" ? "Cuenta de Servicio" : "OAuth 2.0"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
               API Oficial Google Sheets v4 (TLS 1.3)
@@ -308,7 +308,7 @@ export default function SheetsSyncPage() {
                 Configuración de Hoja Contable del Operador
               </h2>
               <span className="text-[10px] font-mono text-slate-400">
-                Multi-Tenant por Usuario
+                Aislado por Usuario
               </span>
             </div>
 
@@ -320,7 +320,7 @@ export default function SheetsSyncPage() {
               <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430]">
                 <code className="text-xs font-mono text-secondary truncate">
                   {config?.service_account_email ||
-                    "Configura GOOGLE_SERVICE_ACCOUNT_JSON en el servidor para habilitar escritura Cloud"}
+                    "Configura GOOGLE_SERVICE_ACCOUNT_JSON en el servidor para habilitar escritura en la nube"}
                 </code>
                 {config?.service_account_email && (
                   <button
@@ -337,7 +337,7 @@ export default function SheetsSyncPage() {
             <form onSubmit={handleSaveSheet} className="space-y-4">
               <div>
                 <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                  Paso 2: URL Completa o Spreadsheet ID de Google Sheets
+                  Paso 2: Enlace Completo o ID de Hoja de Google Sheets
                 </label>
                 <input
                   type="text"

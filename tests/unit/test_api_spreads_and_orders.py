@@ -84,7 +84,8 @@ def test_get_spread_matrix(app_client):
         BankRateQuote(bank_name="Banesco", buy_rate=1010.0, sell_rate=1005.0, updated_at=now),
         BankRateQuote(bank_name="Mercantil", buy_rate=1012.0, sell_rate=1008.0, updated_at=now),
     ]
-    with patch("src.api.routes.spreads.SpreadMonitor.fetch_live_quotes", return_value=mock_quotes):
+    with patch("src.api.routes.spreads.SpreadMonitor.fetch_live_quotes", return_value=mock_quotes), \
+         patch("src.api.routes.spreads.BCVService.get_official_rate", return_value=914.02):
         res = app_client.get("/api/spreads/matrix?amount_usdt=100")
         assert res.status_code == 200
         data = res.json()
@@ -146,3 +147,35 @@ def test_orders_export_csv_and_excel(app_client, test_db):
     res_xlsx = app_client.get("/api/orders/export?format=xlsx", headers={"Authorization": f"Bearer {token}"})
     assert res_xlsx.status_code == 200
     assert "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in res_xlsx.headers["content-type"]
+
+
+def test_get_filtered_orderbook_endpoint(app_client):
+    """Verifica el endpoint /api/spreads/orderbook con filtros estilo Binance P2P y validación de límites."""
+    from src.core.binance_mock import MockBinanceP2PClient
+    from src.core.spread_monitor import SpreadMonitor
+
+    real_monitor = SpreadMonitor()
+    mock_data = real_monitor.fetch_filtered_orderbook(
+        amount_usdt=500.0,
+        bank="Pago Móvil",
+        merchant_only=True,
+        rows=5,
+        client=MockBinanceP2PClient(),
+    )
+
+    with patch("src.api.routes.spreads.SpreadMonitor.fetch_filtered_orderbook", return_value=mock_data):
+        res = app_client.get("/api/spreads/orderbook?amount_usdt=500&bank=Pago%20M%C3%B3vil&merchant_only=true&rows=5")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["amount_usdt"] == 500.0
+        assert body["bank_filter"] == "Pago Móvil"
+        assert body["merchant_only"] is True
+        assert len(body["buy_ads"]) > 0
+        assert len(body["sell_ads"]) > 0
+        assert "maker_spread_pct" in body
+        assert "taker_spread_pct" in body
+
+    # Validación de seguridad: rechazar montos fuera de rango (> 100,000 USDT)
+    res_invalid = app_client.get("/api/spreads/orderbook?amount_usdt=9999999")
+    assert res_invalid.status_code == 422
+

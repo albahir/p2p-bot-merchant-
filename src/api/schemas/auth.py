@@ -48,7 +48,7 @@ class TelegramWebAppAuthData(BaseModel):
 
 
 class UserPublicResponse(BaseModel):
-    """Representación pública del usuario (sin hash ni secretos)."""
+    """Representación pública del usuario (sin hash, claves ni saldos privados)."""
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -57,6 +57,10 @@ class UserPublicResponse(BaseModel):
     telegram_id: str | None = None
     google_sheet_id: str | None = None
     permission_source: str = "Base de Datos"
+    telegram_linked: bool = False
+    binance_api_configured: bool = False
+    binance_key_type: str | None = None
+    google_sheet_configured: bool = False
     is_active: bool
     created_at: datetime
 

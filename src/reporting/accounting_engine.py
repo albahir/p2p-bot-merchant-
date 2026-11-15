@@ -14,7 +14,7 @@ from typing import Any, cast
 from sqlalchemy.orm import Session
 
 from src.data.models import BankVoucher, JournalEntry, Order
-from src.data.repositories import JournalEntryRepository
+from src.data.repositories import JournalEntryRepository, _apply_user_scope
 
 
 @dataclass
@@ -71,9 +71,10 @@ class AccountingEngine:
     ACCOUNT_UNMATCHED_DEBIT = "5.2.02"
     ACCOUNT_UNMATCHED_CREDIT = "2.1.09"
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: int | None = None):
         self.db = db
-        self.journal_repo = JournalEntryRepository(db)
+        self.user_id = user_id
+        self.journal_repo = JournalEntryRepository(db, user_id=user_id)
 
     def _compute_hash(
         self,
@@ -96,8 +97,11 @@ class AccountingEngine:
         self,
         order: Order,
         voucher: BankVoucher,
+        user_id: int | None = None,
     ) -> list[JournalEntry]:
         """Genera el asiento contable formal de partida doble para una orden P2P conciliada con su comprobante."""
+        if user_id is not None and self.user_id is None:
+            self.user_id = user_id
         if voucher.id is not None and order.order_number:
             existing_entries = (
                 self.db.query(JournalEntry)
@@ -205,7 +209,13 @@ class AccountingEngine:
                 reference=safe_ref,
             )
 
+            eff_uid = (
+                self.user_id
+                if self.user_id is not None
+                else (voucher.user_id if voucher.user_id is not None else order.user_id)
+            )
             entry = JournalEntry(
+                user_id=eff_uid,
                 entry_number=entry_number,
                 date_time=dt,
                 account_code=line["account_code"],
@@ -297,7 +307,9 @@ class AccountingEngine:
                 reference=line["reference"],
             )
 
+            eff_uid = self.user_id if self.user_id is not None else voucher.user_id
             entry = JournalEntry(
+                user_id=eff_uid,
                 entry_number=entry_number,
                 date_time=dt,
                 account_code=line["account_code"],
@@ -409,15 +421,12 @@ class AccountingEngine:
         start_date = datetime(year, month, 1, 0, 0, 0)
         end_date = datetime(year, month, days_in_month, 23, 59, 59, 999999)
 
-        # 1. Movimientos Cripto (USDT) desde órdenes completadas
-        orders = (
-            self.db.query(Order)
-            .filter(
-                Order.order_status == "COMPLETED",
-                Order.created_at.between(start_date, end_date),
-            )
-            .all()
+        # 1. Movimientos Cripto (USDT) desde órdenes completadas aisladas por usuario
+        orders_q = self.db.query(Order).filter(
+            Order.order_status == "COMPLETED",
+            Order.created_at.between(start_date, end_date),
         )
+        orders = _apply_user_scope(self.db, orders_q, Order, self.user_id).all()
 
         inflow_usdt = 0.0
         outflow_usdt = 0.0

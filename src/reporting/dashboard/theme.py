@@ -122,6 +122,14 @@ def get_stitch_css() -> str:
         border-radius: 8px;
         overflow: hidden;
     }}
+
+    /* Ocultar botones spin (+/-) en todas las cajas numéricas */
+    [data-testid="stNumberInputStepUp"],
+    [data-testid="stNumberInputStepDown"],
+    button.step-up,
+    button.step-down {{
+        display: none !important;
+    }}
     </style>
     """
 

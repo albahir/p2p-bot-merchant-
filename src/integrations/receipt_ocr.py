@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
@@ -240,6 +240,7 @@ class BankReceiptOCR:
         image_bytes: bytes,
         db: Session,
         mime_type: str = "image/jpeg",
+        user_id: int | None = None,
     ) -> tuple[BankVoucher, Order | None]:
         """Extrae los datos por OCR, persiste el comprobante y auto-concilia con órdenes P2P."""
         extracted = self.extract_from_image(image_bytes, mime_type=mime_type)
@@ -249,16 +250,16 @@ class BankReceiptOCR:
                 or "No se pudo extraer un comprobante bancario válido con monto mayor a cero (Fail-closed)."
             )
 
-        voucher_repo = BankVoucherRepository(db)
-        order_repo = OrderRepository(db)
+        voucher_repo = BankVoucherRepository(db, user_id=user_id)
+        order_repo = OrderRepository(db, user_id=user_id)
 
         # Excluir órdenes ya conciliadas con otro comprobante para evitar doble imputación
         already_matched: set[str] = {
             str(v.associated_order_number)
-            for v in voucher_repo.list_all()
+            for v in voucher_repo.list_all(user_id=user_id)
             if v.associated_order_number
         }
-        orders = [o for o in order_repo.list_completed() if str(o.order_number) not in already_matched]
+        orders = [o for o in order_repo.list_completed(user_id=user_id) if str(o.order_number) not in already_matched]
         matched_order = self.match_receipt_with_orders(extracted, orders)
 
         voucher_date = None
@@ -275,6 +276,7 @@ class BankReceiptOCR:
         )
 
         voucher = BankVoucher(
+            user_id=user_id,
             bank_name=(extracted.bank_name or "Banco Desconocido")[:100],
             destination_bank=extracted.destination_bank[:100] if extracted.destination_bank else None,
             reference_number=(extracted.reference_number or f"REF-{int(datetime.now(UTC).timestamp())}")[:50],
@@ -319,19 +321,16 @@ class BankReceiptOCR:
         self,
         db: Session,
         tolerance_hours: int = 48,
+        user_id: int | None = None,
     ) -> int:
         """Busca comprobantes UNMATCHED y los empareja con órdenes existentes dentro de una ventana temporal."""
-        voucher_repo = BankVoucherRepository(db)
-        order_repo = OrderRepository(db)
+        voucher_repo = BankVoucherRepository(db, user_id=user_id)
+        order_repo = OrderRepository(db, user_id=user_id)
 
-        unmatched_vouchers = (
-            db.query(BankVoucher)
-            .filter(
-                BankVoucher.verification_status == "UNMATCHED",
-                BankVoucher.associated_order_number.is_(None),
-            )
-            .all()
-        )
+        unmatched_vouchers = [
+            v for v in voucher_repo.list_unmatched(user_id=user_id)
+            if v.associated_order_number is None
+        ]
 
         if not unmatched_vouchers:
             return 0
@@ -339,29 +338,31 @@ class BankReceiptOCR:
         # Obtener todas las órdenes completadas aún no vinculadas
         already_matched: set[str] = {
             str(v.associated_order_number)
-            for v in voucher_repo.list_all()
+            for v in voucher_repo.list_all(user_id=user_id)
             if v.associated_order_number
         }
-        completed_orders = [o for o in order_repo.list_completed() if str(o.order_number) not in already_matched]
+        completed_orders = [o for o in order_repo.list_completed(user_id=user_id) if str(o.order_number) not in already_matched]
         reconciled_count = 0
 
         from src.reporting.accounting_engine import AccountingEngine
 
-        acct_engine = AccountingEngine(db=db)
+        acct_engine = AccountingEngine(db=db, user_id=user_id)
 
         def _to_naive_utc(dt_val: datetime) -> datetime:
             return dt_val.astimezone(UTC).replace(tzinfo=None) if dt_val.tzinfo is not None else dt_val
 
         for v in unmatched_vouchers:
-            v_date = _to_naive_utc(v.voucher_date or datetime.now(UTC))
+            v_raw_dt = cast(datetime | None, v.voucher_date)
+            v_date = _to_naive_utc(v_raw_dt or datetime.now(UTC))
             for o in completed_orders:
                 if str(o.order_number) in already_matched:
                     continue
                 # Comprobar monto idéntico en VES
                 if abs(float(o.fiat_amount) - float(v.amount_ves)) < 0.05:
                     # Comprobar ventana de tiempo si la orden tiene fecha
-                    if o.created_at:
-                        o_date = _to_naive_utc(o.created_at)
+                    o_raw_dt = cast(datetime | None, o.created_at)
+                    if o_raw_dt is not None:
+                        o_date = _to_naive_utc(o_raw_dt)
                         diff = abs((v_date - o_date).total_seconds())
                         if diff > (tolerance_hours * 3600):
                             continue
@@ -392,8 +393,9 @@ def process_and_save_voucher(
     db: Session,
     ocr_service: BankReceiptOCR | None = None,
     mime_type: str = "image/jpeg",
+    user_id: int | None = None,
 ) -> tuple[BankVoucher, Order | None]:
     """Función helper para procesar un comprobante y guardarlo directamente en base de datos."""
     service = ocr_service or BankReceiptOCR()
-    return service.process_and_save_voucher(image_bytes, db, mime_type=mime_type)
+    return service.process_and_save_voucher(image_bytes, db, mime_type=mime_type, user_id=user_id)
 

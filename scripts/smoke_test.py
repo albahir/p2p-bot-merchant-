@@ -85,10 +85,12 @@ def verify_database() -> bool:
     try:
         from sqlalchemy import create_engine
 
-        from src.data.database import Base
+        from src.data.database import Base, normalize_database_url
 
-        db_url = os.getenv("DATABASE_URL", "sqlite:///:memory:")
-        engine = create_engine(db_url)
+        raw_url = os.getenv("DATABASE_URL", "sqlite:///:memory:")
+        db_url = normalize_database_url(raw_url)
+        connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+        engine = create_engine(db_url, connect_args=connect_args, pool_pre_ping=True)
         Base.metadata.create_all(engine)
         log_step("Database: Schema Init", "OK", f"Conectado a {db_url.split('@')[-1]}")
         return True

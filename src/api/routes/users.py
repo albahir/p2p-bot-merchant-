@@ -47,9 +47,30 @@ def _resolve_permission_source(user: User, settings: Settings) -> str:
     return "Base de Datos"
 
 
-def _to_public_response(user: User, settings: Settings) -> UserPublicResponse:
+def _to_public_response(user: User, settings: Settings, db: Session | None = None) -> UserPublicResponse:
     resp = UserPublicResponse.model_validate(user)
     resp.permission_source = _resolve_permission_source(user, settings)
+    resp.telegram_linked = bool(user.telegram_id and str(user.telegram_id).strip())
+    resp.google_sheet_configured = bool(user.google_sheet_id and str(user.google_sheet_id).strip())
+
+    if db is not None and user.id is not None:
+        from sqlalchemy.orm import sessionmaker
+
+        from src.data.repositories import SecurityRepository
+        from src.security.api_key_manager import ApiKeyManager
+
+        sec_repo = SecurityRepository(db)
+        api_secret = sec_repo.get_secret(f"user_{user.id}:binance_api_key")
+        resp.binance_api_configured = api_secret is not None
+        if api_secret is not None:
+            try:
+                factory = sessionmaker(bind=db.get_bind())
+                km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+                resp.binance_key_type = km.get_secret(f"user_{user.id}:binance_key_type") or "HMAC"
+            except (KeyError, RuntimeError, ValueError):
+                resp.binance_key_type = "HMAC"
+        else:
+            resp.binance_key_type = None
     return resp
 
 
@@ -80,7 +101,7 @@ def list_users(
             )
 
     users = repo.list_all()
-    return [_to_public_response(u, settings) for u in users]
+    return [_to_public_response(u, settings, db=db) for u in users]
 
 
 @router.post("/authorize-telegram", response_model=UserPublicResponse)
@@ -129,7 +150,7 @@ def authorize_telegram_user(
     except (RuntimeError, ValueError, OSError, TypeError) as err:
         logger.warning("No se pudo enviar alerta de autorización a %s: %s", tg_clean, err)
 
-    return _to_public_response(user_obj, settings)
+    return _to_public_response(user_obj, settings, db=db)
 
 
 @router.patch("/{user_id}/sheet", response_model=UserPublicResponse)
@@ -153,7 +174,7 @@ def update_user_sheet(
     user.google_sheet_id = _extract_sheet_id(req.google_sheet_id)  # type: ignore[assignment]
     db.commit()
     db.refresh(user)
-    return _to_public_response(user, settings)
+    return _to_public_response(user, settings, db=db)
 
 
 @router.patch("/{user_id}/role", response_model=UserPublicResponse)
@@ -193,7 +214,7 @@ def update_user_role(
         except (RuntimeError, ValueError, OSError, TypeError) as err:
             logger.warning("No se pudo enviar notificación de Telegram al usuario %s: %s", user.id, err)
 
-    return _to_public_response(user, settings)
+    return _to_public_response(user, settings, db=db)
 
 
 @router.patch("/{user_id}/status", response_model=UserPublicResponse)
@@ -231,4 +252,4 @@ def update_user_status(
         except (RuntimeError, ValueError, OSError, TypeError) as err:
             logger.warning("No se pudo enviar notificación de suspensión: %s", err)
 
-    return _to_public_response(user, settings)
+    return _to_public_response(user, settings, db=db)
