@@ -7,6 +7,8 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config.settings import Settings
 from src.api.routes import accounting, auth, bot, fiscal, orders, spreads, users, websockets
@@ -46,6 +48,32 @@ async def lifespan(app: FastAPI):
     logger.info("Deteniendo P2P Merchant API.")
 
 
+class SecurityHeadersMiddleware:
+    """Middleware ASGI puro que inyecta cabeceras defensivas OWASP sin depender de BaseHTTPMiddleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path", ""))
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["X-Frame-Options"] = "DENY"
+                headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+                if path.startswith("/api/"):
+                    headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
 def create_app(skip_lifespan: bool = False, settings: Settings | None = None) -> FastAPI:
     """Fabrica de la aplicación FastAPI con middlewares, seguridad y enrutadores."""
     try:
@@ -68,16 +96,7 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
         openapi_url=None if is_prod else "/openapi.json",
     )
 
-    @app.middleware("http")
-    async def add_security_headers(request: Request, call_next):
-        """Inyecta cabeceras defensivas OWASP y evita almacenamiento en caché de datos confidenciales."""
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        if request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-        return response
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Configuración de CORS para Next.js (Local, Vercel y Cloudflare Tunnel)
     origins = app_settings.cors_origins_list
