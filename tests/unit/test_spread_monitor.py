@@ -161,8 +161,10 @@ def test_bank_rate_quote_extended_attributes():
 
 
 def test_fetch_pitbullchain_quotes_mock(monkeypatch):
-    """Valida el parseo correcto de la respuesta de PitbullChain API."""
+    """Valida el parseo correcto de la respuesta de PitbullChain API bajo perspectiva de Comerciante Maker."""
     import httpx
+
+    from src.core.rate_alert_service import RateAlertService
 
     sample_payload = {
         "data": {
@@ -191,6 +193,30 @@ def test_fetch_pitbullchain_quotes_mock(monkeypatch):
                     "liquidityPct": 20.0,
                     "exchanges": ["binance"],
                 },
+                {
+                    "bank": "Otro método",
+                    "binanceId": "PagoMovil",
+                    "totalAds": 30,
+                    "avgBuyPrice": 1097.23,
+                    "avgSellPrice": 1068.80,
+                    "spread": 28.42,
+                    "spreadPct": 2.66,
+                    "score": 80,
+                    "liquidityPct": 23.6,
+                    "exchanges": ["bybit"],
+                },
+                {
+                    "bank": "Bancamiga",
+                    "binanceId": "Bancamiga",
+                    "totalAds": 3,
+                    "avgBuyPrice": 0,
+                    "avgSellPrice": 1010.00,
+                    "spread": 0,
+                    "spreadPct": 0,
+                    "score": 45,
+                    "liquidityPct": 2.4,
+                    "exchanges": ["binance"],
+                },
             ]
         }
     }
@@ -215,14 +241,33 @@ def test_fetch_pitbullchain_quotes_mock(monkeypatch):
     monitor = SpreadMonitor()
     quotes = monitor.fetch_pitbullchain_quotes(exchange="binance")
 
-    assert len(quotes) == 2
+    # Debe excluir "Otro método" porque solo pertenece a Bybit, y conservar los 3 de Binance
+    assert len(quotes) == 3
+    names = [q.bank_name for q in quotes]
+    assert "Otro método" not in names
+
+    # Para Comerciante P2P: buy_rate = avgSellPrice (compras barato) y sell_rate = avgBuyPrice (vendes caro)
     assert quotes[0].bank_name == "Banesco"
-    assert quotes[0].buy_rate == 1012.50
-    assert quotes[0].sell_rate == 1006.80
+    assert quotes[0].buy_rate == 1006.80
+    assert quotes[0].sell_rate == 1012.50
+    assert quotes[0].spread_ves == 5.70
+    assert quotes[0].spread_pct > 0
     assert quotes[0].total_ads == 18
     assert quotes[0].score == 88.0
     assert quotes[0].source == "pitbullchain"
-    assert quotes[1].bank_name == "Banco de Venezuela" or quotes[1].bank_name == "BancoDeVenezuela"
+    assert quotes[1].bank_name == "Banco de Venezuela"
+
+    # Banco con una sola punta (avgBuyPrice=0) NO debe fabricar precios sintéticos negativos
+    bancamiga = quotes[2]
+    assert bancamiga.bank_name == "Bancamiga"
+    assert bancamiga.buy_rate == 1010.00
+    assert bancamiga.sell_rate == 0.0
+    assert bancamiga.spread_ves == 0.0
+    assert bancamiga.spread_pct == 0.0
+
+    # No debe disparar falsa alerta de spread negativo cuando los spreads reales son positivos
+    alert_svc = RateAlertService()
+    assert alert_svc.check_negative_spread_risk(quotes, bcv_rate=914.02) is None
 
 
 def test_fetch_yadio_rate_mock(monkeypatch):

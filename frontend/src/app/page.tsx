@@ -983,37 +983,43 @@ export default function SpreadMatrixPage() {
                 ) : (
                   filteredQuotes.map((q) => {
                     const isPinned = pinnedBanks.includes(q.bank_name);
-                    const intraProfitVes = (q.sell_rate - q.buy_rate) * amountUsdt;
-                    const intraProfitUsd =
-                      valuationMode === "PARALELO"
-                        ? q.sell_rate > 0
-                          ? intraProfitVes / q.sell_rate
-                          : 0
-                        : bcvUsd > 0
-                        ? intraProfitVes / bcvUsd
-                        : 0;
-                    const isPositive = q.spread_pct > 0;
-                    const isNegativeSpread = q.sell_rate < q.buy_rate;
+                    const hasBothSides = q.buy_rate > 0 && q.sell_rate > 0;
+                    const intraProfitVes = hasBothSides
+                      ? (q.sell_rate - q.buy_rate) * amountUsdt
+                      : 0;
+                    const intraProfitUsd = !hasBothSides
+                      ? 0
+                      : valuationMode === "PARALELO"
+                      ? q.sell_rate > 0
+                        ? intraProfitVes / q.sell_rate
+                        : 0
+                      : bcvUsd > 0
+                      ? intraProfitVes / bcvUsd
+                      : 0;
+                    const isPositive = hasBothSides && q.spread_pct > 0;
+                    const isNegativeSpread = hasBothSides && q.sell_rate < q.buy_rate;
 
                     // Acción de 1 Clic (Deep Linking Inteligente):
                     // Pre-selecciona automáticamente el mejor banco destino (mismo banco 0% o interbancario 0.3%)
                     const allQuotes = matrix?.quotes || [q];
                     let bestTargetBank = q.bank_name;
                     let bestTargetSellRate = q.sell_rate;
-                    let bestNetVes = intraProfitVes;
+                    let bestNetVes = hasBothSides ? intraProfitVes : Number.NEGATIVE_INFINITY;
 
-                    for (const candidate of allQuotes) {
-                      if (candidate.sell_rate <= 0) continue;
-                      const same = candidate.bank_name === q.bank_name;
-                      const feeVes = same ? 0 : amountUsdt * q.buy_rate * 0.003;
-                      const netCandidate =
-                        amountUsdt * candidate.sell_rate -
-                        amountUsdt * q.buy_rate -
-                        feeVes;
-                      if (netCandidate > bestNetVes) {
-                        bestNetVes = netCandidate;
-                        bestTargetBank = candidate.bank_name;
-                        bestTargetSellRate = candidate.sell_rate;
+                    if (q.buy_rate > 0) {
+                      for (const candidate of allQuotes) {
+                        if (candidate.sell_rate <= 0) continue;
+                        const same = candidate.bank_name === q.bank_name;
+                        const feeVes = same ? 0 : amountUsdt * q.buy_rate * 0.003;
+                        const netCandidate =
+                          amountUsdt * candidate.sell_rate -
+                          amountUsdt * q.buy_rate -
+                          feeVes;
+                        if (netCandidate > bestNetVes) {
+                          bestNetVes = netCandidate;
+                          bestTargetBank = candidate.bank_name;
+                          bestTargetSellRate = candidate.sell_rate;
+                        }
                       }
                     }
 
@@ -1076,39 +1082,59 @@ export default function SpreadMatrixPage() {
                           </div>
                         </td>
                         <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-200">
-                          Bs. {q.buy_rate.toFixed(2)}
+                          {q.buy_rate > 0 ? (
+                            `Bs. ${q.buy_rate.toFixed(2)}`
+                          ) : (
+                            <span className="text-slate-500 text-[11px]">Sin oferta</span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right font-mono tabular-nums text-white font-semibold">
-                          Bs. {q.sell_rate.toFixed(2)}
+                          {q.sell_rate > 0 ? (
+                            `Bs. ${q.sell_rate.toFixed(2)}`
+                          ) : (
+                            <span className="text-slate-500 text-[11px] font-normal">Sin oferta</span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right font-mono tabular-nums">
-                          <span
-                            className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold ${
-                              isPositive
-                                ? "bg-tertiary/15 text-tertiary"
-                                : "bg-error/15 text-error"
-                            }`}
-                          >
-                            {q.spread_pct >= 0 ? "+" : ""}
-                            {q.spread_pct.toFixed(2)}%
-                          </span>
-                          <div className="text-[11px] text-slate-300 mt-0.5">
-                            {q.spread_ves >= 0 ? "+" : ""}Bs. {q.spread_ves.toFixed(2)}
-                          </div>
+                          {hasBothSides ? (
+                            <>
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold ${
+                                  isPositive
+                                    ? "bg-tertiary/15 text-tertiary"
+                                    : "bg-error/15 text-error"
+                                }`}
+                              >
+                                {q.spread_pct >= 0 ? "+" : ""}
+                                {q.spread_pct.toFixed(2)}%
+                              </span>
+                              <div className="text-[11px] text-slate-300 mt-0.5">
+                                {q.spread_ves >= 0 ? "+" : ""}Bs. {q.spread_ves.toFixed(2)}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-slate-500 text-[11px]">1 punta</span>
+                          )}
                         </td>
                         <td
                           className={`py-3 px-4 text-right font-mono tabular-nums font-semibold ${
                             intraProfitVes > 0 ? "text-tertiary" : "text-slate-300"
                           }`}
                         >
-                          <div>
-                            {intraProfitUsd >= 0 ? "+" : ""}
-                            {intraProfitUsd.toFixed(2)}{" "}
-                            {valuationMode === "PARALELO" ? "USDT" : "USD"}
-                          </div>
-                          <div className="text-[11px] text-slate-300 font-normal">
-                            {intraProfitVes >= 0 ? "+" : ""}Bs. {intraProfitVes.toFixed(2)}
-                          </div>
+                          {hasBothSides ? (
+                            <>
+                              <div>
+                                {intraProfitUsd >= 0 ? "+" : ""}
+                                {intraProfitUsd.toFixed(2)}{" "}
+                                {valuationMode === "PARALELO" ? "USDT" : "USD"}
+                              </div>
+                              <div className="text-[11px] text-slate-300 font-normal">
+                                {intraProfitVes >= 0 ? "+" : ""}Bs. {intraProfitVes.toFixed(2)}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-slate-500 text-[11px] font-normal">--</span>
+                          )}
                         </td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-2">
