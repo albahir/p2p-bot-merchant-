@@ -30,11 +30,13 @@ class BankRateQuote:
 
     @property
     def spread_ves(self) -> float:
+        if self.buy_rate <= 0 or self.sell_rate <= 0:
+            return 0.0
         return round(self.sell_rate - self.buy_rate, 4)
 
     @property
     def spread_pct(self) -> float:
-        if self.buy_rate <= 0:
+        if self.buy_rate <= 0 or self.sell_rate <= 0:
             return 0.0
         return round((self.spread_ves / self.buy_rate) * 100, 4)
 
@@ -325,42 +327,48 @@ class SpreadMonitor:
                 banks_list = data.get("banks", [])
 
                 seen_banks: dict[str, BankRateQuote] = {}
+                target_exchange = exchange.strip().lower() if exchange else ""
                 for b in banks_list:
                     raw_bank = str(b.get("bank", "")).strip()
                     if not raw_bank:
                         continue
 
-                    norm_bank = self._normalize_bank_name(raw_bank)
-                    avg_buy = float(b.get("avgBuyPrice", 0.0) or 0.0)
-                    avg_sell = float(b.get("avgSellPrice", 0.0) or 0.0)
+                    exchanges = [str(e) for e in b.get("exchanges", ["binance"])]
+                    if target_exchange and exchanges and target_exchange not in [e.lower() for e in exchanges]:
+                        continue
 
-                    # Si solo hay precio en un sentido, estimar margen conservador
-                    if avg_buy > 0 and avg_sell <= 0:
-                        avg_sell = round(avg_buy * 0.995, 2)
-                    elif avg_sell > 0 and avg_buy <= 0:
-                        avg_buy = round(avg_sell * 1.005, 2)
-                    elif avg_buy <= 0 and avg_sell <= 0:
+                    norm_bank = self._normalize_bank_name(raw_bank)
+                    # En PitbullChain / Binance P2P:
+                    # - avgBuyPrice = pestaña COMPRAR de Takers = tasa a la que el Comerciante Maker VENDE USDT
+                    # - avgSellPrice = pestaña VENDER de Takers = tasa a la que el Comerciante Maker COMPRA USDT
+                    raw_takers_buy = float(b.get("avgBuyPrice", 0.0) or 0.0)
+                    raw_takers_sell = float(b.get("avgSellPrice", 0.0) or 0.0)
+
+                    maker_buy_rate = round(raw_takers_sell, 2) if raw_takers_sell > 0 else 0.0
+                    maker_sell_rate = round(raw_takers_buy, 2) if raw_takers_buy > 0 else 0.0
+
+                    if maker_buy_rate <= 0 and maker_sell_rate <= 0:
                         continue
 
                     total_ads = int(b.get("totalAds", 0) or 0)
                     score = float(b.get("score", 0.0) or 0.0)
                     liquidity_pct = float(b.get("liquidityPct", 0.0) or 0.0)
                     binance_code = str(b.get("binanceId", "") or b.get("bankCode", "") or "")
-                    exchanges = list(b.get("exchanges", ["binance"]))
 
                     if norm_bank in seen_banks:
                         existing = seen_banks[norm_bank]
                         existing.total_ads += total_ads
                         existing.liquidity_pct = round(existing.liquidity_pct + liquidity_pct, 2)
-                        if avg_buy > 0 and (existing.buy_rate <= 0 or avg_buy < existing.buy_rate):
-                            existing.buy_rate = avg_buy
-                        existing.sell_rate = max(existing.sell_rate, avg_sell)
+                        if maker_buy_rate > 0 and (existing.buy_rate <= 0 or maker_buy_rate < existing.buy_rate):
+                            existing.buy_rate = maker_buy_rate
+                        if maker_sell_rate > 0 and maker_sell_rate > existing.sell_rate:
+                            existing.sell_rate = maker_sell_rate
                         continue
 
                     quote_obj = BankRateQuote(
                         bank_name=norm_bank,
-                        buy_rate=avg_buy,
-                        sell_rate=avg_sell,
+                        buy_rate=maker_buy_rate,
+                        sell_rate=maker_sell_rate,
                         updated_at=now,
                         total_ads=total_ads,
                         score=score,
@@ -457,53 +465,83 @@ class SpreadMonitor:
                     use_public_bapi=use_public_bapi,
                 )
 
+                from src.core.binance_client import BinanceP2PClient
+
+                is_live_binance = isinstance(client, BinanceP2PClient) and use_public_bapi
+
                 for bank in target_banks:
                     pay_code = self.BANK_PAY_TYPE_MAP.get(bank, "").lower()
                     bank_lower = bank.lower()
 
-                    best_buy: float | None = None
-                    buy_ads_count = 0
+                    buy_tab_prices: list[float] = []
                     for item in buy_resp.data:
                         names_lower = [b.lower() for b in item.bank_names]
                         if any(bank_lower in n or (pay_code and pay_code in n) for n in names_lower):
-                            buy_ads_count += 1
-                            p = float(item.adv.price)
-                            if best_buy is None or p < best_buy:
-                                best_buy = p
+                            buy_tab_prices.append(float(item.adv.price))
 
-                    best_sell: float | None = None
-                    sell_ads_count = 0
+                    sell_tab_prices: list[float] = []
                     for item in sell_resp.data:
                         names_lower = [b.lower() for b in item.bank_names]
                         if any(bank_lower in n or (pay_code and pay_code in n) for n in names_lower):
-                            sell_ads_count += 1
-                            p = float(item.adv.price)
-                            if best_sell is None or p > best_sell:
-                                best_sell = p
+                            sell_tab_prices.append(float(item.adv.price))
 
-                    total_bank_ads = buy_ads_count + sell_ads_count
-                    if best_buy is not None and best_sell is not None:
-                        quotes.append(
-                            BankRateQuote(
-                                bank_name=bank,
-                                buy_rate=best_buy,
-                                sell_rate=best_sell,
-                                updated_at=now,
-                                total_ads=total_bank_ads,
-                                source="binance",
-                            )
+                    total_bank_ads = len(buy_tab_prices) + len(sell_tab_prices)
+                    if total_bank_ads == 0:
+                        continue
+
+                    if is_live_binance:
+                        # En Binance P2P real:
+                        # - Pestaña SELL (sell_tab_prices) = usuarios vendiendo = Comerciante COMPRA (buy_rate)
+                        # - Pestaña BUY (buy_tab_prices) = usuarios comprando = Comerciante VENDE (sell_rate)
+                        top_sell_tab = sorted(sell_tab_prices, reverse=True)[:5]
+                        top_buy_tab = sorted(buy_tab_prices)[:5]
+                        # Ignorar el primer outlier extremo si hay >= 3 anuncios en la punta
+                        buy_rate = (
+                            round(top_sell_tab[1] if len(top_sell_tab) >= 3 else top_sell_tab[0], 2)
+                            if top_sell_tab
+                            else 0.0
                         )
-                    elif best_buy is not None:
-                        quotes.append(
-                            BankRateQuote(
-                                bank_name=bank,
-                                buy_rate=best_buy,
-                                sell_rate=round(best_buy * 1.01, 2),
-                                updated_at=now,
-                                total_ads=total_bank_ads,
-                                source="binance",
-                            )
+                        sell_rate = (
+                            round(top_buy_tab[1] if len(top_buy_tab) >= 3 else top_buy_tab[0], 2)
+                            if top_buy_tab
+                            else 0.0
                         )
+                        if buy_rate > 0 or sell_rate > 0:
+                            quotes.append(
+                                BankRateQuote(
+                                    bank_name=bank,
+                                    buy_rate=buy_rate,
+                                    sell_rate=sell_rate,
+                                    updated_at=now,
+                                    total_ads=total_bank_ads,
+                                    source="binance",
+                                )
+                            )
+                    else:
+                        best_buy = min(buy_tab_prices) if buy_tab_prices else None
+                        best_sell = max(sell_tab_prices) if sell_tab_prices else None
+                        if best_buy is not None and best_sell is not None:
+                            quotes.append(
+                                BankRateQuote(
+                                    bank_name=bank,
+                                    buy_rate=best_buy,
+                                    sell_rate=best_sell,
+                                    updated_at=now,
+                                    total_ads=total_bank_ads,
+                                    source="binance",
+                                )
+                            )
+                        elif best_buy is not None:
+                            quotes.append(
+                                BankRateQuote(
+                                    bank_name=bank,
+                                    buy_rate=best_buy,
+                                    sell_rate=round(best_buy * 1.01, 2),
+                                    updated_at=now,
+                                    total_ads=total_bank_ads,
+                                    source="binance",
+                                )
+                            )
 
                 if quotes:
                     return quotes
@@ -842,12 +880,12 @@ class SpreadMonitor:
 
         now = datetime.now(UTC)
         return [
-            BankRateQuote("Banco de Venezuela", buy_rate=1012.20, sell_rate=1007.50, updated_at=now, total_ads=15, score=82.0, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="calibrated"),
-            BankRateQuote("Banesco", buy_rate=1012.50, sell_rate=1007.20, updated_at=now, total_ads=18, score=89.0, liquidity_pct=22.0, binance_code="Banesco", source="calibrated"),
-            BankRateQuote("Pago Móvil", buy_rate=1012.80, sell_rate=1007.80, updated_at=now, total_ads=22, score=88.0, liquidity_pct=25.0, binance_code="PagoMovil", source="calibrated"),
-            BankRateQuote("Mercantil", buy_rate=1013.00, sell_rate=1007.60, updated_at=now, total_ads=7, score=55.0, liquidity_pct=9.0, binance_code="Mercantil", source="calibrated"),
-            BankRateQuote("Bancamiga", buy_rate=1013.50, sell_rate=1008.00, updated_at=now, total_ads=3, score=45.0, liquidity_pct=4.0, binance_code="Bancamiga", source="calibrated"),
-            BankRateQuote("BNC Banco Nacional de Crédito", buy_rate=1013.20, sell_rate=1007.90, updated_at=now, total_ads=2, score=43.0, liquidity_pct=3.0, binance_code="BNCBancoNacional", source="calibrated"),
-            BankRateQuote("Banco Activo", buy_rate=1014.00, sell_rate=1006.50, updated_at=now, total_ads=1, score=42.0, liquidity_pct=1.0, binance_code="BancoActivo", source="calibrated"),
+            BankRateQuote("Banco de Venezuela", buy_rate=1007.50, sell_rate=1012.20, updated_at=now, total_ads=15, score=82.0, liquidity_pct=18.0, binance_code="BancoDeVenezuela", source="calibrated"),
+            BankRateQuote("Banesco", buy_rate=1007.20, sell_rate=1012.50, updated_at=now, total_ads=18, score=89.0, liquidity_pct=22.0, binance_code="Banesco", source="calibrated"),
+            BankRateQuote("Pago Móvil", buy_rate=1007.80, sell_rate=1012.80, updated_at=now, total_ads=22, score=88.0, liquidity_pct=25.0, binance_code="PagoMovil", source="calibrated"),
+            BankRateQuote("Mercantil", buy_rate=1007.60, sell_rate=1013.00, updated_at=now, total_ads=7, score=55.0, liquidity_pct=9.0, binance_code="Mercantil", source="calibrated"),
+            BankRateQuote("Bancamiga", buy_rate=1008.00, sell_rate=1013.50, updated_at=now, total_ads=3, score=45.0, liquidity_pct=4.0, binance_code="Bancamiga", source="calibrated"),
+            BankRateQuote("BNC Banco Nacional de Crédito", buy_rate=1007.90, sell_rate=1013.20, updated_at=now, total_ads=2, score=43.0, liquidity_pct=3.0, binance_code="BNCBancoNacional", source="calibrated"),
+            BankRateQuote("Banco Activo", buy_rate=1006.50, sell_rate=1014.00, updated_at=now, total_ads=1, score=42.0, liquidity_pct=1.0, binance_code="BancoActivo", source="calibrated"),
         ]
 
