@@ -17,6 +17,17 @@
   - `devops.md`: DevOps y Pipelines CI/CD.
   - `researcher.md`: Investigador Técnico & Especialista en Documentación (APIs, benchmarking y cloud).
 
+### 📋 Paquetes en Especificación y Diseño Arquitectónico (ACTIVO)
+- [ ] **Paquete 023 (Sistema de Inteligencia Macroeconómica y Predicción de Mercado USDT con IA — SPEC-023)**:
+  - **Especificación SDD Formalizada** ([`.specify/specs/023-ai-market-predictor/`](file:///c:/p2p-bot-merchant/.specify/specs/023-ai-market-predictor/)): Creados los artefactos canónicos `spec.md`, `plan.md` y `tasks.md` (26 tareas atómicas ordenadas).
+  - **Taxonomía Canónica Macroeconómica** ([`docs/macro_usdt_taxonomy.md`](file:///c:/p2p-bot-merchant/docs/macro_usdt_taxonomy.md)): Documentados los 14 eventos clave de la economía venezolana (intervenciones BCV, liquidez M2, nóminas públicas, bonos Patria, brecha cambiaria), con pesos de impacto, matriz de rezagos temporales (lags) y catálogo de fuentes públicas oficiales y financieras.
+  - **Pipeline Desacoplado de 3 Roles Especializados**:
+    1. *Buscador / Recopilador*: Gemini 2.0/2.5 Flash / Groq Llama 3.3 70B para ingesta, extracción estructurada JSON y filtrado anti-ruido.
+    2. *Analista / Predictor*: DeepSeek-R1 / Gemini 2.5 Flash Thinking para deducción causal monetaria, ponderación de fuerzas alcistas vs bajistas y cálculo de confiabilidad calibrada ($0-100\%$).
+    3. *Revisor / Auditor*: Claude 3.5 Sonnet / OpenAI GPT-4o-mini con verificación cruzada entre familias de modelos (*Cross-Family Model Verification*) para veto de alucinaciones y enforcement Fail-Closed.
+  - **Motor de Inferencia Round-Robin Multi-Proveedor**: Extensión `MultiProviderAIEngine` con rotación equitativa multi-clave, Circuit Breaker (CLOSED/OPEN/HALF-OPEN), reintentos con backoff exponencial y tolerancia a fallos multi-proveedor (Gemini ➔ Groq ➔ DeepSeek ➔ OpenAI).
+  - **Seguridad, Persistencia y Trazabilidad**: Cero Secretos en prompts/logs (`sanitize_message`), persistencia en base de datos (`macro_predictions`) con encadenamiento criptográfico SHA-256 (`prev_hash` ➔ `prediction_hash`) e integraciones con Telegram (`/prediccion`), Dashboard Streamlit y API REST FastAPI.
+
 ### ✅ Paquetes Completados
 - [x] **Paquete 021 (Simulación Integral de Usuario E2E, Corrección Contable/Fiscal y Hardening de Seguridad — SPEC-021)**:
   - **Suite E2E de Simulación Real de Usuario** ([`tests/e2e/test_user_simulation_audit.py`](file:///c:/p2p-bot-merchant/tests/e2e/test_user_simulation_audit.py)): Recorrido completo como operador humano en las 8 pantallas de P2P Merchant OS y los 3 roles del Bot de Telegram (`INVITADO`, `TRADER`, `ADMIN`), verificando cálculos financieros, cadena SHA-256, exportaciones autenticadas y persistencia SQLAlchemy compatible con SQLite y Neon PostgreSQL.
@@ -727,7 +738,33 @@
       - [`frontend/next.config.mjs`](file:///c:/p2p-bot-merchant/frontend/next.config.mjs): `productionBrowserSourceMaps: false`, `poweredByHeader: false` y cabeceras de seguridad (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`).
       - [`frontend/src/lib/api.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/api.ts): Omisión estricta de la cabecera `Authorization: Bearer` en endpoints públicos de mercado (`/api/spreads/*`), evitando exponer el token JWT en consultas públicas de tasas.
       - [`src/api/main.py`](file:///c:/p2p-bot-merchant/src/api/main.py): Ocultamiento automático de `/docs`, `/redoc` y `/openapi.json` en `ENVIRONMENT == "production"` y middleware de cabeceras de seguridad (`Cache-Control: no-store` en `/api/*`).
-      - [`src/api/routes/settings.py`](file:///c:/p2p-bot-merchant/src/api/routes/settings.py) y [`src/api/routes/websockets.py`](file:///c:/p2p-bot-merchant/src/api/routes/websockets.py): Restricción de `/api/settings/*` a `require_trader`, eliminación de fallbacks `.env` ajenos y límite de 256 bytes (`ping`-only) en tramas entrantes de WebSocket.
+       - [`src/api/routes/settings.py`](file:///c:/p2p-bot-merchant/src/api/routes/settings.py) y [`src/api/routes/websockets.py`](file:///c:/p2p-bot-merchant/src/api/routes/websockets.py): Restricción de `/api/settings/*` a `require_trader`, eliminación de fallbacks `.env` ajenos y límite de 256 bytes (`ping`-only) en tramas entrantes de WebSocket.
+
+56. **Sistema de Inteligencia Macroeconómica y Predicción de Mercado con IA Tolerante a Fallos (ADR 056 / SPEC-023)**:
+    - **Contexto**:
+      - El tipo de cambio USDT/VES en el mercado P2P venezolano experimenta fluctuaciones severas determinadas por fuerzas macroeconómicas exógenas: inyecciones cambiarias semanales del Banco Central de Venezuela (BCV), emisión de liquidez monetaria M2 para financiamiento del déficit fiscal, desembolsos masivos de nóminas de la administración pública y bonos gubernamentales a través del Sistema Patria, y dinámica de la brecha cambiaria (spread entre tasa oficial y tasa paralela/P2P).
+      - El comerciante P2P necesita anticipar cambios en la tendencia con horizontes accionables (24h-48h, 3-5 días o semanal) para ajustar su inventario, spreads y exposición bancaria.
+      - Para evitar alucinaciones y garantizar alta disponibilidad, se requiere un pipeline de IA que no dependa de un único proveedor ni emita juicios sin contrastación factual independiente.
+    - **Decisiones de Arquitectura**:
+      1. **Monotonicidad y Numeración Formal (SPEC-023)**:
+         - Se asigna formalmente la denominación `023-ai-market-predictor`, respetando la pausa explícita del Paquete 003 (Pricing algorítmico automatizado) acordada con el usuario. La Spec 023 opera de forma autónoma como motor de inteligencia/asesoramiento (Advisory) sin ejecutar órdenes directas en Binance P2P.
+      2. **Pipeline Desacoplado de 3 Roles Especializados**:
+         - *Rol 1 (Buscador / Recopilador)*: Gemini 2.0/2.5 Flash / Groq Llama 3.3 70B (baja latencia, ventana de contexto de 1M tokens, costo mínimo para ingesta de grandes volúmenes de texto y normalización JSON estructurada).
+         - *Rol 2 (Analista / Predictor)*: DeepSeek-R1 / Gemini 2.5 Flash Thinking (capacidad de razonamiento CoT nativo para sopesar oferta y demanda monetaria, calcular la fuerza vectorial neta y deducir dirección, horizonte y confianza).
+         - *Rol 3 (Revisor / Auditor)*: Claude 3.5 Sonnet / OpenAI GPT-4o-mini (auditoría factual escéptica y filtro anti-alucinación).
+      3. **Principio Innegociable de Verificación Cruzada entre Familias de Modelos (Cross-Family Model Verification)**:
+         - El Revisor **nunca** debe pertenecer a la misma familia arquitectónica que el Predictor. Si el Predictor es DeepSeek o Gemini, el Revisor debe ser Anthropic (Claude) u OpenAI (GPT), mitigando sesgos de entrenamiento compartidos y alucinaciones correlacionadas.
+      4. **Motor Round-Robin Multi-Proveedor (`MultiProviderAIEngine`)**:
+         - Extensión de la arquitectura probada de `AIKeyPool`: rotación proactiva round-robin entre claves del mismo proveedor y conmutación automática por error (failover) en cascada entre proveedores ante códigos HTTP 429, 500, 503 o timeouts, gobernado por un Circuit Breaker con estados CLOSED, OPEN y HALF-OPEN.
+      5. **Trazabilidad Criptográfica SHA-256 Append-Only**:
+         - Cada predicción emitida se registra en la tabla `macro_predictions` con su timestamp UTC, metadatos de los modelos utilizados, resumen de noticias ponderadas y un hash inmutable encadenado (`prediction_hash = SHA-256(prev_hash + payload)`).
+      6. **Comportamiento Fail-Closed y Cero Secretos**:
+         - Si las fuentes no están disponibles, si los modelos discrepan irreconciliablemente o si la confianza calculada es insuficiente, el sistema emite el estado seguro `NEUTRAL / INDETERMINADO` advirtiendo al operador.
+         - Prohibida terminantemente la exposición de API Keys en logs, prompts salientes o interfaces de usuario, aplicando la sanitización regex obligatoria de `sanitize_message()`.
+    - **Verificación**:
+      - Validación formal de especificación con `.specify\scripts\validate-spec.ps1` (verificada en `023-ai-market-predictor`).
+      - Cobertura de pruebas unitarias y de integración del pipeline con mocks en `tests/unit/test_macro_*.py`.
+      - 0 violaciones de seguridad en escaneo con `security-review`.
 
 ---
 
@@ -738,13 +775,16 @@
    - Verificación de tipos: `node frontend/node_modules/typescript/bin/tsc -p frontend/tsconfig.json --noEmit`.
 2. **API REST y WebSockets (FastAPI)**:
    - Iniciar API: `python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload` o `make api` (Swagger docs en `http://localhost:8000/docs`).
-3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard`.
+   - Endpoints de Inteligencia Macroeconómica (SPEC-023): `GET /api/v1/macro/prediction/latest` y `GET /api/v1/macro/events`.
+3. **Dashboard Streamlit (Legacy)**: `streamlit run src/reporting/dashboard/app.py` o `make dashboard` (incluye vista de Inteligencia Macroeconómica).
 4. **Motor en Terminal (Opcional)**: `python -m src.main` o `make run`.
 5. **Suite de Pruebas Automatizadas**: `pytest` (**230/230 tests pasando al 100%**).
 6. **Calidad y Verificación**:
    - `python -m mypy src/ tests/ scripts/` (0 errores en 142 archivos fuente).
    - `python -m ruff check .` (0 errores de linting).
    - `node frontend/node_modules/typescript/bin/tsc -p frontend/tsconfig.json --noEmit` (0 errores TypeScript).
-7. **Entradas Bancarias Estilo Pago Móvil (`,00` sin spinners) y Localización Total en Español**:
+7. **Comandos de Telegram (Bot Interactivo)**:
+   - `/prediccion` (alias `/macro`, `/tendencia`): Consulta la última predicción auditada de mercado USDT/VES.
+8. **Entradas Bancarias Estilo Pago Móvil (`,00` sin spinners) y Localización Total en Español**:
    - Componente [`frontend/src/components/bank-amount-input.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/bank-amount-input.tsx) con desplazamiento automático de centavos de derecha a izquierda (`0,00` → `0,05` → `0,50` → `5,00`) y ocultación global de flechas `spin` en CSS ([`frontend/src/app/globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css) y [`src/reporting/dashboard/theme.py`](file:///c:/p2p-bot-merchant/src/reporting/dashboard/theme.py)).
    - Traducción integral al español de todas las etiquetas, insignias de rol (`ADMINISTRADOR`, `COMERCIANTE`, `INVITADO`), estados de órdenes (`COMPLETADA`, `CANCELADA`, `PENDIENTE`), estados de comprobantes (`CONCILIADO`, `SIN CONCILIAR`, `VERIFICADO`) y términos financieros en todas las vistas de Next.js.
