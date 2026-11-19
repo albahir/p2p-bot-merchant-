@@ -46,6 +46,10 @@ class GoogleSheetsConfigResponse(BaseModel):
     google_sheet_url: str | None = None
     google_auth_type: str = "SERVICE_ACCOUNT"  # SERVICE_ACCOUNT | OAUTH2
     service_account_email: str | None = None
+    oauth_available: bool = False
+    oauth_connected: bool = False
+    google_account_email: str | None = None
+    oauth_custom_configured: bool = False
     is_connected: bool = False
     message: str = ""
 
@@ -64,7 +68,27 @@ class GoogleSheetsSyncResponse(BaseModel):
     rows_exported: int = 0
     journal_entries_exported: int = 0
     service_account_email: str | None = None
+    oauth_connected: bool = False
     message: str
+
+
+class GoogleOAuthStartResponse(BaseModel):
+    """URL generada para iniciar autorización directa con Google OAuth 2.0."""
+    authorization_url: str
+
+
+class GoogleOAuthCallbackRequest(BaseModel):
+    """Código OAuth recibido desde Google y estado firmado anti-CSRF."""
+    code: str = Field(..., min_length=1)
+    state: str = Field(..., min_length=1)
+    redirect_uri: str | None = None
+
+
+class GoogleOAuthClientConfigRequest(BaseModel):
+    """Credenciales de aplicación Google Cloud OAuth 2.0 almacenadas cifradas (AES-256-GCM)."""
+    client_id: str = Field(..., min_length=10)
+    client_secret: str = Field(..., min_length=8)
+    redirect_uri: str | None = None
 
 
 class TelegramStatusResponse(BaseModel):

@@ -270,9 +270,9 @@ export default function SpreadMatrixPage() {
 
   return (
     <AppShell
-      title="Matriz de Márgenes y Bancos"
-      badge="USDT / VES • EN VIVO"
-      subtitle="Arbitraje sobre libro oficial Binance P2P con ajuste automático de comisión interbancaria (Pago Móvil 0,30%)."
+      title="Matriz de Bancos"
+      badge="EN VIVO"
+      subtitle="Tasas P2P por método de pago."
       actions={
         <>
           {/* Selector de Valuación Dual */}
@@ -286,7 +286,7 @@ export default function SpreadMatrixPage() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              USD Paralelo Real
+              USD Paralelo
             </button>
             <button
               type="button"
@@ -297,7 +297,7 @@ export default function SpreadMatrixPage() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              USD Legal BCV
+              USD BCV
             </button>
           </div>
 
@@ -323,7 +323,11 @@ export default function SpreadMatrixPage() {
     >
       <div className="space-y-5">
         {error && (
-          <div className="p-3.5 rounded-xl bg-error/10 border border-error/30 flex items-center justify-between gap-3 text-xs text-red-200">
+          <div
+            role="alert"
+            aria-live="polite"
+            className="p-3.5 rounded-xl bg-error/10 border border-error/30 flex items-center justify-between gap-3 text-xs text-red-200"
+          >
             <div className="flex items-center gap-2.5">
               <span className="material-symbols-outlined text-[18px] text-error">
                 warning
@@ -342,38 +346,41 @@ export default function SpreadMatrixPage() {
 
         {/* Alerta de Cobertura de Riesgo Cambiario (Spread Intrabanco Negativo) */}
         {negativeSpreadQuotes.length > 0 && (
-          <div className="p-3.5 rounded-xl bg-error/15 border border-error/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div
+            role="status"
+            aria-live="polite"
+            className="p-3.5 rounded-xl bg-error/15 border border-error/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+          >
             <div className="flex items-start sm:items-center gap-2.5">
               <span className="material-symbols-outlined text-[20px] text-error shrink-0">
                 trending_down
               </span>
               <div>
                 <div className="font-bold text-white">
-                  Alerta de Riesgo Cambiario — Margen Intrabanco Negativo Detectado
+                  Margen negativo detectado
                 </div>
                 <div className="text-slate-300 mt-0.5">
-                  Tasas invertidas (Venta &lt; Compra) en:{" "}
+                  Compra &gt; venta en:{" "}
                   <span className="font-mono font-semibold text-error">
                     {negativeSpreadQuotes
                       .map((q) => `${q.bank_name} (${q.spread_pct.toFixed(2)}%)`)
                       .join(", ")}
                   </span>
-                  {bcvUsd > 0 && ` • Tasa BCV: Bs. ${bcvUsd.toFixed(2)}`}
                 </div>
               </div>
             </div>
             <span className="px-2.5 py-1 rounded bg-error/25 border border-error/40 text-error font-mono text-[10px] font-bold uppercase shrink-0">
-              Evitar Ciclo Intrabanco
+              Evitar
             </span>
           </div>
         )}
 
-        {/* Fila Bento de 5 KPIs Institucionales */}
+        {/* Fila Bento de 5 KPIs */}
         <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
           {/* KPI 1: Tasa Oficial BCV */}
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Dólar Oficial BCV</span>
+              <span>Dólar BCV</span>
               <span className="material-symbols-outlined text-[16px] text-secondary">
                 account_balance
               </span>
@@ -382,14 +389,14 @@ export default function SpreadMatrixPage() {
               {bcvUsd > 0 ? `Bs. ${bcvUsd.toFixed(2)}` : "Bs. --"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              {bcv?.eur ? `EUR BCV: Bs. ${bcv.eur.toFixed(2)}` : "Fuente Oficial BCV"}
+              {bcv?.eur ? `EUR: Bs. ${bcv.eur.toFixed(2)}` : "BCV oficial"}
             </div>
           </div>
 
           {/* KPI 2: Referencia P2P & Brecha */}
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Promedio USDT P2P</span>
+              <span>Promedio P2P</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 currency_exchange
               </span>
@@ -398,7 +405,7 @@ export default function SpreadMatrixPage() {
               {p2pRef > 0 ? `Bs. ${p2pRef.toFixed(2)}` : "Bs. --"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-primary tabular-nums">
-              Brecha Cambiaria: {brechaPct >= 0 ? "+" : ""}
+              Brecha: {brechaPct >= 0 ? "+" : ""}
               {brechaPct.toFixed(2)}%
             </div>
           </div>
@@ -406,7 +413,7 @@ export default function SpreadMatrixPage() {
           {/* KPI 3: Mejor Margen Neto */}
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Mejor Retorno Neto Ciclo</span>
+              <span>Mejor retorno</span>
               <span className="material-symbols-outlined text-[16px] text-tertiary">
                 trending_up
               </span>
@@ -426,15 +433,15 @@ export default function SpreadMatrixPage() {
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
               {optimalRoute
-                ? `Bruto: ${optimalRoute.grossSpreadPct.toFixed(2)}% • Comisión Banco: ${optimalRoute.bankFeePct}%`
-                : "Esperando cotizaciones"}
+                ? `Bruto: ${optimalRoute.grossSpreadPct.toFixed(2)}% • Banco: ${optimalRoute.bankFeePct}%`
+                : "Sin datos"}
             </div>
           </div>
 
           {/* KPI 4: Ruta Óptima */}
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Ruta Óptima Detectada</span>
+              <span>Ruta óptima</span>
               <span className="material-symbols-outlined text-[16px] text-primary-container">
                 alt_route
               </span>
@@ -442,12 +449,12 @@ export default function SpreadMatrixPage() {
             <div className="mt-2 text-sm font-bold text-white truncate">
               {optimalRoute
                 ? `${optimalRoute.buyBank} → ${optimalRoute.sellBank}`
-                : "Escaneando bancos..."}
+                : "Buscando..."}
             </div>
             <div className="mt-1.5 text-[11px] font-mono text-slate-400 tabular-nums">
               {optimalRoute
                 ? `C: ${optimalRoute.buyRate.toFixed(2)} | V: ${optimalRoute.sellRate.toFixed(2)}`
-                : "Sin ruta activa"}
+                : "--"}
             </div>
           </div>
 
@@ -455,8 +462,7 @@ export default function SpreadMatrixPage() {
           <div className="p-4 rounded-xl bg-surface-container border border-primary-container/30">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-primary">
               <span>
-                Retorno ({amountUsdt} USDT •{" "}
-                {valuationMode === "PARALELO" ? "Real" : "BCV"})
+                Ganancia ({amountUsdt} USDT)
               </span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 payments
@@ -475,25 +481,22 @@ export default function SpreadMatrixPage() {
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
               {optimalRoute
-                ? `${optimalRoute.netProfitVes >= 0 ? "+" : ""}Bs. ${optimalRoute.netProfitVes.toFixed(2)} netos`
-                : "Monto configurable abajo"}
+                ? `${optimalRoute.netProfitVes >= 0 ? "+" : ""}Bs. ${optimalRoute.netProfitVes.toFixed(2)}`
+                : "--"}
             </div>
           </div>
         </section>
 
-        {/* Barra de Filtros Oficiales (Estilo Binance P2P: Banco + Monto + Verificados + Modo de Vista) */}
+        {/* Filtros */}
         <section className="p-3.5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3">
-          {/* Fila 1: Selector de Vista (Ambos / Spread por Banco / Spread por Precio) + Filtro Comerciante Verificado */}
+          {/* Fila 1: Selector de Vista + Solo verificados */}
           <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2.5 border-b border-[#1e2430]">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 mr-1">
-                Modo de Análisis:
-              </span>
               {(
                 [
-                  { id: "AMBOS", label: "Vista Dual (Banco + Precio)", icon: "dashboard" },
-                  { id: "BANCO", label: "Spread por Banco", icon: "account_balance" },
-                  { id: "PRECIO", label: "Spread por Precio (Libro Binance)", icon: "candlestick_chart" },
+                  { id: "AMBOS", label: "Ambos", icon: "dashboard" },
+                  { id: "BANCO", label: "Por banco", icon: "account_balance" },
+                  { id: "PRECIO", label: "Por precio", icon: "candlestick_chart" },
                 ] as const
               ).map((tab) => {
                 const active = spreadViewMode === tab.id;
@@ -524,22 +527,13 @@ export default function SpreadMatrixPage() {
                     ? "bg-amber-500/20 border-amber-400/50 text-amber-300 font-bold"
                     : "bg-surface-container border-[#1e2430] text-slate-300 hover:text-white"
                 }`}
-                title="Filtrar solo comerciantes verificados en el libro de órdenes de Binance P2P"
+                title="Filtrar solo comerciantes verificados"
               >
                 <span className="material-symbols-outlined text-[15px] text-amber-400">
                   verified
                 </span>
-                <span>Solo Comerciantes Verificados</span>
+                <span>Solo verificados</span>
               </button>
-
-              {orderbook && (
-                <span className="px-2.5 py-1 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-[11px] font-mono text-slate-300 tabular-nums">
-                  Filtro Binance:{" "}
-                  <strong className="text-primary">
-                    Bs. {orderbook.trans_amount_ves.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </strong>
-                </span>
-              )}
             </div>
           </div>
 
@@ -623,24 +617,12 @@ export default function SpreadMatrixPage() {
                 <span className="material-symbols-outlined text-[19px] text-primary">
                   candlestick_chart
                 </span>
-                <div>
-                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                    <span>Spread por Precio — Libro de Anuncios Binance P2P</span>
-                    <span className="px-2 py-0.5 rounded bg-primary-container/20 text-primary text-[10px] font-mono">
-                      {selectedBankChip === "Todos" ? "Todos los Bancos" : selectedBankChip} • {amountUsdt} USDT
-                    </span>
-                  </h2>
-                  <p className="text-[11px] text-slate-400">
-                    Anuncios filtrados en vivo por límite en Bolívares (
-                    {orderbook
-                      ? `Bs. ${orderbook.trans_amount_ves.toLocaleString("es-VE", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}`
-                      : `~${amountUsdt} USDT`}
-                    ), método de pago y estado de comerciante.
-                  </p>
-                </div>
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <span>Libro de anuncios</span>
+                  <span className="px-2 py-0.5 rounded bg-primary-container/20 text-primary text-[10px] font-mono">
+                    {selectedBankChip} • {amountUsdt} USDT
+                  </span>
+                </h2>
               </div>
 
               {orderbook && orderbook.best_buy_price > 0 && orderbook.best_sell_price > 0 && (
@@ -658,18 +640,18 @@ export default function SpreadMatrixPage() {
                   ).toFixed(2)}&amount=${amountUsdt}`}
                   className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-mono font-bold flex items-center gap-1.5 hover:brightness-110 transition-all"
                 >
-                  <span>Simular Ciclo por Precio</span>
+                  <span>Simular</span>
                   <span className="material-symbols-outlined text-[15px]">calculate</span>
                 </Link>
               )}
             </div>
 
-            {/* Tarjetas de Puntas y Spread por Precio (Maker vs Taker) */}
+            {/* Tarjetas de Puntas y Spread por Precio */}
             {orderbook && (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430]">
                   <div className="text-[10px] font-mono uppercase text-slate-400">
-                    Mejor Precio Compra (Columna Comprar)
+                    Mejor compra
                   </div>
                   <div className="mt-1 text-lg font-mono font-bold text-tertiary tabular-nums">
                     {orderbook.best_buy_price > 0
@@ -679,13 +661,13 @@ export default function SpreadMatrixPage() {
                   <div className="text-[11px] font-mono text-slate-400 truncate">
                     {orderbook.buy_ads[0]
                       ? `${orderbook.buy_ads[0].nick_name} (${orderbook.buy_ads[0].finish_rate_pct}%)`
-                      : "Sin anuncios para este monto"}
+                      : "Sin anuncios"}
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430]">
                   <div className="text-[10px] font-mono uppercase text-slate-400">
-                    Mejor Precio Venta (Columna Vender)
+                    Mejor venta
                   </div>
                   <div className="mt-1 text-lg font-mono font-bold text-primary tabular-nums">
                     {orderbook.best_sell_price > 0
@@ -695,18 +677,13 @@ export default function SpreadMatrixPage() {
                   <div className="text-[11px] font-mono text-slate-400 truncate">
                     {orderbook.sell_ads[0]
                       ? `${orderbook.sell_ads[0].nick_name} (${orderbook.sell_ads[0].finish_rate_pct}%)`
-                      : "Sin anuncios para este monto"}
+                      : "Sin anuncios"}
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono uppercase text-slate-400">
-                      Spread Comerciante (Maker)
-                    </span>
-                    <span className="px-1.5 py-0.5 rounded bg-primary-container/20 text-primary text-[9px] font-mono">
-                      Con Anuncio
-                    </span>
+                  <div className="text-[10px] font-mono uppercase text-slate-400">
+                    Spread con anuncio
                   </div>
                   <div
                     className={`mt-1 text-lg font-mono font-bold tabular-nums ${
@@ -719,19 +696,13 @@ export default function SpreadMatrixPage() {
                     {orderbook.maker_spread_ves.toFixed(2)})
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    Compras a Bs. {orderbook.best_sell_price.toFixed(2)} → Vendes a Bs.{" "}
-                    {orderbook.best_buy_price.toFixed(2)}
+                    C: {orderbook.best_sell_price.toFixed(2)} → V: {orderbook.best_buy_price.toFixed(2)}
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono uppercase text-slate-400">
-                      Spread Directo (Taker)
-                    </span>
-                    <span className="px-1.5 py-0.5 rounded bg-surface-container-high text-slate-300 text-[9px] font-mono">
-                      Sin Anuncio
-                    </span>
+                  <div className="text-[10px] font-mono uppercase text-slate-400">
+                    Spread directo
                   </div>
                   <div
                     className={`mt-1 text-lg font-mono font-bold tabular-nums ${
@@ -744,7 +715,7 @@ export default function SpreadMatrixPage() {
                     {orderbook.taker_spread_ves.toFixed(2)})
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    Neto ({amountUsdt} USDT):{" "}
+                    Neto:{" "}
                     <strong className={orderbook.net_profit_ves >= 0 ? "text-tertiary" : "text-error"}>
                       {orderbook.net_profit_ves >= 0 ? "+" : ""}Bs.{" "}
                       {orderbook.net_profit_ves.toFixed(2)}
@@ -754,19 +725,19 @@ export default function SpreadMatrixPage() {
               </div>
             )}
 
-            {/* Dos Columnas: Anuncios de Compra vs Anuncios de Venta (Igual que Binance P2P) */}
+            {/* Dos Columnas: Comprar vs Vender */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Columna Izquierda: Pestaña COMPRAR USDT */}
+              {/* Columna Izquierda: COMPRAR USDT */}
               <div className="rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden">
                 <div className="px-3.5 py-2.5 bg-tertiary/10 border-b border-[#1e2430] flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-tertiary" />
                     <span className="text-xs font-bold text-white">
-                      Libro Comprar USDT (Menor a Mayor Precio)
+                      Comprar USDT
                     </span>
                   </div>
                   <span className="text-[10px] font-mono text-tertiary">
-                    {orderbook?.buy_ads?.length || 0} anuncios compatibles
+                    {orderbook?.buy_ads?.length || 0} anuncios
                   </span>
                 </div>
 
@@ -835,7 +806,7 @@ export default function SpreadMatrixPage() {
                             )}&amount=${amountUsdt}`}
                             className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-tertiary/15 hover:bg-tertiary/25 text-tertiary text-[10px] font-mono font-semibold"
                           >
-                            Usar Compra
+                            Usar
                           </Link>
                         </div>
                       </div>
@@ -850,11 +821,11 @@ export default function SpreadMatrixPage() {
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-primary" />
                     <span className="text-xs font-bold text-white">
-                      Libro Vender USDT (Mayor a Menor Precio)
+                      Vender USDT
                     </span>
                   </div>
                   <span className="text-[10px] font-mono text-primary">
-                    {orderbook?.sell_ads?.length || 0} anuncios compatibles
+                    {orderbook?.sell_ads?.length || 0} anuncios
                   </span>
                 </div>
 
@@ -923,7 +894,7 @@ export default function SpreadMatrixPage() {
                             )}&sellRate=${ad.price.toFixed(2)}&amount=${amountUsdt}`}
                             className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-primary-container/20 hover:bg-primary-container/30 text-primary text-[10px] font-mono font-semibold"
                           >
-                            Usar Venta
+                            Usar
                           </Link>
                         </div>
                       </div>
@@ -944,27 +915,27 @@ export default function SpreadMatrixPage() {
                 table_rows
               </span>
               <h2 className="text-sm font-bold text-white">
-                Libro de Tasas por Método Bancario (Monto {amountUsdt} USDT)
+                Tasas por banco ({amountUsdt} USDT)
               </h2>
             </div>
             <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-              {filteredQuotes.length} métodos monitoreados
+              {filteredQuotes.length} métodos
             </span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overscroll-x-contain">
             <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                  <th className="py-3 px-4">Banco / Canal VES</th>
-                  <th className="py-3 px-4 text-right">Compra USDT (Bs)</th>
-                  <th className="py-3 px-4 text-right">Venta USDT (Bs)</th>
-                  <th className="py-3 px-4 text-right">Margen Intrabanco</th>
-                  <th className="py-3 px-4 text-right">
+              <thead className="sticky top-0 z-10 bg-surface-container">
+                <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  <th scope="col" className="py-3 px-4">Banco / Canal VES</th>
+                  <th scope="col" className="py-3 px-4 text-right">Compra USDT (Bs)</th>
+                  <th scope="col" className="py-3 px-4 text-right">Venta USDT (Bs)</th>
+                  <th scope="col" className="py-3 px-4 text-right">Margen Intrabanco</th>
+                  <th scope="col" className="py-3 px-4 text-right">
                     Ganancia ({amountUsdt} USDT)
                   </th>
-                  <th className="py-3 px-4">Liquidez / Anuncios</th>
-                  <th className="py-3 px-4 text-right">Simulador</th>
+                  <th scope="col" className="py-3 px-4">Liquidez / Anuncios</th>
+                  <th scope="col" className="py-3 px-4 text-right">Simulador</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1e2430]/70 text-xs">
@@ -1173,18 +1144,15 @@ export default function SpreadMatrixPage() {
         </section>
         )}
 
-        {/* Mejores 3 Rutas de Arbitraje Cruzado (Con Deducción Pago Móvil 0,30%) */}
-        <section className="space-y-3">
+        {/* Mejores 3 Rutas */}
+        <section className="space-y-3 defer-render">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-white flex items-center gap-2">
               <span className="material-symbols-outlined text-[18px] text-tertiary">
                 hub
               </span>
-              Mejores 3 Rutas de Arbitraje Cruzado (Neto Post-Comisión Bancaria)
+              Mejores 3 rutas
             </h2>
-            <span className="text-[11px] font-mono text-slate-400">
-              Interbancario descuenta 0,30% Pago Móvil automáticamente
-            </span>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
@@ -1271,7 +1239,7 @@ export default function SpreadMatrixPage() {
                           : "bg-surface-container-high border border-slate-700 text-slate-200 hover:border-primary-container/50 hover:text-white"
                       }`}
                     >
-                      <span>Cargar en Simulador</span>
+                      <span>Simular</span>
                       <span className="material-symbols-outlined text-[15px]">
                         calculate
                       </span>

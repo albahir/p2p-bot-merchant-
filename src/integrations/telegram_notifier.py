@@ -1069,6 +1069,7 @@ class TelegramNotifier:
         db = sf()
         try:
             db_user_id: int | None = None
+            u = None
             # Si el usuario tiene una hoja personal configurada en su perfil, priorizarla
             if user_id:
                 try:
@@ -1093,7 +1094,6 @@ class TelegramNotifier:
                     "`/sheets_id https://docs.google.com/spreadsheets/d/...`"
                 )
 
-
             repo = OrderRepository(db)
             completed_orders = repo.list_completed(user_id=db_user_id)
             if not completed_orders:
@@ -1102,10 +1102,14 @@ class TelegramNotifier:
             fifo = FIFOCostMethod()
             results = fifo.process_orders(completed_orders)
 
-            exporter = SheetsExporter(
-                credentials_path=creds_file,
-                credentials_json=creds_json,
-            )
+            if u is not None and str(getattr(u, "google_auth_type", "") or "") == "OAUTH2":
+                from src.api.routes.settings import build_user_sheets_exporter
+                exporter = build_user_sheets_exporter(u, settings, db)
+            else:
+                exporter = SheetsExporter(
+                    credentials_path=creds_file,
+                    credentials_json=creds_json,
+                )
             success = exporter.export(sheet_id, results)
             sheet_url = SheetsExporter.get_sheet_url(sheet_id)
 
@@ -1634,13 +1638,10 @@ class TelegramNotifier:
                 if u and u.google_sheet_id:
                         try:
                             from config.settings import Settings
-                            from src.reporting.sheets_exporter import SheetsExporter
+                            from src.api.routes.settings import build_user_sheets_exporter
 
                             app_settings = Settings()
-                            exporter = SheetsExporter(
-                                credentials_path=app_settings.GOOGLE_CREDENTIALS_FILE,
-                                credentials_json=app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-                            )
+                            exporter = build_user_sheets_exporter(u, app_settings, db)
                             dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
                             appended = exporter.append_voucher_entry(
                                 sheet_id=str(u.google_sheet_id),

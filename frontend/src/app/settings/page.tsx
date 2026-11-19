@@ -12,12 +12,14 @@ import {
   getBinanceSettings,
   getBotStatus,
   getCurrentUser,
+  getMyProfile,
   getTelegramSettings,
   listUsers,
   pauseBot,
   resumeBot,
   saveBinanceSettings,
   sendTelegramTestAlert,
+  updateRecoveryProfile,
   updateUserRole,
   updateUserSheet,
   updateUserStatus,
@@ -48,6 +50,14 @@ export default function SettingsSecurityPage() {
   const [editingSheetUserId, setEditingSheetUserId] = useState<number | null>(null);
   const [editingSheetVal, setEditingSheetVal] = useState<string>("");
 
+  // Recuperación segura y respaldo de perfil propio
+  const [recFullName, setRecFullName] = useState<string>("");
+  const [recEmail, setRecEmail] = useState<string>("");
+  const [recQuestion, setRecQuestion] = useState<string>("");
+  const [recAnswer, setRecAnswer] = useState<string>("");
+  const [savingRecovery, setSavingRecovery] = useState<boolean>(false);
+  const [newMasterKey, setNewMasterKey] = useState<string | null>(null);
+
   const [loading, setLoading] = useState<boolean>(true);
   const [savingKeys, setSavingKeys] = useState<boolean>(false);
   const [verifyingBinance, setVerifyingBinance] = useState<boolean>(false);
@@ -70,11 +80,18 @@ export default function SettingsSecurityPage() {
 
     setLoading(true);
     try {
-      const [bStatus, tStatus, engineStatus] = await Promise.all([
+      const [bStatus, tStatus, engineStatus, myProfile] = await Promise.all([
         getBinanceSettings().catch(() => null),
         getTelegramSettings().catch(() => null),
         getBotStatus().catch(() => null),
+        getMyProfile().catch(() => null),
       ]);
+
+      if (myProfile) {
+        setCurrentUser(myProfile);
+        setRecFullName(myProfile.full_name || "");
+        setRecEmail(myProfile.email || "");
+      }
 
       if (bStatus) {
         setBinanceStatus(bStatus);
@@ -183,6 +200,41 @@ export default function SettingsSecurityPage() {
       });
     } finally {
       setTestingTelegram(false);
+    }
+  }
+
+  async function handleSaveRecoveryProfile(
+    e: React.FormEvent,
+    regenerateKey = false
+  ) {
+    e.preventDefault();
+    setFeedback(null);
+    setNewMasterKey(null);
+    setSavingRecovery(true);
+    try {
+      const res = await updateRecoveryProfile({
+        full_name: recFullName.trim() || undefined,
+        email: recEmail.trim() || undefined,
+        security_question: recQuestion.trim() || undefined,
+        security_answer: recAnswer.trim() || undefined,
+        regenerate_recovery_key: regenerateKey,
+      });
+      setCurrentUser(res.user);
+      setRecAnswer("");
+      if (res.recovery_key) {
+        setNewMasterKey(res.recovery_key);
+      }
+      setFeedback({
+        type: "success",
+        text: res.message || "Datos de recuperación de perfil guardados.",
+      });
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo actualizar el perfil de recuperación.",
+      });
+    } finally {
+      setSavingRecovery(false);
     }
   }
 
@@ -304,25 +356,24 @@ export default function SettingsSecurityPage() {
   if (!currentUser || currentUser.role === "INVITADO") {
     return (
       <AppShell
-        title="Configuración API, Seguridad y Operadores"
-        badge="ACCESO RESTRINGIDO"
-        subtitle="Bóveda criptográfica AES-256-GCM y gobierno de roles para operadores autorizados."
+        title="Configuración"
+        subtitle="Acceso disponible para comerciantes o administradores."
       >
         <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
           <span className="material-symbols-outlined text-[36px] text-primary">
             shield_lock
           </span>
           <h2 className="text-base font-bold text-white">
-            Se requiere sesión activa con rol Comerciante o Administrador
+            Inicia sesión para continuar
           </h2>
           <p className="text-xs text-slate-400">
-            Inicia sesión para gestionar llaves cifradas de Binance P2P, alertas sanitizadas de Telegram y operadores.
+            Requiere cuenta de comerciante o administrador.
           </p>
           <Link
             href="/login"
             className="inline-block px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold"
           >
-            Iniciar Sesión
+            Iniciar sesión
           </Link>
         </div>
       </AppShell>
@@ -335,9 +386,8 @@ export default function SettingsSecurityPage() {
 
   return (
     <AppShell
-      title="Configuración API, Seguridad y Operadores"
-      badge="CERO SECRETOS • AES-256-GCM"
-      subtitle="Gestión criptográfica de credenciales Binance P2P, políticas de parada segura, sanitización Telegram y control de acceso."
+      title="Configuración"
+      subtitle="API de Binance, alertas y operadores."
       actions={
         <button
           type="button"
@@ -353,7 +403,7 @@ export default function SettingsSecurityPage() {
             network_check
           </span>
           <span>
-            {verifyingBinance ? "Auditando API..." : "Diagnosticar Conexión Binance"}
+            {verifyingBinance ? "Probando..." : "Probar Binance"}
           </span>
         </button>
       }
@@ -361,6 +411,8 @@ export default function SettingsSecurityPage() {
       <div className="space-y-5">
         {feedback && (
           <div
+            role="alert"
+            aria-live="polite"
             className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs ${
               feedback.type === "success"
                 ? "bg-tertiary/10 border-tertiary/30 text-emerald-200"
@@ -376,6 +428,7 @@ export default function SettingsSecurityPage() {
             <button
               type="button"
               onClick={() => setFeedback(null)}
+              aria-label="Cerrar notificación"
               className="text-slate-400 hover:text-white"
             >
               ✕
@@ -383,26 +436,26 @@ export default function SettingsSecurityPage() {
           </div>
         )}
 
-        {/* 4 KPIs de Telemetría de Seguridad Institucional */}
+        {/* 4 KPIs */}
         <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Bóveda en Reposo</span>
+              <span>Firma API</span>
               <span className="material-symbols-outlined text-[16px] text-tertiary">
                 enhanced_encryption
               </span>
             </div>
             <div className="mt-2 text-lg font-mono font-bold text-tertiary">
-              AES-256-GCM
+              {binanceStatus?.key_type || keyType}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Firma activa: {binanceStatus?.key_type || keyType}
+              {binanceStatus?.is_configured ? "Configurada" : "Pendiente"}
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Monitor de Cuota API (Peso)</span>
+              <span>Cuota API</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 speed
               </span>
@@ -415,28 +468,28 @@ export default function SettingsSecurityPage() {
               {usedWeight} / {maxWeight}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Pausa automática &gt; 5.000 (60s)
+              Límite automático: 5.000
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Deriva de Reloj y Latencia</span>
+              <span>Latencia</span>
               <span className="material-symbols-outlined text-[16px] text-secondary">
                 schedule
               </span>
             </div>
             <div className="mt-2 text-lg font-mono font-bold text-secondary tabular-nums">
-              {binanceStatus ? `${binanceStatus.clock_drift_ms} ms` : "-- ms"}
+              {binanceStatus ? `${binanceStatus.latency_ms} ms` : "-- ms"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              Latencia API: {binanceStatus ? `${binanceStatus.latency_ms} ms` : "--"}
+              Deriva: {binanceStatus ? `${binanceStatus.clock_drift_ms} ms` : "--"}
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Arquitectura de Parada Segura</span>
+              <span>Motor</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 security
               </span>
@@ -446,17 +499,17 @@ export default function SettingsSecurityPage() {
                 isPaused ? "text-error" : "text-tertiary"
               }`}
             >
-              {isPaused ? "DETENIDO (PAUSA)" : "PROTECCIÓN ACTIVA"}
+              {isPaused ? "PAUSADO" : "ACTIVO"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Cero Bots No Oficiales • Solo API Oficial Binance
+              API oficial Binance P2P
             </div>
           </div>
         </section>
 
-        {/* Fila Central: Bóveda Binance (Izquierda) + Telegram y Parada Segura (Derecha) */}
+        {/* Fila Central: API Binance + Telegram */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* Tarjeta 1: Credenciales Binance P2P (Sanitizadas — Cero Secretos en DOM) */}
+          {/* Tarjeta 1: Credenciales Binance P2P */}
           <section className="lg:col-span-7 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
             <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
@@ -464,7 +517,7 @@ export default function SettingsSecurityPage() {
                   vpn_key
                 </span>
                 <h2 className="text-sm font-bold text-white">
-                  Credenciales Oficiales Binance P2P (Bóveda de Solo Escritura)
+                  API de Binance
                 </h2>
               </div>
               <span
@@ -474,18 +527,18 @@ export default function SettingsSecurityPage() {
                     : "bg-primary-container/15 text-primary"
                 }`}
               >
-                {binanceStatus?.is_configured ? "LLAVE CIFRADA" : "NO CONFIGURADA"}
+                {binanceStatus?.is_configured ? "ACTIVA" : "SIN CONFIGURAR"}
               </span>
             </div>
 
-            {/* Resumen Enmascarado Actual (NUNCA expone la llave completa ni en el portapapeles) */}
+            {/* Resumen Enmascarado Actual */}
             <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="text-[10px] font-mono uppercase text-slate-400">
-                  Llave API Activa (Enmascarada por Regla Constitucional #5)
+                  Llave activa
                 </div>
                 <div className="mt-1 text-sm font-mono font-bold text-white tracking-wider">
-                  {binanceStatus?.api_key_masked || "Sin llave registrada"}
+                  {binanceStatus?.api_key_masked || "No configurada"}
                 </div>
               </div>
               <div className="flex items-center gap-1.5 flex-wrap">
@@ -500,7 +553,7 @@ export default function SettingsSecurityPage() {
                     {perm === "READING"
                       ? "LECTURA"
                       : perm === "P2P_TRADING"
-                      ? "COMERCIO_P2P"
+                      ? "P2P"
                       : perm}
                   </span>
                 ))}
@@ -510,7 +563,7 @@ export default function SettingsSecurityPage() {
             <form onSubmit={handleSaveBinanceKeys} className="space-y-3.5">
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                  Algoritmo Criptográfico de Firma
+                  Tipo de clave
                 </label>
                 <div className="flex rounded-lg bg-surface-container p-0.5 border border-[#1e2430] text-xs font-mono">
                   <button
@@ -522,7 +575,7 @@ export default function SettingsSecurityPage() {
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Ed25519 (Recomendado)
+                    Ed25519
                   </button>
                   <button
                     type="button"
@@ -539,51 +592,56 @@ export default function SettingsSecurityPage() {
               </div>
 
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-300 mb-1">
-                  Mi Llave API Personal de Binance (Solo Escritura)
+                <label
+                  htmlFor="binance-api-key"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-slate-300 mb-1"
+                >
+                  API Key
                 </label>
                 <input
+                  id="binance-api-key"
                   type="password"
                   autoComplete="off"
+                  enterKeyHint="next"
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="Introduce tu llave API personal de Binance..."
+                  placeholder="Pega tu API Key"
                   className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
                 />
               </div>
 
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-300 mb-1">
-                  {keyType === "Ed25519"
-                    ? "Mi Clave Privada Ed25519 (PEM / Base64 — Solo Escritura)"
-                    : "Mi Clave Secreta HMAC-SHA256 (Solo Escritura)"}
+                <label
+                  htmlFor="binance-secret-key"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-slate-300 mb-1"
+                >
+                  {keyType === "Ed25519" ? "Clave privada Ed25519" : "Secret Key"}
                 </label>
                 <input
+                  id="binance-secret-key"
                   type="password"
                   autoComplete="off"
+                  enterKeyHint="done"
                   value={secretKeyInput}
                   onChange={(e) => setSecretKeyInput(e.target.value)}
-                  placeholder="Se cifra en AES-256-GCM en tu bóveda aislada y jamás vuelve al navegador..."
+                  placeholder="Pega tu clave privada o secreta"
                   className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
                 />
               </div>
 
-              <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
-                <span className="text-[11px] font-mono text-slate-300">
-                  🔒 Bóveda aislada de @{currentUser?.username}: tus órdenes y saldos son confidenciales (Solo Lectura + P2P).
-                </span>
+              <div className="flex justify-end pt-1">
                 <button
                   type="submit"
                   disabled={savingKeys}
                   className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 cursor-pointer"
                 >
-                  {savingKeys ? "Cifrando..." : "Guardar y Cifrar Mi API"}
+                  {savingKeys ? "Guardando..." : "Guardar"}
                 </button>
               </div>
             </form>
           </section>
 
-          {/* Tarjeta 2: Notificador Sanitizado Telegram + Controles de Parada Segura */}
+          {/* Tarjeta 2: Telegram y Seguridad */}
           <section className="lg:col-span-5 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
             <div className="space-y-4">
               <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between">
@@ -591,7 +649,7 @@ export default function SettingsSecurityPage() {
                   <span className="material-symbols-outlined text-[18px] text-secondary">
                     send
                   </span>
-                  Telegram y Reglas de Parada Segura
+                  Telegram y seguridad
                 </h2>
                 <span
                   className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
@@ -600,19 +658,19 @@ export default function SettingsSecurityPage() {
                       : "bg-slate-800 text-slate-400"
                   }`}
                 >
-                  {telegramStatus?.is_configured ? "BOT CONECTADO" : "SIN TOKEN"}
+                  {telegramStatus?.is_configured ? "CONECTADO" : "SIN TOKEN"}
                 </span>
               </div>
 
               <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430] space-y-2 text-xs font-mono">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Token Sanitizado:</span>
+                  <span className="text-slate-400">Bot:</span>
                   <span className="text-white">
                     {telegramStatus?.bot_token_masked || "No configurado"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Tu Telegram Vinculado:</span>
+                  <span className="text-slate-400">Tu Telegram:</span>
                   <span className="text-secondary">
                     {telegramStatus?.linked_chat_id || currentUser.telegram_id || "Sin vincular"}
                   </span>
@@ -622,15 +680,15 @@ export default function SettingsSecurityPage() {
               <div className="space-y-2 text-xs">
                 {[
                   {
-                    label: "Detención segura ante errores 5xx, tiempo agotado o IP no autorizada",
+                    label: "Pausa automática ante errores o IP no autorizada",
                     active: telegramStatus?.fail_closed_5xx_enabled ?? true,
                   },
                   {
-                    label: "Pausa preventiva de 60s si el peso de API supera 5.000",
+                    label: "Pausa 60 s si cuota API > 5.000",
                     active: telegramStatus?.weight_pause_enabled ?? true,
                   },
                   {
-                    label: "Filtro anti-filtración de secretos en registros y Telegram",
+                    label: "Oculta claves y secretos en alertas",
                     active: telegramStatus?.log_sanitization_enabled ?? true,
                   },
                 ].map((policy) => (
@@ -675,20 +733,187 @@ export default function SettingsSecurityPage() {
           </section>
         </div>
 
+        {/* Recuperación Segura y Respaldo de Perfil Propio */}
+        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] p-5 space-y-4">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-primary">
+                  shield_lock
+                </span>
+                Recuperación de cuenta
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Correo, pregunta secreta y llave maestra por si olvidas tu contraseña.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
+              <span
+                className={`px-2 py-0.5 rounded border ${
+                  currentUser.email
+                    ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
+                    : "bg-surface-container border-[#1e2430] text-slate-400"
+                }`}
+              >
+                {currentUser.email ? "● Correo Configurado" : "○ Sin Correo"}
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded border ${
+                  currentUser.has_security_question
+                    ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
+                    : "bg-surface-container border-[#1e2430] text-slate-400"
+                }`}
+              >
+                {currentUser.has_security_question
+                  ? "● Pregunta Secreta Activa"
+                  : "○ Sin Pregunta Secreta"}
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded border ${
+                  currentUser.has_recovery_key
+                    ? "bg-primary-container/15 border-primary-container/30 text-primary"
+                    : "bg-surface-container border-[#1e2430] text-slate-400"
+                }`}
+              >
+                {currentUser.has_recovery_key
+                  ? "● Llave Maestra Activa"
+                  : "○ Sin Llave Maestra"}
+              </span>
+            </div>
+          </div>
+
+          {newMasterKey && (
+            <div className="p-3.5 rounded-lg bg-primary-container/10 border border-primary-container/35 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-mono uppercase text-primary font-bold">
+                  Nueva Llave Maestra Emitida (Solo se muestra una vez — Guárdala):
+                </div>
+                <div className="text-sm font-mono font-bold text-white tracking-widest mt-0.5 select-all">
+                  {newMasterKey}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigator.clipboard?.writeText(newMasterKey)}
+                className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-mono font-bold"
+              >
+                Copiar Llave
+              </button>
+            </div>
+          )}
+
+          <form
+            onSubmit={(e) => handleSaveRecoveryProfile(e, false)}
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"
+          >
+            <div>
+              <label
+                htmlFor="rec-full-name"
+                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+              >
+                Nombre Completo
+              </label>
+              <input
+                id="rec-full-name"
+                type="text"
+                autoComplete="name"
+                enterKeyHint="next"
+                value={recFullName}
+                onChange={(e) => setRecFullName(e.target.value)}
+                placeholder="Tu nombre u operador"
+                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="rec-email"
+                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+              >
+                Correo de Respaldo
+              </label>
+              <input
+                id="rec-email"
+                type="email"
+                autoComplete="email"
+                inputMode="email"
+                enterKeyHint="next"
+                value={recEmail}
+                onChange={(e) => setRecEmail(e.target.value)}
+                placeholder="correo@ejemplo.com"
+                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="rec-question"
+                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+              >
+                Pregunta secreta
+              </label>
+              <input
+                id="rec-question"
+                type="text"
+                autoComplete="off"
+                enterKeyHint="next"
+                value={recQuestion}
+                onChange={(e) => setRecQuestion(e.target.value)}
+                placeholder="ej. Nombre de tu primera mascota"
+                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="rec-answer"
+                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+              >
+                Respuesta secreta
+              </label>
+              <input
+                id="rec-answer"
+                type="password"
+                autoComplete="off"
+                enterKeyHint="done"
+                value={recAnswer}
+                onChange={(e) => setRecAnswer(e.target.value)}
+                placeholder="Nueva respuesta secreta..."
+                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+              />
+            </div>
+
+            <div className="md:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-2.5 pt-1">
+              <button
+                type="submit"
+                disabled={savingRecovery}
+                className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50"
+              >
+                {savingRecovery ? "Guardando..." : "Guardar"}
+              </button>
+              <button
+                type="button"
+                disabled={savingRecovery}
+                onClick={(e) => handleSaveRecoveryProfile(e as any, true)}
+                className="px-4 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-white"
+              >
+                Nueva llave maestra
+              </button>
+            </div>
+          </form>
+        </section>
+
         {/* Sección Exclusiva ADMIN: Gobierno de Operadores (.env + Base de Datos) */}
         {currentUser.role === "ADMIN" && (
-          <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden">
+          <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden defer-render">
             <div className="p-4 border-b border-[#1e2430] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div>
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <span className="material-symbols-outlined text-[18px] text-primary">
                     admin_panel_settings
                   </span>
-                  Gobierno de Operadores y Persistencia Dual (.env + Base de Datos)
+                  Operadores
                 </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Autoriza operadores dinámicamente en SQLite/PostgreSQL o audita permisos declarados en variables de entorno.
-                </p>
               </div>
 
               {/* Alta Rápida por ID de Telegram */}
@@ -699,6 +924,9 @@ export default function SettingsSecurityPage() {
                 <input
                   type="text"
                   inputMode="numeric"
+                  autoComplete="off"
+                  aria-label="ID numérico de Telegram"
+                  enterKeyHint="next"
                   value={newTgId}
                   onChange={(e) => setNewTgId(e.target.value.replace(/\D/g, ""))}
                   placeholder="ID de Telegram (ej. 2076708117)"
@@ -706,12 +934,16 @@ export default function SettingsSecurityPage() {
                 />
                 <input
                   type="text"
+                  autoComplete="off"
+                  aria-label="Alias opcional del operador"
+                  enterKeyHint="done"
                   value={newUsername}
                   onChange={(e) => setNewUsername(e.target.value)}
                   placeholder="Alias opcional"
                   className="w-36 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
                 />
                 <select
+                  aria-label="Rol inicial del operador"
                   value={newRole}
                   onChange={(e) =>
                     setNewRole(e.target.value as "ADMIN" | "TRADER" | "INVITADO")
@@ -727,34 +959,23 @@ export default function SettingsSecurityPage() {
                   disabled={authorizingUser || !newTgId}
                   className="px-3.5 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-40 whitespace-nowrap"
                 >
-                  {authorizingUser ? "Autorizando..." : "+ Autorizar Operador"}
+                  {authorizingUser ? "Autorizando..." : "+ Autorizar"}
                 </button>
               </form>
             </div>
 
-            <div className="px-4 py-2.5 bg-surface-container border-b border-[#1e2430] flex items-center justify-between gap-2 text-[11px] text-slate-300 font-mono">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-[16px] text-tertiary">
-                  lock
-                </span>
-                <span>
-                  Aislamiento Confidencial Activo: El Administrador visualiza el estatus de integraciones (Telegram, API Binance, Google Sheets), pero las órdenes y saldos de cada usuario son estrictamente privados.
-                </span>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-300">
-                    <th className="py-3 px-4">Operador</th>
-                    <th className="py-3 px-4">Telegram</th>
-                    <th className="py-3 px-4">API Binance</th>
-                    <th className="py-3 px-4">Rol de Acceso</th>
-                    <th className="py-3 px-4">Origen del Permiso</th>
-                    <th className="py-3 px-4">Hoja Contable Google</th>
-                    <th className="py-3 px-4">Estado</th>
-                    <th className="py-3 px-4 text-right">Acciones</th>
+                <thead className="sticky top-0 z-10 bg-surface-container">
+                  <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-300">
+                    <th scope="col" className="py-3 px-4">Operador</th>
+                    <th scope="col" className="py-3 px-4">Telegram</th>
+                    <th scope="col" className="py-3 px-4">API Binance</th>
+                    <th scope="col" className="py-3 px-4">Rol</th>
+                    <th scope="col" className="py-3 px-4">Origen</th>
+                    <th scope="col" className="py-3 px-4">Google Sheets</th>
+                    <th scope="col" className="py-3 px-4">Estado</th>
+                    <th scope="col" className="py-3 px-4 text-right">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e2430]/70 text-xs">
@@ -787,9 +1008,6 @@ export default function SettingsSecurityPage() {
                         >
                           <td className="py-3 px-4 font-semibold text-white">
                             <div>{op.username}</div>
-                            <div className="text-[10px] font-mono text-slate-400">
-                              Datos aislados (ID #{op.id})
-                            </div>
                           </td>
                           <td className="py-3 px-4 font-mono tabular-nums">
                             {tgLinked ? (

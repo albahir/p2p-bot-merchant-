@@ -334,14 +334,15 @@ export default function AccountingPage() {
 
   return (
     <AppShell
-      title="Contabilidad, Libro Diario y Conciliación OCR"
-      badge={periodClosed ? "PERÍODO CERRADO" : "PARTIDA DOBLE SHA-256"}
-      subtitle="Libros contables auditables (formato SENIAT), saldos teóricos en vivo y conciliación de comprobantes bancarios."
+      title="Contabilidad"
+      badge={periodClosed ? "CERRADO" : undefined}
+      subtitle="Libros, saldos y conciliación de pagos."
       actions={
         <div className="flex items-center gap-2 flex-wrap">
           {/* Selector de Período Mes / Año */}
           <div className="flex items-center gap-1 bg-surface-container px-2 py-1 rounded-lg border border-[#1e2430] text-xs font-mono">
             <select
+              aria-label="Seleccionar mes contable"
               value={month}
               onChange={(e) => setMonth(Number(e.target.value))}
               className="bg-transparent text-white focus:outline-hidden"
@@ -353,6 +354,7 @@ export default function AccountingPage() {
               ))}
             </select>
             <select
+              aria-label="Seleccionar año contable"
               value={year}
               onChange={(e) => setYear(Number(e.target.value))}
               className="bg-transparent text-primary font-bold focus:outline-hidden"
@@ -380,7 +382,7 @@ export default function AccountingPage() {
             className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
           >
             <span className="material-symbols-outlined text-[15px]">grid_on</span>
-            <span>Excel 4 Pestañas</span>
+            <span>Excel</span>
           </button>
 
           <button
@@ -400,7 +402,7 @@ export default function AccountingPage() {
             <span className="material-symbols-outlined text-[15px] text-secondary">
               picture_as_pdf
             </span>
-            <span>PDF Ejecutivo</span>
+            <span>PDF</span>
           </button>
 
           <button
@@ -409,7 +411,7 @@ export default function AccountingPage() {
             className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 flex items-center gap-1 whitespace-nowrap"
           >
             <span className="material-symbols-outlined text-[15px]">lock_clock</span>
-            <span>Cerrar Mes</span>
+            <span>Cerrar mes</span>
           </button>
         </div>
       }
@@ -417,6 +419,8 @@ export default function AccountingPage() {
       <div className="space-y-5">
         {feedback && (
           <div
+            role="alert"
+            aria-live="polite"
             className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs ${
               feedback.type === "success"
                 ? "bg-tertiary/10 border-tertiary/30 text-emerald-200"
@@ -432,6 +436,7 @@ export default function AccountingPage() {
             <button
               type="button"
               onClick={() => setFeedback(null)}
+              aria-label="Cerrar notificación"
               className="text-slate-400 hover:text-white"
             >
               ✕
@@ -441,12 +446,12 @@ export default function AccountingPage() {
 
         {/* 3 Tarjetas Bento de Saldos y Conciliación OCR (Corregidas sin IGTF ni desbordes) */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-          {/* Card 1: Saldo Bancario Teórico Consolidado VES + Subcajas por Banco Real */}
+          {/* Card 1: Saldo Bancario */}
           <div className="lg:col-span-5 p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                  Saldo Teórico Consolidado en Bancos (VES)
+                  Saldo en bancos (VES)
                 </div>
                 <div className="mt-1 text-2xl font-mono font-bold text-white tabular-nums">
                   Bs.{" "}
@@ -490,12 +495,12 @@ export default function AccountingPage() {
             </div>
           </div>
 
-          {/* Card 2: Inventario Cripto Teórico (USDT) */}
+          {/* Card 2: Saldo USDT */}
           <div className="lg:col-span-3 p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                  Inventario Cripto (USDT)
+                  Saldo USDT
                 </div>
                 <div className="mt-1 text-2xl font-mono font-bold text-tertiary tabular-nums">
                   {(liveBalance?.theoretical_usdt ?? 0).toFixed(2)} USDT
@@ -530,24 +535,19 @@ export default function AccountingPage() {
             </div>
           </div>
 
-          {/* Card 3: Motor OCR de Comprobantes Bancarios y Auto-Conciliación */}
+          {/* Card 3: Conciliación */}
           <div className="lg:col-span-4 p-4 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col justify-between gap-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-[18px] text-secondary">
-                  document_scanner
-                </span>
-                <span className="text-xs font-bold text-white">
-                  Conciliación OCR Bancaria
-                </span>
-              </div>
-              <span className="px-2 py-0.5 rounded bg-secondary/15 text-secondary text-[10px] font-mono font-semibold whitespace-nowrap">
-                Tolerancia 48h
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[18px] text-secondary">
+                document_scanner
+              </span>
+              <span className="text-xs font-bold text-white">
+                Conciliar pagos
               </span>
             </div>
 
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Extrae referencia, banco, monto VES y comisión Pago Móvil desde capturas bancarias para asentar el gasto automáticamente.
+              Sube capturas bancarias o registra pagos manualmente.
             </p>
 
             <input
@@ -568,20 +568,20 @@ export default function AccountingPage() {
                 <span className="material-symbols-outlined text-[16px]">
                   add_photo_alternate
                 </span>
-                <span>{uploadingOcr ? "Analizando OCR..." : "Cargar Recibo"}</span>
+                <span>{uploadingOcr ? "Leyendo..." : "Subir recibo"}</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setShowManualModal(true)}
                 disabled={periodClosed}
-                title="Atajo rápido: Alt+N (Asentar pago sin mouse cuando falle el OCR)"
+                title="Atajo: Alt+N"
                 className="px-3 py-2 rounded-lg bg-surface-container-high border border-slate-700 hover:border-primary-container/60 text-xs font-mono text-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px] text-primary">
                   keyboard
                 </span>
-                <span>Manual (Alt+N)</span>
+                <span>Manual</span>
               </button>
 
               <button
@@ -593,7 +593,7 @@ export default function AccountingPage() {
                 <span className="material-symbols-outlined text-[16px] text-secondary">
                   auto_fix_high
                 </span>
-                <span>{reconciling ? "Cruzando..." : "Auto-Conciliar"}</span>
+                <span>{reconciling ? "Cruzando..." : "Auto-conciliar"}</span>
               </button>
             </div>
           </div>
@@ -651,7 +651,7 @@ export default function AccountingPage() {
         )}
 
         {/* Pestañas Contables: Libro Diario | Libro Mayor | Ecuación Fiscal 6 Piezas */}
-        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden">
+        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden defer-render">
           <div className="px-4 py-3 border-b border-[#1e2430] flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430] text-xs font-mono">
               <button
@@ -685,39 +685,34 @@ export default function AccountingPage() {
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                Conciliación 6 Piezas
+                Cuadre mensual
               </button>
             </div>
-
-            <span className="text-[11px] font-mono text-slate-400">
-               Cadena de integridad SHA-256 verificada • Moneda Funcional VES
-            </span>
           </div>
 
           {activeTab === "JOURNAL" && (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                    <th className="py-3 px-4">Asiento / Fecha</th>
-                    <th className="py-3 px-4">Código & Cuenta</th>
-                    <th className="py-3 px-4">Concepto / Referencia</th>
-                    <th className="py-3 px-4 text-right">Debe (VES)</th>
-                    <th className="py-3 px-4 text-right">Haber (VES)</th>
-                    <th className="py-3 px-4 text-right">Hash SHA-256</th>
+                <thead className="sticky top-0 z-10 bg-surface-container">
+                  <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                    <th scope="col" className="py-3 px-4">Asiento / Fecha</th>
+                    <th scope="col" className="py-3 px-4">Cuenta</th>
+                    <th scope="col" className="py-3 px-4">Concepto</th>
+                    <th scope="col" className="py-3 px-4 text-right">Debe (VES)</th>
+                    <th scope="col" className="py-3 px-4 text-right">Haber (VES)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e2430]/70 text-xs">
                   {loading ? (
                     <tr>
-                      <td colSpan={6} className="py-10 text-center text-slate-400 font-mono">
-                        Consultando asientos en partida doble...
+                      <td colSpan={5} className="py-10 text-center text-slate-400 font-mono">
+                        Cargando asientos...
                       </td>
                     </tr>
                   ) : journalEntries.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-10 text-center text-slate-400 font-mono">
-                        No hay asientos en el período seleccionado. Sincroniza órdenes o carga recibos OCR.
+                      <td colSpan={5} className="py-10 text-center text-slate-400 font-mono">
+                        Sin asientos en este mes.
                       </td>
                     </tr>
                   ) : (
@@ -754,9 +749,6 @@ export default function AccountingPage() {
                         <td className="py-3 px-4 text-right font-mono tabular-nums text-primary font-semibold">
                           {entry.credit > 0 ? `Bs. ${entry.credit.toFixed(2)}` : "-"}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono text-[10px] text-slate-500">
-                          {entry.entry_hash?.slice(0, 10)}…
-                        </td>
                       </tr>
                     ))
                   )}
@@ -766,17 +758,17 @@ export default function AccountingPage() {
           )}
 
           {activeTab === "LEDGER" && (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                    <th className="py-3 px-4">Código</th>
-                    <th className="py-3 px-4">Cuenta Mayor</th>
-                    <th className="py-3 px-4 text-right">Saldo Inicial</th>
-                    <th className="py-3 px-4 text-right">Total Debe</th>
-                    <th className="py-3 px-4 text-right">Total Haber</th>
-                    <th className="py-3 px-4 text-right">Saldo Final</th>
-                    <th className="py-3 px-4 text-right">Movimientos</th>
+                <thead className="sticky top-0 z-10 bg-surface-container">
+                  <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                    <th scope="col" className="py-3 px-4">Código</th>
+                    <th scope="col" className="py-3 px-4">Cuenta Mayor</th>
+                    <th scope="col" className="py-3 px-4 text-right">Saldo Inicial</th>
+                    <th scope="col" className="py-3 px-4 text-right">Total Debe</th>
+                    <th scope="col" className="py-3 px-4 text-right">Total Haber</th>
+                    <th scope="col" className="py-3 px-4 text-right">Saldo Final</th>
+                    <th scope="col" className="py-3 px-4 text-right">Movimientos</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e2430]/70 text-xs">
@@ -889,10 +881,15 @@ export default function AccountingPage() {
 
         {/* Modal de Conciliación Manual Ultrarrápida (<5s sin mouse • Atajo Alt+N) */}
         {showManualModal && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Asiento Manual Ultrarrápido"
+            className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 overscroll-contain"
+          >
             <form
               onSubmit={handleCreateManualVoucher}
-              className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl"
+              className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain"
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-primary font-bold text-base">
@@ -909,13 +906,19 @@ export default function AccountingPage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                  <label
+                    htmlFor="manual-ref"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
                     Referencia Bancaria *
                   </label>
                   <input
+                    id="manual-ref"
                     type="text"
                     autoFocus
                     required
+                    autoComplete="off"
+                    enterKeyHint="next"
                     value={manualRef}
                     onChange={(e) => setManualRef(e.target.value)}
                     placeholder="Ej. 00998877"
@@ -923,10 +926,14 @@ export default function AccountingPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                  <label
+                    htmlFor="manual-amount-ves"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
                     Monto (VES) *
                   </label>
                   <BankAmountInput
+                    id="manual-amount-ves"
                     required
                     value={manualAmountVes}
                     onChange={setManualAmountVes}
@@ -938,10 +945,14 @@ export default function AccountingPage() {
 
               <div className="grid grid-cols-3 gap-2.5">
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                  <label
+                    htmlFor="manual-bank"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
                     Banco
                   </label>
                   <select
+                    id="manual-bank"
                     value={manualBank}
                     onChange={(e) => setManualBank(e.target.value)}
                     className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
@@ -954,10 +965,14 @@ export default function AccountingPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                  <label
+                    htmlFor="manual-op"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
                     Operación
                   </label>
                   <select
+                    id="manual-op"
                     value={manualMovementType}
                     onChange={(e) =>
                       setManualMovementType(e.target.value as "DEBIT" | "CREDIT")
@@ -969,10 +984,14 @@ export default function AccountingPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                  <label
+                    htmlFor="manual-channel"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
                     Canal
                   </label>
                   <select
+                    id="manual-channel"
                     value={manualPaymentMethod}
                     onChange={(e) =>
                       setManualPaymentMethod(
@@ -989,11 +1008,17 @@ export default function AccountingPage() {
               </div>
 
               <div>
-                <label className="block text-[10px] font-mono uppercase text-slate-300 mb-1">
+                <label
+                  htmlFor="manual-order-link"
+                  className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                >
                   Nº Orden Binance P2P (Opcional — si se omite, cruza por monto)
                 </label>
                 <input
+                  id="manual-order-link"
                   type="text"
+                  autoComplete="off"
+                  enterKeyHint="done"
                   value={manualOrderLink}
                   onChange={(e) => setManualOrderLink(e.target.value)}
                   placeholder="Ej. 20261114000123"
@@ -1023,8 +1048,13 @@ export default function AccountingPage() {
 
         {/* Modal de Seguridad de Cierre Mensual */}
         {showCloseModal && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirmación de Seguridad de Cierre Contable"
+            className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 overscroll-contain"
+          >
+            <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain">
               <div className="flex items-center gap-2 text-primary font-bold text-base">
                 <span className="material-symbols-outlined">gpp_maybe</span>
                 <span>Confirmación de Seguridad de Cierre Contable</span>
@@ -1039,6 +1069,9 @@ export default function AccountingPage() {
               </p>
               <input
                 type="text"
+                autoComplete="off"
+                aria-label="Confirmación textual CERRAR-MES"
+                enterKeyHint="done"
                 value={closeConfirmText}
                 onChange={(e) => setCloseConfirmText(e.target.value)}
                 placeholder="Escribe CERRAR-MES"

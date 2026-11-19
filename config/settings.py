@@ -85,6 +85,18 @@ class Settings(BaseSettings):
         default="config/google_credentials.json",
         description="Ruta local al archivo de credenciales de Google Service Account"
     )
+    GOOGLE_OAUTH_CLIENT_ID: str | None = Field(
+        default=None,
+        description="Client ID OAuth 2.0 de Google Cloud para vincular hojas directamente por usuario"
+    )
+    GOOGLE_OAUTH_CLIENT_SECRET: str | None = Field(
+        default=None,
+        description="Client Secret OAuth 2.0 de Google Cloud (jamás expuesto al navegador)"
+    )
+    GOOGLE_OAUTH_REDIRECT_URI: str = Field(
+        default="http://localhost:3000/sheets",
+        description="URL de retorno autorizada para completar Google OAuth 2.0"
+    )
 
     # API REST, WebSockets & JWT
     JWT_SECRET_KEY: str = Field(

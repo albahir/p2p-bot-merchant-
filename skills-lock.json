@@ -18,6 +18,12 @@
       "sourceType": "github",
       "skillPath": "jwt-validate/SKILL.md",
       "computedHash": "c8a86f6afb1489576e0f489936ecb6120e84a851719dbc23f1e359c3124f4cec"
+    },
+    "modern-web-guidance": {
+      "source": "GoogleChrome/modern-web-guidance",
+      "sourceType": "github",
+      "skillPath": "skills/modern-web-guidance/SKILL.md",
+      "computedHash": "1292f0ce14794a5bc49af58e99d5f6d4edf10acd9472cade94ab0c5590892716"
     }
   }
 }

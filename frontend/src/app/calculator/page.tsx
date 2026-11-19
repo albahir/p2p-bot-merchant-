@@ -173,9 +173,8 @@ function CalculatorContent() {
 
   return (
     <AppShell
-      title="Calculadora Instantánea de Ciclos P2P"
-      badge="BINANCE P2P • VES"
-      subtitle="Simulación exacta de arbitraje de ida y vuelta con punto de equilibrio, comisiones por rol y deducción Pago Móvil (0,30%)."
+      title="Calculadora de ciclos"
+      subtitle="Simula compra, venta y comisiones."
       actions={
         <Link
           href="/"
@@ -184,14 +183,18 @@ function CalculatorContent() {
           <span className="material-symbols-outlined text-[16px] text-primary">
             grid_view
           </span>
-          <span>Volver a Matriz</span>
+          <span>Volver a matriz</span>
         </Link>
       }
     >
       <div className="space-y-5">
         {/* Alerta de Cobertura de Riesgo Cambiario cuando el Spread se vuelve negativo o insuficiente */}
         {!isProfitable && buyRate > 0 && sellRate > 0 && (
-          <div className="p-3.5 rounded-xl bg-error/15 border border-error/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div
+            role="alert"
+            aria-live="polite"
+            className="p-3.5 rounded-xl bg-error/15 border border-error/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+          >
             <div className="flex items-start sm:items-center gap-2.5">
               <span className="material-symbols-outlined text-[20px] text-error shrink-0">
                 warning
@@ -292,13 +295,13 @@ function CalculatorContent() {
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
               {simulation.netProfitBcvUsd !== 0
-                ? `Eq. Contable BCV: $${simulation.netProfitBcvUsd.toFixed(2)}`
-                : "Sin IGTF • Solo API Binance"}
+                ? `≈ $${simulation.netProfitBcvUsd.toFixed(2)} BCV`
+                : `${cyclesPerDay} ciclos / día`}
             </div>
           </div>
         </section>
 
-        {/* Grilla Principal: Parámetros (Izquierda) + Desglose de 3 Pasos y Proyección (Derecha) */}
+        {/* Grilla Principal */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Panel Izquierdo: Parámetros de Ejecución */}
           <section className="lg:col-span-5 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
@@ -307,20 +310,21 @@ function CalculatorContent() {
                 <span className="material-symbols-outlined text-[18px] text-primary">
                   tune
                 </span>
-                Parámetros del Ciclo
+                Parámetros
               </h2>
-              <span className="px-2 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-mono font-bold">
-                USDT / VES
-              </span>
             </div>
 
             {/* Volumen del Ciclo */}
             <div>
-              <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                Volumen Operativo por Ciclo (USDT)
+              <label
+                htmlFor="calc-capital-usdt"
+                className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
+              >
+                Monto (USDT)
               </label>
               <div className="flex items-center gap-2">
                 <BankAmountInput
+                  id="calc-capital-usdt"
                   value={capitalUsdt}
                   onChange={setCapitalUsdt}
                   ariaLabel="Volumen Operativo por Ciclo (USDT)"
@@ -377,10 +381,14 @@ function CalculatorContent() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                  <label
+                    htmlFor="calc-buy-bank"
+                    className="block text-[10px] font-mono text-slate-400 mb-1"
+                  >
                     Banco Origen
                   </label>
                   <select
+                    id="calc-buy-bank"
                     value={buyBank}
                     onChange={(e) => handleSelectBuyBank(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white focus:border-primary-container focus:outline-hidden"
@@ -402,10 +410,14 @@ function CalculatorContent() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                  <label
+                    htmlFor="calc-buy-rate"
+                    className="block text-[10px] font-mono text-slate-400 mb-1"
+                  >
                     Tasa Compra (Bs/USDT)
                   </label>
                   <BankAmountInput
+                    id="calc-buy-rate"
                     value={buyRate}
                     onChange={setBuyRate}
                     ariaLabel="Tasa Compra (Bs/USDT)"
@@ -449,10 +461,14 @@ function CalculatorContent() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                  <label
+                    htmlFor="calc-sell-bank"
+                    className="block text-[10px] font-mono text-slate-400 mb-1"
+                  >
                     Banco Destino
                   </label>
                   <select
+                    id="calc-sell-bank"
                     value={sellBank}
                     onChange={(e) => handleSelectSellBank(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white focus:border-primary-container focus:outline-hidden"
@@ -474,10 +490,14 @@ function CalculatorContent() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                  <label
+                    htmlFor="calc-sell-rate"
+                    className="block text-[10px] font-mono text-slate-400 mb-1"
+                  >
                     Tasa Venta (Bs/USDT)
                   </label>
                   <BankAmountInput
+                    id="calc-sell-rate"
                     value={sellRate}
                     onChange={setSellRate}
                     ariaLabel="Tasa Venta (Bs/USDT)"
@@ -490,7 +510,7 @@ function CalculatorContent() {
             {/* Selector Explícito de Comisión Bancaria Venezolana */}
             <div>
               <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                Fricción Bancaria Nacional (VES)
+                Comisión bancaria
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <button
@@ -502,10 +522,7 @@ function CalculatorContent() {
                       : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
                   }`}
                 >
-                  <div className="text-xs font-mono font-bold">0.00% Mismo Banco</div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">
-                    Transferencia intrabancaria
-                  </div>
+                  <div className="text-xs font-mono font-bold">0% Mismo banco</div>
                 </button>
                 <button
                   type="button"
@@ -517,24 +534,20 @@ function CalculatorContent() {
                   }`}
                 >
                   <div className="text-xs font-mono font-bold">0.30% Pago Móvil</div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">
-                    Comisión interbancaria BCV
-                  </div>
                 </button>
               </div>
             </div>
           </section>
 
-          {/* Panel Derecho: Flujo de 3 Pasos + Simulador de Rotación Diaria */}
+          {/* Panel Derecho */}
           <section className="lg:col-span-7 space-y-5">
-            {/* Desglose en 3 Pasos exclusivamente en Binance P2P */}
             <div className="p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <span className="material-symbols-outlined text-[18px] text-secondary">
                     schema
                   </span>
-                   Trazabilidad del Ciclo en Binance P2P
+                  Resumen del ciclo
                 </h2>
                 <span
                   className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
@@ -543,7 +556,7 @@ function CalculatorContent() {
                       : "bg-error/15 text-error"
                   }`}
                 >
-                  {isProfitable ? "CICLO VIABLE" : "MARGEN INSUFICIENTE"}
+                  {isProfitable ? "RENTABLE" : "EN PÉRDIDA"}
                 </span>
               </div>
 

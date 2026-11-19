@@ -15,11 +15,15 @@ function getApiBaseUrl(): string {
 export interface User {
   id: number;
   username: string;
+  full_name?: string | null;
+  email?: string | null;
   role: "ADMIN" | "TRADER" | "INVITADO";
   telegram_id?: string | null;
   google_sheet_id?: string | null;
   permission_source?: string;
   telegram_linked?: boolean;
+  has_security_question?: boolean;
+  has_recovery_key?: boolean;
   binance_api_configured?: boolean;
   binance_key_type?: "HMAC" | "Ed25519" | string | null;
   google_sheet_configured?: boolean;
@@ -32,6 +36,7 @@ export interface AuthResponse {
   token_type: string;
   expires_in_seconds: number;
   user: User;
+  recovery_key?: string | null;
 }
 
 export interface BCVRates {
@@ -176,7 +181,9 @@ export async function apiRequest<T>(
   const isPublicEndpoint =
     endpoint.startsWith("/api/spreads/") ||
     endpoint.startsWith("/api/auth/login") ||
-    endpoint.startsWith("/api/auth/register");
+    endpoint.startsWith("/api/auth/register") ||
+    endpoint.startsWith("/api/auth/recover-") ||
+    endpoint.startsWith("/api/auth/reset-password");
 
   if (token && !isPublicEndpoint && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -438,8 +445,30 @@ export async function downloadOrdersExport(
 export interface RegisterData {
   username: string;
   password: string;
+  full_name?: string;
+  email?: string;
   telegram_id?: string;
   google_sheet_id?: string;
+  security_question?: string;
+  security_answer?: string;
+}
+
+export interface RecoveryOptions {
+  has_telegram: boolean;
+  has_security_question: boolean;
+  security_question?: string | null;
+  has_recovery_key: boolean;
+  is_locked: boolean;
+}
+
+export type RecoveryMethod = "telegram_otp" | "security_question" | "recovery_key";
+
+export interface RecoveryProfileUpdateData {
+  full_name?: string;
+  email?: string;
+  security_question?: string;
+  security_answer?: string;
+  regenerate_recovery_key?: boolean;
 }
 
 export async function registerUser(data: RegisterData): Promise<AuthResponse> {
@@ -452,6 +481,13 @@ export async function registerUser(data: RegisterData): Promise<AuthResponse> {
     localStorage.setItem("p2p_user", JSON.stringify(res.user));
   }
   return res;
+}
+
+export async function getRecoveryOptions(usernameOrEmail: string): Promise<RecoveryOptions> {
+  return apiRequest<RecoveryOptions>("/api/auth/recover-options", {
+    method: "POST",
+    body: JSON.stringify({ username: usernameOrEmail }),
+  });
 }
 
 export async function recoverPassword(username: string): Promise<{
@@ -469,12 +505,38 @@ export async function recoverPassword(username: string): Promise<{
 export async function resetPassword(
   username: string,
   reset_code: string,
-  new_password: string
-): Promise<{ success: boolean; message: string }> {
+  new_password: string,
+  method: RecoveryMethod = "telegram_otp"
+): Promise<{ success: boolean; message: string; new_recovery_key?: string | null }> {
   return apiRequest("/api/auth/reset-password", {
     method: "POST",
-    body: JSON.stringify({ username, reset_code, new_password }),
+    body: JSON.stringify({ username, reset_code, new_password, method }),
   });
+}
+
+export async function getMyProfile(): Promise<User> {
+  return apiRequest<User>("/api/auth/me");
+}
+
+export async function updateRecoveryProfile(data: RecoveryProfileUpdateData): Promise<{
+  success: boolean;
+  message: string;
+  user: User;
+  recovery_key?: string | null;
+}> {
+  const res = await apiRequest<{
+    success: boolean;
+    message: string;
+    user: User;
+    recovery_key?: string | null;
+  }>("/api/auth/recovery-profile", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (typeof window !== "undefined" && res.user) {
+    localStorage.setItem("p2p_user", JSON.stringify(res.user));
+  }
+  return res;
 }
 
 // Métodos de configuración y diagnóstico de Binance API
@@ -581,6 +643,10 @@ export interface GoogleSheetsConfigResponse {
   google_sheet_url?: string | null;
   google_auth_type: "SERVICE_ACCOUNT" | "OAUTH2" | string;
   service_account_email?: string | null;
+  oauth_available?: boolean;
+  oauth_connected?: boolean;
+  google_account_email?: string | null;
+  oauth_custom_configured?: boolean;
   is_connected: boolean;
   message: string;
 }
@@ -592,6 +658,7 @@ export interface GoogleSheetsSyncResponse {
   rows_exported: number;
   journal_entries_exported: number;
   service_account_email?: string | null;
+  oauth_connected?: boolean;
   message: string;
 }
 
@@ -619,6 +686,39 @@ export async function saveSheetsSettings(data: {
       google_sheet_id: data.google_sheet_id,
       google_auth_type: data.google_auth_type || "SERVICE_ACCOUNT",
     }),
+  });
+}
+
+export async function startGoogleOAuth(redirectUri?: string): Promise<{ authorization_url: string }> {
+  const qs = redirectUri ? `?redirect_uri=${encodeURIComponent(redirectUri)}` : "";
+  return apiRequest<{ authorization_url: string }>(`/api/settings/sheets/oauth/start${qs}`);
+}
+
+export async function completeGoogleOAuth(data: {
+  code: string;
+  state: string;
+  redirect_uri?: string;
+}): Promise<GoogleSheetsConfigResponse> {
+  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/callback", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function saveGoogleOAuthClientConfig(data: {
+  client_id: string;
+  client_secret: string;
+  redirect_uri?: string;
+}): Promise<GoogleSheetsConfigResponse> {
+  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/credentials", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function disconnectGoogleOAuth(): Promise<GoogleSheetsConfigResponse> {
+  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/disconnect", {
+    method: "POST",
   });
 }
 

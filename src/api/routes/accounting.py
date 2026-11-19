@@ -509,13 +509,10 @@ async def upload_voucher(
     if user_sheet_id:
         try:
             from config.settings import Settings
-            from src.reporting.sheets_exporter import SheetsExporter
+            from src.api.routes.settings import build_user_sheets_exporter
 
             app_settings = Settings()
-            exporter = SheetsExporter(
-                credentials_path=app_settings.GOOGLE_CREDENTIALS_FILE,
-                credentials_json=app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-            )
+            exporter = build_user_sheets_exporter(current_user, app_settings, db)
             dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
             exporter.append_voucher_entry(
                 sheet_id=str(user_sheet_id),

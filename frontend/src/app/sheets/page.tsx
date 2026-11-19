@@ -1,15 +1,19 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import {
   GoogleSheetsConfigResponse,
   GoogleSheetsSyncResponse,
   User,
+  completeGoogleOAuth,
+  disconnectGoogleOAuth,
   getCurrentUser,
   getSheetsSettings,
+  saveGoogleOAuthClientConfig,
   saveSheetsSettings,
+  startGoogleOAuth,
   syncSheetsNow,
 } from "@/lib/api";
 
@@ -17,15 +21,19 @@ export default function SheetsSyncPage() {
   const [user, setUser] = useState<User | null>(null);
   const [config, setConfig] = useState<GoogleSheetsConfigResponse | null>(null);
   const [sheetInput, setSheetInput] = useState<string>("");
-  const [authType, setAuthType] = useState<"SERVICE_ACCOUNT" | "OAUTH2">(
-    "SERVICE_ACCOUNT"
-  );
+  const [authMode, setAuthMode] = useState<"OAUTH2" | "SERVICE_ACCOUNT">("OAUTH2");
   const [lastSync, setLastSync] = useState<GoogleSheetsSyncResponse | null>(null);
+
+  const [showApiForm, setShowApiForm] = useState<boolean>(false);
+  const [oauthClientId, setOauthClientId] = useState<string>("");
+  const [oauthClientSecret, setOauthClientSecret] = useState<string>("");
 
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
+  const [connectingGoogle, setConnectingGoogle] = useState<boolean>(false);
   const [copiedEmail, setCopiedEmail] = useState<boolean>(false);
+  const oauthHandledRef = useRef<boolean>(false);
   const [feedback, setFeedback] = useState<{
     type: "success" | "error";
     text: string;
@@ -44,15 +52,15 @@ export default function SheetsSyncPage() {
       const res = await getSheetsSettings();
       setConfig(res);
       setSheetInput(res.google_sheet_id || "");
-      if (res.google_auth_type === "OAUTH2") {
-        setAuthType("OAUTH2");
-      } else {
-        setAuthType("SERVICE_ACCOUNT");
+      if (res.google_auth_type === "SERVICE_ACCOUNT" && !res.oauth_connected && res.service_account_email && !res.oauth_available) {
+        setAuthMode("SERVICE_ACCOUNT");
+      } else if (res.google_auth_type === "SERVICE_ACCOUNT" || res.google_auth_type === "OAUTH2") {
+        setAuthMode(res.google_auth_type);
       }
     } catch (err: any) {
       setFeedback({
         type: "error",
-        text: err.message || "Error consultando configuración de Google Sheets.",
+        text: err.message || "No se pudo cargar la configuración.",
       });
     } finally {
       setLoading(false);
@@ -60,8 +68,98 @@ export default function SheetsSyncPage() {
   }, []);
 
   useEffect(() => {
+    const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+    const code = params?.get("code");
+    const state = params?.get("state");
+    const oauthErr = params?.get("error");
+
+    if (oauthErr) {
+      window.history.replaceState({}, "", "/sheets");
+      setFeedback({ type: "error", text: "Autorización con Google cancelada." });
+      loadConfig();
+      return;
+    }
+
+    if (code && state) {
+      if (oauthHandledRef.current) return;
+      oauthHandledRef.current = true;
+      const redirectUri = `${window.location.origin}/sheets`;
+      window.history.replaceState({}, "", "/sheets");
+      setConnectingGoogle(true);
+      completeGoogleOAuth({ code, state, redirect_uri: redirectUri })
+        .then((res) => {
+          setConfig(res);
+          setSheetInput(res.google_sheet_id || "");
+          setAuthMode("OAUTH2");
+          setFeedback({ type: "success", text: res.message || "Cuenta de Google conectada." });
+        })
+        .catch((err: any) => {
+          setFeedback({ type: "error", text: err.message || "No se pudo completar la conexión con Google." });
+        })
+        .finally(() => {
+          setConnectingGoogle(false);
+          loadConfig();
+        });
+      return;
+    }
+
     loadConfig();
   }, [loadConfig]);
+
+  async function handleConnectGoogle() {
+    setFeedback(null);
+    setConnectingGoogle(true);
+    try {
+      const redirectUri = typeof window !== "undefined" ? `${window.location.origin}/sheets` : undefined;
+      const { authorization_url } = await startGoogleOAuth(redirectUri);
+      window.location.href = authorization_url;
+    } catch (err: any) {
+      setConnectingGoogle(false);
+      setShowApiForm(true);
+      setFeedback({
+        type: "error",
+        text: err.message || "Configura tu Client ID y Client Secret de Google API.",
+      });
+    }
+  }
+
+  async function handleSaveOAuthCreds(e: React.FormEvent) {
+    e.preventDefault();
+    if (!oauthClientId.trim() || !oauthClientSecret.trim()) return;
+    setFeedback(null);
+    setSaving(true);
+    try {
+      const redirectUri = typeof window !== "undefined" ? `${window.location.origin}/sheets` : undefined;
+      const res = await saveGoogleOAuthClientConfig({
+        client_id: oauthClientId.trim(),
+        client_secret: oauthClientSecret.trim(),
+        redirect_uri: redirectUri,
+      });
+      setConfig(res);
+      setOauthClientId("");
+      setOauthClientSecret("");
+      setShowApiForm(false);
+      setFeedback({ type: "success", text: res.message || "Credenciales guardadas." });
+    } catch (err: any) {
+      setFeedback({ type: "error", text: err.message || "No se pudieron guardar las credenciales." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDisconnectOAuth() {
+    setFeedback(null);
+    setSaving(true);
+    try {
+      const res = await disconnectGoogleOAuth();
+      setConfig(res);
+      setFeedback({ type: "success", text: res.message || "Cuenta desconectada." });
+    } catch (err: any) {
+      setFeedback({ type: "error", text: err.message || "Error al desconectar cuenta." });
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function handleSaveSheet(e: React.FormEvent) {
     e.preventDefault();
@@ -70,44 +168,32 @@ export default function SheetsSyncPage() {
     try {
       const res = await saveSheetsSettings({
         google_sheet_id: sheetInput.trim() || null,
-        google_auth_type: authType,
+        google_auth_type: authMode,
       });
       setConfig(res);
       setSheetInput(res.google_sheet_id || "");
-      setFeedback({
-        type: "success",
-        text: res.message || "Hoja de Google Sheets vinculada correctamente.",
-      });
+      setFeedback({ type: "success", text: res.message || "Hoja guardada." });
     } catch (err: any) {
-      setFeedback({
-        type: "error",
-        text: err.message || "No se pudo guardar el ID de Google Sheets.",
-      });
+      setFeedback({ type: "error", text: err.message || "No se pudo guardar el enlace." });
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleDisconnect() {
+  async function handleDisconnectSheet() {
     setFeedback(null);
     setSaving(true);
     try {
       const res = await saveSheetsSettings({
         google_sheet_id: null,
-        google_auth_type: authType,
+        google_auth_type: authMode,
       });
       setConfig(res);
       setSheetInput("");
       setLastSync(null);
-      setFeedback({
-        type: "success",
-        text: "Hoja de cálculo desvinculada de tu perfil operativo.",
-      });
+      setFeedback({ type: "success", text: "Hoja desvinculada." });
     } catch (err: any) {
-      setFeedback({
-        type: "error",
-        text: err.message || "Error al desvincular la hoja de cálculo.",
-      });
+      setFeedback({ type: "error", text: err.message || "Error al desvincular la hoja." });
     } finally {
       setSaving(false);
     }
@@ -121,19 +207,13 @@ export default function SheetsSyncPage() {
       setLastSync(res);
       setFeedback({
         type: res.success ? "success" : "error",
-        text:
-          res.message ||
-          (res.success
-            ? `Sincronización completada: ${res.rows_exported} órdenes y ${res.journal_entries_exported} asientos exportados.`
-            : "No se pudo sincronizar con Google Sheets. Verifica permisos del documento."),
+        text: res.message,
       });
       await loadConfig();
     } catch (err: any) {
       setFeedback({
         type: "error",
-        text:
-          err.message ||
-          "Error exportando a Google Sheets. Verifica que compartiste la hoja con el correo Service Account.",
+        text: err.message || "No se pudo sincronizar con Google Sheets.",
       });
     } finally {
       setSyncing(false);
@@ -149,39 +229,35 @@ export default function SheetsSyncPage() {
 
   if (!user || user.role === "INVITADO") {
     return (
-      <AppShell
-        title="Sincronización Google Sheets"
-        badge="ACCESO RESTRINGIDO"
-        subtitle="Exportación automática en la nube reservada para operadores Comerciante y Administrador."
-      >
-        <div className="max-w-lg mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
-          <span className="material-symbols-outlined text-[36px] text-tertiary">
-            sync_alt
-          </span>
-          <h2 className="text-base font-bold text-white">
-            Inicia sesión con rol Comerciante o Administrador
-          </h2>
+      <AppShell title="Google Sheets" subtitle="Sincroniza tu contabilidad en la nube.">
+        <div className="max-w-md mx-auto my-12 p-6 rounded-2xl bg-surface-container-low border border-[#1e2430] text-center space-y-4">
+          <span className="material-symbols-outlined text-[36px] text-tertiary">table_chart</span>
+          <h2 className="text-base font-bold text-white">Inicia sesión para continuar</h2>
           <p className="text-xs text-slate-400">
-            Vincula tu propia hoja de Google Sheets para recibir órdenes PEPS, Libro Diario y Libro Mayor en tiempo real.
+            Disponible para cuentas de comerciante o administrador.
           </p>
           <Link
             href="/login"
             className="inline-block px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold"
           >
-            Iniciar Sesión
+            Iniciar sesión
           </Link>
         </div>
       </AppShell>
     );
   }
 
-  const isConnected = Boolean(config?.is_connected && config?.google_sheet_id);
+  const hasSheet = Boolean(config?.google_sheet_id);
+  const oauthConnected = Boolean(config?.oauth_connected);
+  const canSync = hasSheet || oauthConnected;
+  const redirectHint =
+    typeof window !== "undefined" ? `${window.location.origin}/sheets` : "http://localhost:3000/sheets";
 
   return (
     <AppShell
-      title="Sincronización Google Sheets"
-      badge={isConnected ? "CONECTADO" : "PENDIENTE DE VÍNCULO"}
-      subtitle="Puente directo entre el motor contable PEPS/SENIAT y tu hoja de cálculo individual en la nube."
+      title="Google Sheets"
+      badge={canSync ? "CONECTADO" : "SIN CONECTAR"}
+      subtitle="Sincroniza órdenes y contabilidad con tu hoja de cálculo."
       actions={
         <div className="flex items-center gap-2">
           {config?.google_sheet_url && (
@@ -191,26 +267,20 @@ export default function SheetsSyncPage() {
               rel="noreferrer"
               className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-tertiary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5"
             >
-              <span className="material-symbols-outlined text-[15px] text-tertiary">
-                open_in_new
-              </span>
-              <span>Abrir Hoja de Cálculo</span>
+              <span className="material-symbols-outlined text-[15px] text-tertiary">open_in_new</span>
+              <span>Abrir hoja</span>
             </a>
           )}
           <button
             type="button"
             onClick={handleSyncNow}
-            disabled={!isConnected || syncing}
-            className="px-3.5 py-1.5 rounded-lg bg-tertiary text-on-tertiary text-xs font-bold hover:brightness-110 disabled:opacity-40 flex items-center gap-1.5"
+            disabled={!canSync || syncing || connectingGoogle}
+            className="px-3.5 py-1.5 rounded-lg bg-tertiary text-on-tertiary text-xs font-bold hover:brightness-110 disabled:opacity-40 flex items-center gap-1.5 cursor-pointer"
           >
-            <span
-              className={`material-symbols-outlined text-[16px] ${
-                syncing ? "animate-spin" : ""
-              }`}
-            >
+            <span className={`material-symbols-outlined text-[16px] ${syncing ? "animate-spin" : ""}`}>
               sync
             </span>
-            <span>{syncing ? "Exportando..." : "Sincronizar Ahora"}</span>
+            <span>{syncing ? "Sincronizando..." : "Sincronizar"}</span>
           </button>
         </div>
       }
@@ -218,6 +288,8 @@ export default function SheetsSyncPage() {
       <div className="space-y-5">
         {feedback && (
           <div
+            role="alert"
+            aria-live="polite"
             className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs ${
               feedback.type === "success"
                 ? "bg-tertiary/10 border-tertiary/30 text-emerald-200"
@@ -233,6 +305,7 @@ export default function SheetsSyncPage() {
             <button
               type="button"
               onClick={() => setFeedback(null)}
+              aria-label="Cerrar notificación"
               className="text-slate-400 hover:text-white"
             >
               ✕
@@ -240,184 +313,281 @@ export default function SheetsSyncPage() {
           </div>
         )}
 
-        {/* 3 KPIs de Estado de Conexión */}
+        {/* Resumen compacto */}
         <section className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              Estado del Vínculo
+              Hoja vinculada
             </div>
             <div
-              className={`mt-2 text-lg font-mono font-bold flex items-center gap-2 ${
-                isConnected ? "text-tertiary" : "text-primary"
+              className={`mt-1.5 text-base font-mono font-bold flex items-center gap-2 ${
+                hasSheet ? "text-tertiary" : "text-primary"
               }`}
             >
               <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  isConnected ? "bg-tertiary animate-pulse" : "bg-primary-container"
+                className={`w-2 h-2 rounded-full ${
+                  hasSheet ? "bg-tertiary animate-pulse" : "bg-primary-container"
                 }`}
               />
-              {loading
-                ? "Verificando..."
-                : isConnected
-                ? "HOJA VINCULADA"
-                : "SIN HOJA ASIGNADA"}
+              {loading ? "Cargando..." : hasSheet ? "Lista" : "Pendiente"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 truncate">
-              {config?.google_sheet_id
-                ? `ID: ${config.google_sheet_id}`
-                : "Pega la URL de tu Google Sheet abajo"}
+              {config?.google_sheet_id || "Se creará al conectar con Google"}
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              Modo de Autenticación en la Nube
+              Método de acceso
             </div>
-            <div className="mt-2 text-lg font-mono font-bold text-white">
-              {authType === "SERVICE_ACCOUNT" ? "Cuenta de Servicio" : "OAuth 2.0"}
+            <div className="mt-1.5 text-base font-mono font-bold text-white">
+              {oauthConnected ? "Cuenta Google" : "Cuenta de servicio"}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400">
-              API Oficial Google Sheets v4 (TLS 1.3)
+            <div className="mt-1 text-[11px] font-mono text-slate-400 truncate">
+              {config?.google_account_email ||
+                (oauthConnected ? "Sesión activa" : config?.service_account_email || "Sin configurar")}
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              Última Corrida Manual
+              Última sincronización
             </div>
-            <div className="mt-2 text-lg font-mono font-bold text-secondary tabular-nums">
+            <div className="mt-1.5 text-base font-mono font-bold text-secondary tabular-nums">
               {lastSync
-                ? `${lastSync.rows_exported} órdenes / ${lastSync.journal_entries_exported} asientos`
-                : "Lista para exportar"}
+                ? `${lastSync.rows_exported} órds / ${lastSync.journal_entries_exported} asientos`
+                : "Sin ejecutar"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Operador aislado: {user.username}
+              4 pestañas automáticas
             </div>
           </div>
         </section>
 
-        {/* Configuración y Paso a Paso */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* Formulario Principal */}
-          <section className="lg:col-span-7 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
-            <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between">
-              <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                <span className="material-symbols-outlined text-[18px] text-tertiary">
-                  link
-                </span>
-                Configuración de Hoja Contable del Operador
-              </h2>
-              <span className="text-[10px] font-mono text-slate-400">
-                Aislado por Usuario
-              </span>
+          {/* Conexión Google */}
+          <section className="lg:col-span-7 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-5">
+            <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[#1e2430] pb-3">
+              <h2 className="text-sm font-bold text-white">Conexión directa</h2>
+              <div className="inline-flex rounded-lg bg-surface-container p-0.5 border border-[#1e2430] text-[11px] font-mono">
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("OAUTH2")}
+                  className={`px-3 py-1 rounded-md transition-colors cursor-pointer ${
+                    authMode === "OAUTH2"
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Cuenta de Google
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("SERVICE_ACCOUNT")}
+                  className={`px-3 py-1 rounded-md transition-colors cursor-pointer ${
+                    authMode === "SERVICE_ACCOUNT"
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Cuenta de servicio
+                </button>
+              </div>
             </div>
 
-            {/* Correo Service Account Copiable */}
-            <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-2">
-              <div className="text-[11px] font-semibold text-white">
-                Paso 1: Comparte tu hoja de Google Sheets como &ldquo;Editor&rdquo; con la cuenta de servicio:
-              </div>
-              <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430]">
-                <code className="text-xs font-mono text-secondary truncate">
-                  {config?.service_account_email ||
-                    "Configura GOOGLE_SERVICE_ACCOUNT_JSON en el servidor para habilitar escritura en la nube"}
-                </code>
-                {config?.service_account_email && (
+            {authMode === "OAUTH2" ? (
+              <div className="space-y-4">
+                <div className="p-4 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold text-white">
+                      {oauthConnected
+                        ? `Conectado${config?.google_account_email ? `: ${config.google_account_email}` : ""}`
+                        : "Accede con tu cuenta de Google"}
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {oauthConnected
+                        ? "Autorización activa para crear y actualizar tu hoja."
+                        : "Autoriza acceso a Google Sheets sin compartir correos manualmente."}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {oauthConnected ? (
+                      <button
+                        type="button"
+                        onClick={handleDisconnectOAuth}
+                        disabled={saving}
+                        className="px-3 py-1.5 rounded-lg bg-error/10 border border-error/30 text-error text-xs font-mono hover:bg-error/20 cursor-pointer"
+                      >
+                        Desconectar
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleConnectGoogle}
+                        disabled={connectingGoogle}
+                        className="px-3.5 py-2 rounded-lg bg-white text-slate-900 text-xs font-bold hover:bg-slate-200 disabled:opacity-50 flex items-center gap-2 cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">login</span>
+                        <span>{connectingGoogle ? "Conectando..." : "Conectar con Google"}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Configuración opcional de API OAuth desde la UI */}
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-slate-400 font-mono">
+                    {config?.oauth_available ? "API Google lista" : "Falta configurar API de Google Cloud"}
+                  </span>
                   <button
                     type="button"
-                    onClick={handleCopyServiceEmail}
-                    className="px-2.5 py-1 rounded bg-secondary/15 text-secondary text-[11px] font-mono font-semibold hover:bg-secondary/25 shrink-0"
+                    onClick={() => setShowApiForm((prev) => !prev)}
+                    className="text-primary hover:underline font-mono cursor-pointer"
                   >
-                    {copiedEmail ? "¡Copiado!" : "Copiar Correo"}
+                    {showApiForm ? "Ocultar credenciales API" : "Configurar credenciales Google API"}
                   </button>
+                </div>
+
+                {showApiForm && (
+                  <form
+                    onSubmit={handleSaveOAuthCreds}
+                    className="p-4 rounded-xl bg-surface-container border border-[#1e2430] space-y-3"
+                  >
+                    <p className="text-[11px] text-slate-400">
+                      Autoriza en Google Cloud esta URL de redirección:{" "}
+                      <code className="text-secondary font-mono">{redirectHint}</code>
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label
+                          htmlFor="google-oauth-client-id"
+                          className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+                        >
+                          Client ID
+                        </label>
+                        <input
+                          id="google-oauth-client-id"
+                          type="text"
+                          required
+                          autoComplete="off"
+                          value={oauthClientId}
+                          onChange={(e) => setOauthClientId(e.target.value)}
+                          placeholder="xxx.apps.googleusercontent.com"
+                          className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="google-oauth-client-secret"
+                          className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+                        >
+                          Client Secret
+                        </label>
+                        <input
+                          id="google-oauth-client-secret"
+                          type="password"
+                          required
+                          autoComplete="off"
+                          value={oauthClientSecret}
+                          onChange={(e) => setOauthClientSecret(e.target.value)}
+                          placeholder="GOCSPX-..."
+                          className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={saving}
+                        className="px-3.5 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                      >
+                        {saving ? "Guardando..." : "Guardar API Google"}
+                      </button>
+                    </div>
+                  </form>
                 )}
               </div>
-            </div>
-
-            <form onSubmit={handleSaveSheet} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                  Paso 2: Enlace Completo o ID de Hoja de Google Sheets
-                </label>
-                <input
-                  type="text"
-                  value={sheetInput}
-                  onChange={(e) => setSheetInput(e.target.value)}
-                  placeholder="https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-tertiary focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  El sistema extrae automáticamente el identificador alfanumérico desde el enlace.
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between gap-3 flex-wrap pt-2">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50"
-                  >
-                    {saving ? "Guardando..." : "Guardar Vínculo"}
-                  </button>
-
-                  {isConnected && (
+            ) : (
+              <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-2">
+                <div className="text-[11px] font-semibold text-white">
+                  Comparte tu hoja como Editor con este correo:
+                </div>
+                <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430]">
+                  <code className="text-xs font-mono text-secondary truncate">
+                    {config?.service_account_email || "Sin cuenta de servicio en servidor"}
+                  </code>
+                  {config?.service_account_email && (
                     <button
                       type="button"
-                      onClick={handleDisconnect}
-                      disabled={saving}
-                      className="px-3.5 py-2 rounded-lg bg-error/10 border border-error/30 text-error text-xs font-mono hover:bg-error/20"
+                      onClick={handleCopyServiceEmail}
+                      className="px-2.5 py-1 rounded bg-secondary/15 text-secondary text-[11px] font-mono font-semibold hover:bg-secondary/25 shrink-0 cursor-pointer"
                     >
-                      Desvincular
+                      {copiedEmail ? "Copiado" : "Copiar"}
                     </button>
                   )}
                 </div>
+              </div>
+            )}
 
-                <span className="text-[11px] font-mono text-slate-500">
-                  Cero credenciales expuestas en navegador
-                </span>
+            <form onSubmit={handleSaveSheet} className="space-y-3 pt-2 border-t border-[#1e2430]">
+              <div>
+                <label
+                  htmlFor="google-sheet-url"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
+                >
+                  Enlace o ID de hoja (opcional si usas Cuenta Google)
+                </label>
+                <input
+                  id="google-sheet-url"
+                  type="text"
+                  autoComplete="url"
+                  enterKeyHint="done"
+                  value={sheetInput}
+                  onChange={(e) => setSheetInput(e.target.value)}
+                  placeholder="https://docs.google.com/spreadsheets/d/..."
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-tertiary focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                >
+                  {saving ? "Guardando..." : "Guardar"}
+                </button>
+
+                {hasSheet && (
+                  <button
+                    type="button"
+                    onClick={handleDisconnectSheet}
+                    disabled={saving}
+                    className="px-3.5 py-2 rounded-lg bg-error/10 border border-error/30 text-error text-xs font-mono hover:bg-error/20 cursor-pointer"
+                  >
+                    Quitar hoja
+                  </button>
+                )}
               </div>
             </form>
           </section>
 
-          {/* Estructura de Pestañas Sincronizadas */}
-          <section className="lg:col-span-5 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3.5">
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <span className="material-symbols-outlined text-[18px] text-primary">
-                dataset
-              </span>
-              Estructura Contable Exportada
-            </h2>
-            <p className="text-xs text-slate-400">
-              Cada sincronización actualiza de forma idempotente las pestañas financieras de tu libro:
-            </p>
-
-            <div className="space-y-2.5">
+          {/* Pestañas exportadas */}
+          <section className="lg:col-span-5 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3">
+            <h2 className="text-sm font-bold text-white">Pestañas sincronizadas</h2>
+            <div className="space-y-2">
               {[
-                {
-                  tab: "1. Resumen_Fiscal",
-                  desc: "KPIs mensuales en VES y USD BCV, utilidad neta FIFO y comisiones deducibles.",
-                },
-                {
-                  tab: "2. Ordenes_P2P",
-                  desc: "Historial cronológico de compras y ventas verificadas en Binance C2C con tasa BCV histórica.",
-                },
-                {
-                  tab: "3. Libro_Diario_SENIAT",
-                  desc: "Asientos contables en partida doble (Debe = Haber) con sello criptográfico SHA-256.",
-                },
-                {
-                  tab: "4. Libro_Mayor",
-                  desc: "Saldos iniciales, débitos, créditos y cierres consolidados por cuenta contable.",
-                },
+                { tab: "Detalle Fiscal", desc: "Órdenes cerradas, comisiones y ganancia neta." },
+                { tab: "Resumen Ejecutivo", desc: "Totales y margen consolidado." },
+                { tab: "Libro Diario", desc: "Asientos en partida doble (Debe y Haber)." },
+                { tab: "Libro Mayor", desc: "Saldos consolidados por cuenta." },
               ].map((item) => (
                 <div
                   key={item.tab}
                   className="p-3 rounded-lg bg-surface-container border border-[#1e2430]"
                 >
-                  <div className="text-xs font-mono font-bold text-tertiary">
-                    {item.tab}
-                  </div>
+                  <div className="text-xs font-mono font-bold text-tertiary">{item.tab}</div>
                   <div className="text-[11px] text-slate-400 mt-0.5">{item.desc}</div>
                 </div>
               ))}

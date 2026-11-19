@@ -766,6 +766,34 @@
       - Cobertura de pruebas unitarias y de integración del pipeline con mocks en `tests/unit/test_macro_*.py`.
       - 0 violaciones de seguridad en escaneo con `security-review`.
 
+57. **Registro Enriquecido y Recuperación Segura Multi-Factor de Perfil (ADR 057)**:
+    - **Modelo y Migración Automática (`src/data/models.py`, `src/data/database.py`)**:
+      - Se agregaron a `User` (`app_users`) los campos `full_name`, `email` (único e indexado), `security_question`, `security_answer_hash`, `recovery_key_hash`, `failed_recovery_attempts` y `recovery_locked_until`, con migración automática segura en `init_db()` para SQLite y PostgreSQL (Neon).
+      - **Regla Constitucional #5 (Cero Secretos en Texto Plano)**: Tanto la respuesta secreta normalizada como la Llave Maestra de Recuperación (`P2P-XXXX-XXXX-XXXX`) se almacenan exclusivamente mediante hash **PBKDF2-HMAC-SHA256** con salting aleatorio de 16 bytes y se validan en tiempo constante (`hmac.compare_digest`).
+    - **Flujo Multi-Método y Anti-Fuerza Bruta (`src/api/routes/auth.py`, `src/api/schemas/auth.py`, `src/security/auth_service.py`)**:
+      - `POST /api/auth/register`: Acepta nombre completo, correo de respaldo y pregunta/respuesta secreta; emite una **Llave Maestra de Recuperación de un solo uso** en la respuesta inicial.
+      - `POST /api/auth/recover-options`: Permite identificar el perfil por alias, correo electrónico o Telegram ID, reportando qué métodos de recuperación tiene activos (`Telegram OTP`, `Pregunta Secreta`, `Llave Maestra`).
+      - `POST /api/auth/reset-password`: Soporta los 3 métodos (`telegram_otp`, `security_question`, `recovery_key`); al usar la Llave Maestra rota automáticamente a una nueva llave e invalida la anterior; tras 5 intentos fallidos bloquea la recuperación durante 15 minutos (`HTTP 429`).
+      - `POST /api/auth/recovery-profile`: Permite a cuentas ya registradas configurar o actualizar su correo, pregunta secreta y regenerar su Llave Maestra desde `/settings`.
+    - **Interfaz Frontend (`frontend/src/app/register/page.tsx`, `login/page.tsx`, `settings/page.tsx`)**:
+      - Formulario de registro ampliado con descarga/copia única de Llave Maestra `.txt`, recuperación multipaso multi-método en `/login` y panel de respaldo de perfil en `/settings`.
+
+58. **Registro de Skill `modern-web-guidance` y Modernización Integral del Frontend (ADR 058)**:
+    - **Instalación Local del Skill**:
+      - Registrado [`.agents/skills/modern-web-guidance/SKILL.md`](file:///c:/p2p-bot-merchant/.agents/skills/modern-web-guidance/SKILL.md) desde `GoogleChrome/modern-web-guidance` (`skills/modern-web-guidance/SKILL.md`) e indexado en [`skills-lock.json`](file:///c:/p2p-bot-merchant/skills-lock.json) con hash SHA-256 `1292f0ce14794a5bc49af58e99d5f6d4edf10acd9472cade94ab0c5590892716`.
+      - Nota operativa: el CLI `npx modern-web-guidance@latest` requiere Node.js >= 22 (entorno actual `v20.18.0`), por lo que las guías oficiales se consultaron directamente desde el repositorio oficial.
+    - **Actualización Transversal de Componentes Next.js**:
+      - [`frontend/src/app/globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css): Scrollbar nativo accesible (`scrollbar-width: auto`, `scrollbar-color`), `@view-transition { navigation: auto; }`, `color-scheme: dark`, `accent-color: #f59e0b`, `@media (prefers-reduced-motion: reduce)`, `@media (prefers-contrast: more)`, validación diferida `:user-invalid` / `:user-valid`, `.defer-render` (`content-visibility: auto`) y soporte fluido táctil/touchpad (`touch-action: pan-y`).
+      - [`frontend/src/components/app-shell.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/app-shell.tsx): Drawer con `overscroll-contain` + `touch-pan-y`, `aria-label`, `aria-expanded`, `aria-controls`, `aria-current="page"`, y banner de parada segura con `role="alert" aria-live="assertive"`.
+      - Formularios y Tablas (`register`, `login`, `settings`, `calculator`, `orders`, `accounting`, `sheets`, `page.tsx`): asociación semántica `htmlFor`+`id`, atributos `autoComplete`, `inputMode`, `enterKeyHint`, alertas `role="alert" aria-live="polite"`, tablas con `<thead className="sticky top-0 z-10">` + `scope="col"` dentro de contenedores `overscroll-x-contain`, modales `role="dialog" aria-modal="true" overscroll-contain`, y diferimiento de renderizado `.defer-render` en tablas pesadas.
+
+59. **Google Sheets OAuth 2.0 Directo y Simplificación Integral de Etiquetas UI (ADR 059)**:
+    - **Autenticación Directa por API Google OAuth 2.0 ([`src/integrations/google_oauth.py`](file:///c:/p2p-bot-merchant/src/integrations/google_oauth.py), [`src/api/routes/settings.py`](file:///c:/p2p-bot-merchant/src/api/routes/settings.py), [`src/reporting/sheets_exporter.py`](file:///c:/p2p-bot-merchant/src/reporting/sheets_exporter.py))**:
+      - Flujo OAuth 2.0 completo (`GET /api/settings/sheets/oauth/start`, `POST /api/settings/sheets/oauth/callback`, `POST /api/settings/sheets/oauth/credentials`, `POST /api/settings/sheets/oauth/disconnect`) con parámetro `state` firmado HMAC-SHA256 anti-CSRF (TTL 600s vinculado a `user_id`), validación estricta de `redirect_uri` anti-Open-Redirect y almacenamiento cifrado AES-256-GCM en `ApiKeyManager` (`user_{id}:google_refresh_token` y `google_oauth_client`).
+      - Soporte para creación automática de hoja de cálculo (`SheetsExporter.create_spreadsheet`) al conectar cuenta Google y soporte OAuth transparente en sincronización manual (`sync_user_sheets_now`), subida OCR (`accounting.py`) y comandos Telegram (`telegram_notifier.py`).
+    - **Simplificación Integral de UI y Copy ([`sheets/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/sheets/page.tsx), `app-shell.tsx`, `page.tsx`, `calculator/page.tsx`, `orders/page.tsx`, `accounting/page.tsx`, `settings/page.tsx`, `login/page.tsx`, `register/page.tsx`)**:
+      - Eliminación de jerga técnica criptográfica/interna en interfaz (`AES-256-GCM`, `PBKDF2`, `SHA-256`, `Write-Only`, `Regla Constitucional #5`, `Bóveda (.env)`, `Sin IGTF`, `Filtro Binance`), badges redundantes y subtítulos largos, dejando textos concisos y centrados en el operador.
+
 ---
 
 ## 🎯 Guía Operativa Actual
