@@ -4,6 +4,9 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  RecoveryMethod,
+  RecoveryOptions,
+  getRecoveryOptions,
   login,
   loginTelegram,
   loginTelegramWebApp,
@@ -24,7 +27,10 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  // Recuperación vía OTP Telegram
+  // Recuperación Multi-Método (Telegram OTP / Pregunta Secreta / Llave Maestra)
+  const [recoveryMethod, setRecoveryMethod] = useState<RecoveryMethod>("telegram_otp");
+  const [recoveryOptions, setRecoveryOptions] = useState<RecoveryOptions | null>(null);
+  const [rotatedRecoveryKey, setRotatedRecoveryKey] = useState<string | null>(null);
   const [resetCode, setResetCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
@@ -107,16 +113,57 @@ export default function LoginPage() {
     }
   }
 
-  async function handleRequestOtp(e: React.FormEvent) {
+  async function handleInspectRecoveryOptions(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setInfoMessage(null);
+    setRotatedRecoveryKey(null);
 
     if (!username.trim()) {
-      setError("Ingresa tu alias de operador para enviar el código por Telegram.");
+      setError("Ingresa tu alias, correo electrónico o ID de Telegram.");
       return;
     }
 
+    setLoading(true);
+    try {
+      const opts = await getRecoveryOptions(username.trim());
+      setRecoveryOptions(opts);
+      if (opts.is_locked) {
+        setError(
+          "Esta cuenta se encuentra bloqueada temporalmente por múltiples intentos fallidos de recuperación (15 min)."
+        );
+        return;
+      }
+
+      if (opts.has_security_question) {
+        setRecoveryMethod("security_question");
+      } else if (opts.has_recovery_key) {
+        setRecoveryMethod("recovery_key");
+      } else if (opts.has_telegram) {
+        setRecoveryMethod("telegram_otp");
+        const res = await recoverPassword(username.trim());
+        setInfoMessage(
+          res.message ||
+            "Se envió un código OTP de 6 dígitos a tu Telegram vinculado."
+        );
+      } else {
+        setRecoveryMethod("telegram_otp");
+        setInfoMessage(
+          "Si el perfil existe y dispone de métodos configurados, elige el método de verificación abajo."
+        );
+      }
+      setResetCode("");
+      setMode("recover_reset");
+    } catch (err: any) {
+      setError(err.message || "No fue posible consultar las opciones de recuperación.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSendTelegramOtp() {
+    setError(null);
+    setInfoMessage(null);
     setLoading(true);
     try {
       const res = await recoverPassword(username.trim());
@@ -124,9 +171,8 @@ export default function LoginPage() {
         res.message ||
           "Si el usuario tiene Telegram vinculado, se envió un código OTP de 6 dígitos."
       );
-      setMode("recover_reset");
     } catch (err: any) {
-      setError(err.message || "No fue posible solicitar la recuperación.");
+      setError(err.message || "No se pudo enviar el código OTP por Telegram.");
     } finally {
       setLoading(false);
     }
@@ -138,7 +184,9 @@ export default function LoginPage() {
     setInfoMessage(null);
 
     if (!resetCode.trim() || newPassword.length < 8) {
-      setError("Ingresa el código OTP de 6 dígitos y una contraseña de al menos 8 caracteres.");
+      setError(
+        "Completa la verificación requerida y define una contraseña de al menos 8 caracteres."
+      );
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -148,27 +196,35 @@ export default function LoginPage() {
 
     setLoading(true);
     try {
-      const res = await resetPassword(username.trim(), resetCode.trim(), newPassword);
+      const res = await resetPassword(
+        username.trim(),
+        resetCode.trim(),
+        newPassword,
+        recoveryMethod
+      );
       setInfoMessage(res.message || "Contraseña actualizada exitosamente. Inicia sesión.");
+      if (res.new_recovery_key) {
+        setRotatedRecoveryKey(res.new_recovery_key);
+      }
       setPassword("");
       setResetCode("");
       setNewPassword("");
       setConfirmNewPassword("");
       setMode("login");
     } catch (err: any) {
-      setError(err.message || "Código OTP inválido o expirado.");
+      setError(err.message || "Verificación fallida o código expirado.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-background text-on-surface flex flex-col justify-between relative overflow-hidden">
+    <div className="min-h-screen bg-background text-on-surface flex flex-col justify-between relative overflow-x-hidden">
       {/* Resplandor ambiental sutil Obsidian */}
       <div className="pointer-events-none absolute -top-40 left-1/2 -translate-x-1/2 w-[680px] h-[340px] rounded-full bg-primary-container/8 blur-[130px]" />
 
       {/* Barra Superior */}
-      <header className="relative z-10 h-16 px-5 lg:px-10 flex items-center justify-between border-b border-[#1e2430] bg-surface/80 backdrop-blur-md">
+      <header className="sticky top-0 z-20 h-16 px-5 lg:px-10 flex items-center justify-between border-b border-[#1e2430] bg-surface/85 backdrop-blur-md">
         <Link href="/" className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-primary-container/15 border border-primary-container/30 flex items-center justify-center text-primary-container">
             <span className="material-symbols-outlined text-[18px]">bolt</span>
@@ -223,19 +279,15 @@ export default function LoginPage() {
         <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-[#1e2430] shadow-2xl p-6 sm:p-8">
           {/* Encabezado */}
           <div className="mb-6">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-primary-container/10 border border-primary-container/25 text-[10px] font-mono font-semibold uppercase tracking-wider text-primary mb-3">
-              <span className="material-symbols-outlined text-[14px]">lock</span>
-              Terminal Segura de Operadores
-            </div>
             <h1 className="text-xl font-bold text-white tracking-tight">
               {mode === "login"
-                ? "Acceso a la Mesa Operativa"
-                : "Recuperación vía Código de Telegram"}
+                ? "Iniciar sesión"
+                : "Recuperar acceso"}
             </h1>
             <p className="text-xs text-slate-400 mt-1">
               {mode === "login"
-                ? "Ingresa tus credenciales de operador para gestionar márgenes, órdenes y contabilidad SENIAT."
-                : "Recibe un código temporal de un solo uso en tu Telegram vinculado."}
+                ? "Ingresa con tu usuario y contraseña."
+                : "Elige un método para restablecer tu contraseña."}
             </p>
           </div>
 
@@ -255,6 +307,24 @@ export default function LoginPage() {
                 check_circle
               </span>
               <span>{infoMessage}</span>
+            </div>
+          )}
+
+          {rotatedRecoveryKey && (
+            <div className="mb-5 p-3.5 rounded-lg bg-primary-container/10 border border-primary-container/35 text-xs space-y-1.5">
+              <div className="font-mono font-bold text-primary uppercase text-[10px]">
+                Nueva Llave Maestra Rotada (Guárdala):
+              </div>
+              <div className="font-mono font-bold text-white tracking-wider select-all">
+                {rotatedRecoveryKey}
+              </div>
+              <button
+                type="button"
+                onClick={() => navigator.clipboard?.writeText(rotatedRecoveryKey)}
+                className="text-[11px] font-mono text-primary hover:underline"
+              >
+                Copiar nueva llave
+              </button>
             </div>
           )}
 
@@ -363,16 +433,16 @@ export default function LoginPage() {
           )}
 
           {mode === "recover_request" && (
-            <form onSubmit={handleRequestOtp} className="space-y-4">
+            <form onSubmit={handleInspectRecoveryOptions} className="space-y-4">
               <div>
                 <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                  Alias de Operador Registrado
+                  Alias, Correo Electrónico o Telegram ID
                 </label>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Tu usuario en Sistema Comerciante P2P"
+                  placeholder="ej. trader_caracas o correo@ejemplo.com"
                   className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
                 />
               </div>
@@ -382,7 +452,7 @@ export default function LoginPage() {
                 disabled={loading}
                 className="w-full py-2.5 px-4 rounded-lg bg-primary-container text-on-primary font-bold text-sm hover:brightness-110 disabled:opacity-50 transition-all"
               >
-                {loading ? "Enviando OTP..." : "Enviar Código OTP por Telegram"}
+                {loading ? "Consultando métodos..." : "Continuar con Recuperación Segura"}
               </button>
 
               <button
@@ -400,19 +470,126 @@ export default function LoginPage() {
 
           {mode === "recover_reset" && (
             <form onSubmit={handleResetPassword} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                  Código OTP de 6 dígitos (Telegram)
-                </label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  value={resetCode}
-                  onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ""))}
-                  placeholder="000000"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-center tracking-[0.35em] text-base text-primary font-mono font-bold"
-                />
+              {/* Selector de método de verificación */}
+              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-lg bg-surface-container border border-[#1e2430] text-[10px] font-mono">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRecoveryMethod("security_question");
+                    setResetCode("");
+                    setError(null);
+                  }}
+                  className={`py-1.5 px-2 rounded transition-colors ${
+                    recoveryMethod === "security_question"
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-300 hover:text-white"
+                  }`}
+                >
+                  Pregunta Secreta
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRecoveryMethod("recovery_key");
+                    setResetCode("");
+                    setError(null);
+                  }}
+                  className={`py-1.5 px-2 rounded transition-colors ${
+                    recoveryMethod === "recovery_key"
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-300 hover:text-white"
+                  }`}
+                >
+                  Llave Maestra
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRecoveryMethod("telegram_otp");
+                    setResetCode("");
+                    setError(null);
+                  }}
+                  className={`py-1.5 px-2 rounded transition-colors ${
+                    recoveryMethod === "telegram_otp"
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-300 hover:text-white"
+                  }`}
+                >
+                  OTP Telegram
+                </button>
               </div>
+
+              {recoveryMethod === "security_question" && (
+                <div className="space-y-2">
+                  <div className="p-2.5 rounded-lg bg-surface-container border border-[#1e2430] text-xs text-slate-200">
+                    <span className="block text-[10px] font-mono uppercase text-primary mb-0.5">
+                      Pregunta de Seguridad Configurada:
+                    </span>
+                    {recoveryOptions?.security_question ||
+                      "Ingresa la respuesta de tu pregunta secreta registrada."}
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                      Tu Respuesta Secreta
+                    </label>
+                    <input
+                      type="text"
+                      value={resetCode}
+                      onChange={(e) => setResetCode(e.target.value)}
+                      placeholder="Escribe tu respuesta..."
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {recoveryMethod === "recovery_key" && (
+                <div>
+                  <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                    Llave Maestra de Respaldo (P2P-XXXX-XXXX-XXXX)
+                  </label>
+                  <input
+                    type="text"
+                    value={resetCode}
+                    onChange={(e) => setResetCode(e.target.value.toUpperCase())}
+                    placeholder="P2P-XXXX-XXXX-XXXX"
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-center tracking-widest text-sm text-primary font-mono font-bold"
+                  />
+                </div>
+              )}
+
+              {recoveryMethod === "telegram_otp" && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="login-otp"
+                      className="block text-[11px] font-mono uppercase tracking-wider text-slate-400"
+                    >
+                      Código OTP de 6 dígitos (Telegram)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleSendTelegramOtp}
+                      disabled={loading}
+                      className="text-[11px] font-mono text-secondary hover:underline"
+                    >
+                      Enviar / Reenviar OTP
+                    </button>
+                  </div>
+                  <input
+                    id="login-otp"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    enterKeyHint="next"
+                    maxLength={6}
+                    value={resetCode}
+                    onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ""))}
+                    placeholder="000000"
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-center tracking-[0.35em] text-base text-primary font-mono font-bold"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">

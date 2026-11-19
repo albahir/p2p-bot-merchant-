@@ -25,15 +25,65 @@ html.dim {
   --border-subtle: #2b384d;
 }
 
-html,
+@view-transition {
+  navigation: auto;
+}
+
+html {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color-scheme: dark;
+  accent-color: #f59e0b;
+  overflow-x: clip;
+  overflow-y: scroll;
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: #64748b var(--bg-lowest);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+@media (prefers-contrast: more) {
+  html {
+    scrollbar-color: #f59e0b #000000;
+  }
+}
+
 body {
   margin: 0;
   padding: 0;
   background-color: var(--bg-canvas);
   color: #e0e2ea;
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  overscroll-behavior: none;
-  overflow-x: hidden;
+  overflow-x: clip;
+  overflow-y: visible;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+}
+
+/* Validación progresiva tras interacción del usuario (:user-invalid / :user-valid) */
+input:user-invalid,
+select:user-invalid,
+textarea:user-invalid {
+  border-color: rgba(239, 68, 68, 0.75) !important;
+}
+
+input:required:user-valid,
+select:required:user-valid {
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+/* Diferir renderizado de bloques pesados fuera de pantalla */
+.defer-render {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
 }
 
 .font-mono,
@@ -50,8 +100,8 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 9px;
+  height: 9px;
 }
 
 ::-webkit-scrollbar-track {
@@ -59,12 +109,13 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e2430;
-  border-radius: 3px;
+  background: #334155;
+  border-radius: 9999px;
+  border: 2px solid var(--bg-lowest);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #2b3545;
+  background: #f59e0b;
 }
 
 /* Eliminar spinners (flechas arriba/abajo) en cualquier input numérico */

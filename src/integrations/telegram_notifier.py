@@ -1069,6 +1069,7 @@ class TelegramNotifier:
         db = sf()
         try:
             db_user_id: int | None = None
+            u = None
             # Si el usuario tiene una hoja personal configurada en su perfil, priorizarla
             if user_id:
                 try:
@@ -1093,7 +1094,6 @@ class TelegramNotifier:
                     "`/sheets_id https://docs.google.com/spreadsheets/d/...`"
                 )
 
-
             repo = OrderRepository(db)
             completed_orders = repo.list_completed(user_id=db_user_id)
             if not completed_orders:
@@ -1102,10 +1102,14 @@ class TelegramNotifier:
             fifo = FIFOCostMethod()
             results = fifo.process_orders(completed_orders)
 
-            exporter = SheetsExporter(
-                credentials_path=creds_file,
-                credentials_json=creds_json,
-            )
+            if u is not None and str(getattr(u, "google_auth_type", "") or "") == "OAUTH2":
+                from src.api.routes.settings import build_user_sheets_exporter
+                exporter = build_user_sheets_exporter(u, settings, db)
+            else:
+                exporter = SheetsExporter(
+                    credentials_path=creds_file,
+                    credentials_json=creds_json,
+                )
             success = exporter.export(sheet_id, results)
             sheet_url = SheetsExporter.get_sheet_url(sheet_id)
 
@@ -1377,30 +1381,144 @@ class TelegramNotifier:
         return self.format_arbitrage_matrix_report(quotes=quotes, bcv_rate=bcv_rate, bcv_gap=bcv_gap)
 
     def _handle_bcv_query(self) -> str:
-        """Procesa /bcv consultando la cotización oficial en vivo y comparando con P2P."""
+        """Procesa /bcv consultando tasa vigente HOY (BD histórica), próxima Fecha Valor (mañana) y P2P en vivo."""
+        from datetime import datetime, timedelta
+
+        from src.core.rate_alert_service import parse_fecha_valor
         from src.core.spread_monitor import SpreadMonitor
+        from src.data.database import SessionLocal
+        from src.data.models import BCVRateHistory
+        from src.data.repositories import BCVHistoryRepository
+        from src.reporting.bcv_history_service import VET_TIMEZONE, BCVHistoryService
         from src.reporting.bcv_service import BCVService
 
         bcv = BCVService()
         rates = bcv.fetch_full_rates()
-        usd = float(rates.get("usd", 0.0))
-        eur = float(rates.get("eur", 0.0))
-        fecha = str(rates.get("fecha_valor", "Oficial"))
+        portal_usd = float(rates.get("usd", 0.0) or 0.0)
+        portal_eur = float(rates.get("eur", 0.0) or 0.0)
+        portal_fecha = str(rates.get("fecha_valor") or "").strip()
+        parsed_portal_date = parse_fecha_valor(portal_fecha)
 
+        today_ve_raw = datetime.now(VET_TIMEZONE).date()
+        effective_today = BCVHistoryService.effective_business_date(today_ve_raw)
+
+        today_usd = 0.0
+        today_eur = 0.0
+        today_fecha_label = effective_today.strftime("%d/%m/%Y")
+        tomorrow_usd = 0.0
+        tomorrow_eur = 0.0
+        tomorrow_fecha_label = ""
+
+        sf = self.session_factory or SessionLocal
+        db = sf()
+        try:
+            repo = BCVHistoryRepository(db)
+            if portal_usd > 0 and parsed_portal_date:
+                repo.upsert_rate(
+                    BCVRateHistory(
+                        fecha_valor=parsed_portal_date,
+                        usd_rate=portal_usd,
+                        eur_rate=portal_eur if portal_eur > 0 else None,
+                        source="bcv_official",
+                    )
+                )
+
+            today_rec = repo.get_rate_by_date(effective_today)
+            if not today_rec:
+                recent = repo.list_rates(
+                    start_date=effective_today - timedelta(days=7),
+                    end_date=effective_today,
+                )
+                if recent:
+                    today_rec = recent[-1]
+
+            if today_rec and float(today_rec.usd_rate) > 0:
+                today_usd = float(today_rec.usd_rate)
+                today_eur = float(today_rec.eur_rate) if today_rec.eur_rate else 0.0
+                today_fecha_label = today_rec.fecha_valor.strftime("%d/%m/%Y")
+
+            future = repo.list_rates(
+                start_date=effective_today + timedelta(days=1),
+                end_date=effective_today + timedelta(days=7),
+            )
+            if future:
+                nxt = future[-1]
+                tomorrow_usd = float(nxt.usd_rate)
+                tomorrow_eur = float(nxt.eur_rate) if nxt.eur_rate else 0.0
+                tomorrow_fecha_label = portal_fecha if (parsed_portal_date == nxt.fecha_valor and portal_fecha) else nxt.fecha_valor.strftime("%d/%m/%Y")
+        except (SQLAlchemyError, ValueError, TypeError, OSError, RuntimeError) as e:
+            logger.debug(f"No se pudo consultar bcv_rate_history en /bcv: {e}")
+        finally:
+            db.close()
+
+        # Si el portal ya publicó mañana pero la BD no tenía tasa de hoy (ej. primer día), usar la del portal
+        if today_usd <= 0 and portal_usd > 0:
+            if parsed_portal_date and parsed_portal_date > effective_today:
+                tomorrow_usd = portal_usd
+                tomorrow_eur = portal_eur
+                tomorrow_fecha_label = portal_fecha or parsed_portal_date.strftime("%d/%m/%Y")
+            else:
+                today_usd = portal_usd
+                today_eur = portal_eur
+                today_fecha_label = portal_fecha or today_fecha_label
+
+        active_usd = today_usd if today_usd > 0 else tomorrow_usd
+
+        # Precio P2P USDT real en vivo (sin datos estáticos de sandbox)
         monitor = SpreadMonitor()
-        quotes = monitor.get_market_quotes()
-        ref_p2p = quotes[0].buy_rate if quotes else usd
-        gap = monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=usd) if usd > 0 else 0.0
+        live_quotes = []
+        try:
+            live_quotes = monitor.fetch_live_quotes(use_public_bapi=True)
+        except (SQLAlchemyError, httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            live_quotes = []
 
-        return (
-            f"🏛️ *Cotización Oficial Banco Central de Venezuela (BCV)*\n\n"
-            f"• *USD Oficial*: `{usd:,.2f} VES/USD`\n"
-            f"• *EUR Oficial*: `{eur:,.2f} VES/EUR`\n"
-            f"• *Fecha Valor*: {fecha}\n"
-            f"• *P2P USDT Referencial*: `{ref_p2p:,.2f} VES`\n"
-            f"• *Brecha Cambiaria*: `{gap:+.2f}%`\n\n"
-            f"💡 La tasa oficial del BCV es la base legal para la valoración de inventario FIFO y cumplimiento tributario ante el SENIAT."
-        )
+        ref_p2p = 0.0
+        if live_quotes:
+            mid_rates = [
+                (q.buy_rate + q.sell_rate) / 2.0
+                for q in live_quotes
+                if q.buy_rate > 0 and q.sell_rate > 0
+            ]
+            if mid_rates:
+                ref_p2p = round(sum(mid_rates) / len(mid_rates), 2)
+            else:
+                single_rates = [q.buy_rate or q.sell_rate for q in live_quotes if (q.buy_rate or q.sell_rate) > 0]
+                if single_rates:
+                    ref_p2p = round(sum(single_rates) / len(single_rates), 2)
+
+        lines = ["🏛️ *Cotización Oficial Banco Central de Venezuela (BCV)*\n"]
+
+        if today_usd > 0:
+            lines.append(f"📅 *Vigente Hoy ({today_fecha_label}):*")
+            lines.append(f"• *USD Oficial*: `{today_usd:,.2f} VES/USD`")
+            if today_eur > 0:
+                lines.append(f"• *EUR Oficial*: `{today_eur:,.2f} VES/EUR`")
+
+        if tomorrow_usd > 0:
+            diff_str = ""
+            if today_usd > 0:
+                diff_bs = tomorrow_usd - today_usd
+                diff_pct = (diff_bs / today_usd) * 100.0
+                arrow = "🔺" if diff_bs > 0 else ("🔻" if diff_bs < 0 else "➖")
+                diff_str = f" ({arrow} `{diff_bs:+.2f} Bs` / `{diff_pct:+.2f}%`)"
+            lines.append(f"\n🔜 *Próxima Fecha Valor — Mañana ({tomorrow_fecha_label}):*")
+            lines.append(f"• *USD Mañana*: `{tomorrow_usd:,.2f} VES/USD`{diff_str}")
+            if tomorrow_eur > 0:
+                lines.append(f"• *EUR Mañana*: `{tomorrow_eur:,.2f} VES/EUR`")
+        elif today_usd > 0:
+            lines.append("\n🔜 *Mañana*: _Pendiente de publicación oficial del BCV._")
+        elif tomorrow_usd <= 0:
+            lines.append("• *USD Oficial*: _No disponible temporalmente_")
+
+        lines.append("")
+        if ref_p2p > 0:
+            gap = monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=active_usd) if active_usd > 0 else 0.0
+            lines.append(f"• *P2P USDT Referencial (En Vivo)*: `{ref_p2p:,.2f} VES`")
+            lines.append(f"• *Brecha Cambiaria vs Hoy*: `{gap:+.2f}%`")
+        else:
+            lines.append("• *P2P USDT Referencial*: _No disponible temporalmente_")
+
+        return "\n".join(lines)
 
     def _handle_compliance_sheets_sync(self) -> str:
         """Sincroniza el expediente de Compliance Bancario (4 pestañas) con Google Sheets."""
@@ -1520,13 +1638,10 @@ class TelegramNotifier:
                 if u and u.google_sheet_id:
                         try:
                             from config.settings import Settings
-                            from src.reporting.sheets_exporter import SheetsExporter
+                            from src.api.routes.settings import build_user_sheets_exporter
 
                             app_settings = Settings()
-                            exporter = SheetsExporter(
-                                credentials_path=app_settings.GOOGLE_CREDENTIALS_FILE,
-                                credentials_json=app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-                            )
+                            exporter = build_user_sheets_exporter(u, app_settings, db)
                             dt_str = voucher.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if voucher.voucher_date else ""
                             appended = exporter.append_voucher_entry(
                                 sheet_id=str(u.google_sheet_id),

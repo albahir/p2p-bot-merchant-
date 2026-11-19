@@ -67,9 +67,16 @@ def init_db() -> None:
             ("user_id", "INTEGER"),
         ],
         "app_users": [
+            ("full_name", "VARCHAR(120)"),
+            ("email", "VARCHAR(150)"),
             ("google_sheet_id", "VARCHAR(100)"),
             ("google_refresh_token_enc", "TEXT"),
             ("google_auth_type", "VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'"),
+            ("security_question", "VARCHAR(200)"),
+            ("security_answer_hash", "VARCHAR(255)"),
+            ("recovery_key_hash", "VARCHAR(255)"),
+            ("failed_recovery_attempts", "INTEGER DEFAULT 0"),
+            ("recovery_locked_until", "TIMESTAMP"),
         ],
         "bank_vouchers": [
             ("user_id", "INTEGER"),

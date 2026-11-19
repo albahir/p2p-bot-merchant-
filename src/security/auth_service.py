@@ -67,6 +67,28 @@ class AuthService:
         except (ValueError, TypeError, AttributeError):
             return False
 
+    @staticmethod
+    def generate_recovery_key() -> str:
+        """Genera una Llave Maestra de Recuperación legible (ej. P2P-XXXX-XXXX-XXXX) criptográficamente aleatoria."""
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        groups = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
+        return f"P2P-{'-'.join(groups)}"
+
+    @staticmethod
+    def normalize_secret_answer(answer: str) -> str:
+        """Normaliza respuestas de seguridad (sin espacios extra y en minúsculas) para comparación consistente."""
+        return " ".join(answer.strip().lower().split())
+
+    @classmethod
+    def hash_secret_answer(cls, answer: str) -> str:
+        """Genera hash PBKDF2-HMAC-SHA256 de la respuesta secreta normalizada."""
+        return cls.hash_password(cls.normalize_secret_answer(answer))
+
+    @classmethod
+    def verify_secret_answer(cls, answer: str, hashed: str) -> bool:
+        """Verifica una respuesta de seguridad contra su hash almacenado en tiempo constante."""
+        return cls.verify_password(cls.normalize_secret_answer(answer), hashed)
+
     def authenticate(self, username: str, password: str) -> User | None:
         """Valida credenciales web y retorna el usuario si es activo y válido."""
         user = self.user_repo.get_by_username(username.strip())

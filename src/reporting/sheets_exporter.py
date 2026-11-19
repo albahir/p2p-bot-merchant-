@@ -17,7 +17,22 @@ except ImportError:
     gspread = None  # type: ignore[assignment]
     GSpreadException = Exception  # type: ignore[misc, assignment]
 
+try:
+    from google.auth.exceptions import RefreshError
+    from google.oauth2.credentials import Credentials as OAuthCredentials
+except ImportError:
+    RefreshError = Exception  # type: ignore[misc, assignment]
+    OAuthCredentials = None  # type: ignore[misc, assignment]
+
 logger = logging.getLogger("sheets_exporter")
+
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+GOOGLE_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "openid",
+    "email",
+]
 
 
 class SheetsExporter:
@@ -27,9 +42,14 @@ class SheetsExporter:
         self,
         credentials_path: str = "config/google_credentials.json",
         credentials_json: str | dict[str, Any] | None = None,
+        oauth_credentials: dict[str, Any] | None = None,
+        auth_error: str | None = None,
     ):
         self.credentials_path = credentials_path
         self.credentials_json = credentials_json
+        self.oauth_credentials = oauth_credentials
+        self.auth_error = auth_error
+        self.uses_oauth = bool(oauth_credentials and oauth_credentials.get("refresh_token"))
         self.last_error: str | None = None
         self.client_email: str | None = None
         self._extract_client_email()
@@ -37,6 +57,9 @@ class SheetsExporter:
     def _extract_client_email(self) -> None:
         """Extrae el email de la cuenta de servicio si está disponible."""
         try:
+            if self.oauth_credentials and self.oauth_credentials.get("email"):
+                self.client_email = str(self.oauth_credentials["email"])
+                return
             if self.credentials_json:
                 if isinstance(self.credentials_json, str):
                     data = json.loads(self.credentials_json)
@@ -51,13 +74,33 @@ class SheetsExporter:
             pass
 
     def _get_client(self) -> Any:
-        """Obtiene una instancia autenticada de gspread de manera segura."""
+        """Obtiene una instancia autenticada de gspread (OAuth 2.0 o Service Account)."""
+        if self.auth_error:
+            self.last_error = self.auth_error
+            logger.warning(self.last_error)
+            return None
+
         if gspread is None:
             self.last_error = "El paquete 'gspread' no está instalado en el entorno."
             logger.warning(self.last_error)
             return None
 
         try:
+            if self.oauth_credentials:
+                if OAuthCredentials is None:
+                    self.last_error = "El paquete 'google-auth' no está disponible para OAuth 2.0."
+                    logger.warning(self.last_error)
+                    return None
+                creds = OAuthCredentials(
+                    token=self.oauth_credentials.get("token"),
+                    refresh_token=self.oauth_credentials.get("refresh_token"),
+                    token_uri=GOOGLE_TOKEN_URI,
+                    client_id=self.oauth_credentials.get("client_id"),
+                    client_secret=self.oauth_credentials.get("client_secret"),
+                    scopes=GOOGLE_OAUTH_SCOPES,
+                )
+                return gspread.authorize(creds)
+
             if self.credentials_json:
                 if isinstance(self.credentials_json, str):
                     creds_dict = json.loads(self.credentials_json)
@@ -69,14 +112,46 @@ class SheetsExporter:
                 return gspread.service_account(filename=self.credentials_path)
 
             self.last_error = (
-                "Credenciales no encontradas: Define la variable 'GOOGLE_SERVICE_ACCOUNT_JSON' "
-                "o coloca el archivo en 'config/google_credentials.json'."
+                "Falta configurar acceso a Google Sheets. Conecta tu cuenta de Google o configura una Cuenta de Servicio."
             )
             logger.warning(self.last_error)
             return None
-        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
             self.last_error = f"Error en credenciales de Google: {e}"
             logger.error(f"Error inicializando cliente de Google Sheets: {e}")
+            return None
+
+    def _format_gspread_error(self, e: Exception, sheet_id: str, action: str = "exportando a Google Sheets") -> str:
+        """Traduce errores comunes de Google Sheets API en mensajes claros sin filtrar secretos."""
+        err_str = str(e)
+        if isinstance(e, RefreshError) or "invalid_grant" in err_str or "401" in err_str:
+            return "Tu sesión de Google expiró o fue revocada. Reconecta tu cuenta."
+        if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
+            if self.uses_oauth:
+                return "Sin permiso en la hoja (HTTP 403). Verifica que tu cuenta tenga acceso de Editor o crea una nueva hoja."
+            email_hint = f" ({self.client_email})" if self.client_email else ""
+            return (
+                f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
+                f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
+            )
+        if "404" in err_str or "SpreadsheetNotFound" in err_str:
+            return f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
+        if "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
+            return "Google Sheets API o Google Drive API no están habilitadas en Google Cloud."
+        return f"Error {action}: {e}"
+
+    def create_spreadsheet(self, title: str = "P2P Merchant - Contabilidad") -> str | None:
+        """Crea una hoja nueva en el Google Drive del usuario autenticado y devuelve su ID."""
+        client = self._get_client()
+        if client is None:
+            return None
+        try:
+            sh = client.create(title)
+            self.last_error = None
+            return str(sh.id)
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = self._format_gspread_error(e, "", action="creando hoja en Google Drive")
+            logger.error(self.last_error)
             return None
 
     def _get_or_create_worksheet(self, sh: Any, title: str, rows: int = 100, cols: int = 20) -> Any:
@@ -167,21 +242,8 @@ class SheetsExporter:
             logger.info(f"Google Sheets '{sheet_id}' sincronizado exitosamente con 2 pestañas.")
             self.last_error = None
             return True
-        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
-            err_str = str(e)
-            if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
-                email_hint = f" ({self.client_email})" if self.client_email else ""
-                self.last_error = (
-                    f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
-                    f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
-                )
-            elif "404" in err_str or "SpreadsheetNotFound" in err_str:
-                self.last_error = f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
-            elif "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
-                self.last_error = "Google Sheets API o Google Drive API no están habilitadas en tu Google Cloud Console."
-            else:
-                self.last_error = f"Error exportando a Google Sheets: {e}"
-
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = self._format_gspread_error(e, sheet_id)
             logger.error(self.last_error)
             return False
 
@@ -307,21 +369,8 @@ class SheetsExporter:
             logger.info(f"Google Sheets '{sheet_id}' sincronizado exitosamente con 4 pestañas.")
             self.last_error = None
             return True
-        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
-            err_str = str(e)
-            if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
-                email_hint = f" ({self.client_email})" if self.client_email else ""
-                self.last_error = (
-                    f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
-                    f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
-                )
-            elif "404" in err_str or "SpreadsheetNotFound" in err_str:
-                self.last_error = f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
-            elif "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
-                self.last_error = "Google Sheets API o Google Drive API no están habilitadas en tu Google Cloud Console."
-            else:
-                self.last_error = f"Error exportando a Google Sheets: {e}"
-
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = self._format_gspread_error(e, sheet_id)
             logger.error(self.last_error)
             return False
 
@@ -473,21 +522,8 @@ class SheetsExporter:
             logger.info(f"Google Sheets '{sheet_id}' Compliance exportado exitosamente con 4 pestañas.")
             self.last_error = None
             return True
-        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
-            err_str = str(e)
-            if "403" in err_str or "PERMISSION_DENIED" in err_str or "caller does not have permission" in err_str:
-                email_hint = f" ({self.client_email})" if self.client_email else ""
-                self.last_error = (
-                    f"Permiso denegado (HTTP 403). Abre tu Google Sheet, presiona 'Compartir' "
-                    f"y agrega a la cuenta de servicio{email_hint} con rol de 'Editor'."
-                )
-            elif "404" in err_str or "SpreadsheetNotFound" in err_str:
-                self.last_error = f"Hoja no encontrada (HTTP 404). Verifica que el GOOGLE_SHEET_ID '{sheet_id}' sea correcto."
-            elif "API has not been used" in err_str or "SERVICE_DISABLED" in err_str:
-                self.last_error = "Google Sheets API o Google Drive API no están habilitadas en tu Google Cloud Console."
-            else:
-                self.last_error = f"Error exportando Compliance a Google Sheets: {e}"
-
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = self._format_gspread_error(e, sheet_id, action="exportando Compliance a Google Sheets")
             logger.error(self.last_error)
             return False
 
@@ -564,8 +600,8 @@ class SheetsExporter:
             logger.info(f"Google Sheets '{sheet_id}' sincronizado con Libro Diario y Libro Mayor.")
             self.last_error = None
             return True
-        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
-            self.last_error = f"Error exportando contabilidad a Google Sheets: {e}"
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = self._format_gspread_error(e, sheet_id, action="exportando contabilidad a Google Sheets")
             logger.error(self.last_error)
             return False
 
@@ -639,8 +675,8 @@ class SheetsExporter:
             ws.append_row(row)
             self.last_error = None
             return True
-        except (GSpreadException, OSError, ValueError, TypeError, KeyError) as e:
-            self.last_error = f"Error al agregar registro de comprobante en Google Sheets: {e}"
+        except (GSpreadException, RefreshError, OSError, ValueError, TypeError, KeyError) as e:
+            self.last_error = self._format_gspread_error(e, sheet_id, action="al agregar registro en Google Sheets")
             logger.error(self.last_error)
             return False
 

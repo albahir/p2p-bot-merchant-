@@ -185,9 +185,9 @@ export default function OrdersPage() {
 
   return (
     <AppShell
-      title="Ganancias Reales y Órdenes"
-      badge={costMethod === "AVERAGE" ? "MOTOR COSTO PROMEDIO" : "MOTOR PEPS (PRIMERAS ENTRADAS)"}
-      subtitle="Ingesta histórica oficial Binance P2P, importación manual y cálculo de utilidad neta realizada."
+      title="Órdenes y ganancias"
+      badge={costMethod === "AVERAGE" ? "PROMEDIO" : "PEPS"}
+      subtitle="Historial de compras, ventas y utilidad neta."
       actions={
         /* Grupo Único de Exportación Autenticada (Bearer sin fuga de JWT en URL) */
         <div className="flex items-center gap-2">
@@ -233,6 +233,8 @@ export default function OrdersPage() {
       <div className="space-y-5">
         {feedback && (
           <div
+            role="alert"
+            aria-live="polite"
             className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs ${
               feedback.type === "success"
                 ? "bg-tertiary/10 border-tertiary/30 text-emerald-200"
@@ -248,6 +250,7 @@ export default function OrdersPage() {
             <button
               type="button"
               onClick={() => setFeedback(null)}
+              aria-label="Cerrar notificación"
               className="text-slate-400 hover:text-white"
             >
               ✕
@@ -273,11 +276,11 @@ export default function OrdersPage() {
           </div>
         )}
 
-        {/* 4 KPIs Fiscales y Operativos */}
+        {/* 4 KPIs */}
         <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Utilidad Neta ({costMethod === "AVERAGE" ? "PROMEDIO" : "PEPS"})</span>
+              <span>Ganancia neta ({costMethod === "AVERAGE" ? "Promedio" : "PEPS"})</span>
               <span className="material-symbols-outlined text-[16px] text-tertiary">
                 trending_up
               </span>
@@ -297,13 +300,13 @@ export default function OrdersPage() {
                 : "Bs. 0,00"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              Eq. Fiscal BCV: ${(fiscalSummary?.net_profit_usd ?? 0).toFixed(2)} USD
+              ≈ ${(fiscalSummary?.net_profit_usd ?? 0).toFixed(2)} USD BCV
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Volumen Operado</span>
+              <span>Volumen</span>
               <span className="material-symbols-outlined text-[16px] text-secondary">
                 swap_horiz
               </span>
@@ -321,13 +324,13 @@ export default function OrdersPage() {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
               })}{" "}
-              • {totalOrders} órdenes
+              • {totalOrders} órds
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Comisiones Acumuladas</span>
+              <span>Comisiones</span>
               <span className="material-symbols-outlined text-[16px] text-primary">
                 percent
               </span>
@@ -344,14 +347,13 @@ export default function OrdersPage() {
               {(fiscalSummary?.total_fees_ves ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
-              })}{" "}
-              deducidas de base imponible
+              })}
             </div>
           </div>
 
           <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Precio Ponderado Página</span>
+              <span>Precio promedio</span>
               <span className="material-symbols-outlined text-[16px] text-slate-300">
                 analytics
               </span>
@@ -360,16 +362,16 @@ export default function OrdersPage() {
               {avgUnitPrice > 0 ? `Bs. ${avgUnitPrice.toFixed(2)}` : "Bs. --"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              BCV Período: Bs. {(fiscalSummary?.bcv_rate ?? 0).toFixed(2)}
+              BCV: Bs. {(fiscalSummary?.bcv_rate ?? 0).toFixed(2)}
             </div>
           </div>
         </section>
 
-        {/* Barra de Ingesta Binance API + Carga de Archivo CSV/Excel */}
+        {/* Barra de sincronización e importación */}
         <section className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-semibold text-white mr-1">
-              Ingesta API Binance:
+              Binance:
             </span>
             <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
               {SYNC_WINDOWS.map((w) => (
@@ -417,7 +419,7 @@ export default function OrdersPage() {
                 upload_file
               </span>
               <span>
-                {isUploading ? "Importando archivo..." : "Importar Histórico (.csv / .xlsx)"}
+                {isUploading ? "Importando..." : "Importar (.csv / .xlsx)"}
               </span>
             </button>
           </div>
@@ -464,7 +466,7 @@ export default function OrdersPage() {
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                PEPS (Primeras Entradas)
+                PEPS
               </button>
               <button
                 type="button"
@@ -475,7 +477,7 @@ export default function OrdersPage() {
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                Costo Promedio
+                Promedio
               </button>
             </div>
           </div>
@@ -486,7 +488,9 @@ export default function OrdersPage() {
               search
             </span>
             <input
-              type="text"
+              type="search"
+              enterKeyHint="search"
+              aria-label="Buscar por número de orden o contraparte"
               value={searchQuery}
               onChange={(e) => {
                 setPage(1);
@@ -499,20 +503,20 @@ export default function OrdersPage() {
         </section>
 
         {/* Tabla Densa Paginada de Órdenes */}
-        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden">
-          <div className="overflow-x-auto">
+        <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden defer-render">
+          <div className="overflow-x-auto overscroll-x-contain">
             <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-[#1e2430] bg-surface-container/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                  <th className="py-3 px-4">Fecha / Nº Orden</th>
-                  <th className="py-3 px-4">Tipo</th>
-                  <th className="py-3 px-4">Contraparte</th>
-                  <th className="py-3 px-4 text-right">Cantidad USDT</th>
-                  <th className="py-3 px-4 text-right">Precio Unit.</th>
-                  <th className="py-3 px-4 text-right">Total VES</th>
-                  <th className="py-3 px-4 text-right">BCV Hist.</th>
-                  <th className="py-3 px-4 text-right">Comisión</th>
-                  <th className="py-3 px-4 text-right">Estado</th>
+              <thead className="sticky top-0 z-10 bg-surface-container">
+                <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  <th scope="col" className="py-3 px-4">Fecha / Nº Orden</th>
+                  <th scope="col" className="py-3 px-4">Tipo</th>
+                  <th scope="col" className="py-3 px-4">Contraparte</th>
+                  <th scope="col" className="py-3 px-4 text-right">Cantidad USDT</th>
+                  <th scope="col" className="py-3 px-4 text-right">Precio Unit.</th>
+                  <th scope="col" className="py-3 px-4 text-right">Total VES</th>
+                  <th scope="col" className="py-3 px-4 text-right">BCV Hist.</th>
+                  <th scope="col" className="py-3 px-4 text-right">Comisión</th>
+                  <th scope="col" className="py-3 px-4 text-right">Estado</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1e2430]/70 text-xs">

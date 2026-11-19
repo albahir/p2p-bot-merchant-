@@ -1,8 +1,9 @@
 """Rutas de autenticación, generación de tokens JWT y Telegram SSO."""
 
+import re
 import secrets
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -14,6 +15,8 @@ from src.api.schemas.auth import (
     LoginRequest,
     PasswordRecoveryRequest,
     PasswordResetRequest,
+    RecoveryOptionsResponse,
+    RecoveryProfileUpdateRequest,
     RegisterRequest,
     TelegramAuthData,
     TelegramWebAppAuthData,
@@ -66,13 +69,27 @@ def login(
     )
 
 
+def _validate_and_normalize_email(raw_email: str | None) -> str | None:
+    if raw_email is None:
+        return None
+    cleaned = raw_email.strip().lower()
+    if not cleaned:
+        return None
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", cleaned):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="El formato del correo electrónico de recuperación no es válido.",
+        )
+    return cleaned
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(
     req: RegisterRequest,
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> TokenResponse:
-    """Registra una nueva cuenta de usuario en el sistema."""
+    """Registra una nueva cuenta de usuario en el sistema con datos de recuperación segura."""
     user_repo = UserRepository(db)
     existing_user = user_repo.get_by_username(req.username)
     if existing_user:
@@ -80,6 +97,33 @@ def register(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"El nombre de usuario '{req.username}' ya está registrado.",
         )
+
+    clean_email = _validate_and_normalize_email(req.email)
+    if clean_email:
+        existing_email_user = user_repo.get_by_email(clean_email)
+        if existing_email_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Este correo electrónico ya está asociado a otra cuenta.",
+            )
+
+    clean_question = req.security_question.strip() if req.security_question and req.security_question.strip() else None
+    clean_answer = req.security_answer.strip() if req.security_answer and req.security_answer.strip() else None
+    if (clean_question and not clean_answer) or (clean_answer and not clean_question):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Debes indicar tanto la pregunta de seguridad como su respuesta secreta.",
+        )
+    if clean_answer and len(clean_answer) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="La respuesta secreta debe tener al menos 3 caracteres.",
+        )
+
+    sec_answer_hash = AuthService.hash_secret_answer(clean_answer) if clean_answer else None
+    plain_recovery_key = AuthService.generate_recovery_key()
+    recovery_key_hash = AuthService.hash_password(plain_recovery_key)
+    clean_full_name = req.full_name.strip() if req.full_name and req.full_name.strip() else None
 
     # Evaluar si el Telegram ID está en la whitelist de administradores o traders
     is_admin = False
@@ -102,6 +146,14 @@ def register(
         if str(existing_tg_user.username).startswith(("tg_", "trader_", "admin_")):
             existing_tg_user.username = req.username  # type: ignore[assignment]
             existing_tg_user.password_hash = password_hash  # type: ignore[assignment]
+            if clean_full_name:
+                existing_tg_user.full_name = clean_full_name  # type: ignore[assignment]
+            if clean_email:
+                existing_tg_user.email = clean_email  # type: ignore[assignment]
+            if clean_question and sec_answer_hash:
+                existing_tg_user.security_question = clean_question  # type: ignore[assignment]
+                existing_tg_user.security_answer_hash = sec_answer_hash  # type: ignore[assignment]
+            existing_tg_user.recovery_key_hash = recovery_key_hash  # type: ignore[assignment]
             current_role = str(existing_tg_user.role or "INVITADO").upper()
             if assigned_role == "ADMIN" or current_role not in ("ADMIN", "TRADER"):
                 existing_tg_user.role = assigned_role  # type: ignore[assignment]
@@ -121,10 +173,14 @@ def register(
             role=assigned_role,
             telegram_id=tg_id_str,
             is_active=True,
+            full_name=clean_full_name,
+            email=clean_email,
+            security_question=clean_question,
+            security_answer_hash=sec_answer_hash,
+            recovery_key_hash=recovery_key_hash,
         )
 
     if req.google_sheet_id and req.google_sheet_id.strip():
-        import re
         raw_sheet = req.google_sheet_id.strip()
         match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", raw_sheet)
         new_user.google_sheet_id = match.group(1) if match else raw_sheet  # type: ignore[assignment]
@@ -157,6 +213,60 @@ def register(
         access_token=token,
         expires_in_seconds=int(expires_delta.total_seconds()),
         user=UserPublicResponse.model_validate(new_user),
+        recovery_key=plain_recovery_key,
+    )
+
+
+def _ensure_not_recovery_locked(user: User) -> None:
+    locked_until = user.recovery_locked_until
+    if locked_until is None:
+        return
+    now_naive = datetime.now(UTC).replace(tzinfo=None)
+    locked_naive = locked_until.replace(tzinfo=None)
+    if locked_naive > now_naive:
+        remaining_min = max(1, int((locked_naive - now_naive).total_seconds() // 60) + 1)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Recuperación bloqueada temporalmente por múltiples intentos fallidos. Intenta en {remaining_min} minuto(s).",
+        )
+
+
+def _register_failed_recovery(user: User, db: Session) -> None:
+    attempts = int(user.failed_recovery_attempts or 0) + 1
+    user.failed_recovery_attempts = attempts  # type: ignore[assignment]
+    if attempts >= 5:
+        user.recovery_locked_until = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=15)  # type: ignore[assignment]
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Has superado el máximo de 5 intentos fallidos. Recuperación bloqueada por 15 minutos.",
+        )
+    db.commit()
+
+
+@router.post("/recover-options", response_model=RecoveryOptionsResponse)
+def get_recovery_options(
+    req: PasswordRecoveryRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> RecoveryOptionsResponse:
+    """Consulta qué métodos de recuperación están habilitados para un alias, correo o Telegram ID."""
+    user_repo = UserRepository(db)
+    user = user_repo.get_by_identifier(req.username)
+    if not user or not user.is_active:
+        return RecoveryOptionsResponse()
+
+    now_naive = datetime.now(UTC).replace(tzinfo=None)
+    is_locked = bool(
+        user.recovery_locked_until is not None
+        and user.recovery_locked_until.replace(tzinfo=None) > now_naive
+    )
+
+    return RecoveryOptionsResponse(
+        has_telegram=bool(user.telegram_id),
+        has_security_question=bool(user.security_question and user.security_answer_hash),
+        security_question=str(user.security_question) if (user.security_question and user.security_answer_hash) else None,
+        has_recovery_key=bool(user.recovery_key_hash),
+        is_locked=is_locked,
     )
 
 
@@ -167,12 +277,9 @@ def recover_password(
 ) -> dict[str, Any]:
     """Genera y despacha un código OTP de recuperación al Telegram del usuario."""
     user_repo = UserRepository(db)
-    user = user_repo.get_by_username(req.username)
-    if not user:
-        # Buscar por Telegram ID
-        user = user_repo.get_by_telegram_id(req.username)
+    user = user_repo.get_by_identifier(req.username)
 
-    if not user:
+    if not user or not user.is_active:
         # Mensaje genérico para mitigar enumeración de cuentas
         return {
             "success": True,
@@ -220,49 +327,101 @@ def reset_password(
     req: PasswordResetRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, Any]:
-    """Aplica el cambio de contraseña utilizando el código de recuperación."""
+    """Restablece la contraseña mediante OTP de Telegram, Pregunta de Seguridad o Llave Maestra."""
     user_repo = UserRepository(db)
-    target_user = user_repo.get_by_username(req.username.strip()) or user_repo.get_by_telegram_id(req.username.strip())
-    lookup_key = str(target_user.username).lower() if target_user else req.username.strip().lower()
+    target_user = user_repo.get_by_identifier(req.username)
 
-    record = _RECOVERY_CODES.get(lookup_key)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No hay ninguna solicitud de recuperación activa para este usuario o ha expirado.",
-        )
+    if req.method == "telegram_otp":
+        lookup_key = str(target_user.username).lower() if target_user else req.username.strip().lower()
+        record = _RECOVERY_CODES.get(lookup_key)
+        if not record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No hay ninguna solicitud de recuperación activa para este usuario o ha expirado.",
+            )
 
-    if time.time() > record["expires_at"]:
-        _RECOVERY_CODES.pop(lookup_key, None)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El código de recuperación ha expirado (límite de 15 minutos).",
-        )
-
-    if not secrets.compare_digest(str(record["code"]), req.reset_code.strip()):
-        record["attempts"] = int(record.get("attempts", 0)) + 1
-        if record["attempts"] >= 5:
+        if time.time() > record["expires_at"]:
             _RECOVERY_CODES.pop(lookup_key, None)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El código de recuperación ha expirado (límite de 15 minutos).",
+            )
+
+        if not secrets.compare_digest(str(record["code"]), req.reset_code.strip()):
+            record["attempts"] = int(record.get("attempts", 0)) + 1
+            if record["attempts"] >= 5:
+                _RECOVERY_CODES.pop(lookup_key, None)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Código de recuperación inválido.",
+            )
+
+        user = user_repo.get_by_id(record["user_id"])
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+        user.password_hash = AuthService.hash_password(req.new_password)  # type: ignore[assignment]
+        user.failed_recovery_attempts = 0  # type: ignore[assignment]
+        user.recovery_locked_until = None  # type: ignore[assignment]
+        db.commit()
+        _RECOVERY_CODES.pop(lookup_key, None)
+
+        return {
+            "success": True,
+            "message": "Contraseña restablecida exitosamente. Ya puedes iniciar sesión con tu nueva contraseña.",
+        }
+
+    # Métodos offline basados en el perfil (Pregunta de Seguridad o Llave Maestra)
+    if not target_user or not target_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Código de recuperación inválido.",
+            detail="No se pudo verificar la identidad del perfil indicado.",
         )
 
-    user = user_repo.get_by_id(record["user_id"])
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+    _ensure_not_recovery_locked(target_user)
 
-    new_hash = AuthService.hash_password(req.new_password)
-    user.password_hash = new_hash  # type: ignore[assignment]
+    new_rotated_key: str | None = None
+    if req.method == "security_question":
+        if not target_user.security_answer_hash:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Este perfil no tiene configurada una pregunta de seguridad.",
+            )
+        if not AuthService.verify_secret_answer(req.reset_code, str(target_user.security_answer_hash)):
+            _register_failed_recovery(target_user, db)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La respuesta secreta es incorrecta.",
+            )
+    elif req.method == "recovery_key":
+        if not target_user.recovery_key_hash:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Este perfil no posee una Llave Maestra de Recuperación activa.",
+            )
+        normalized_key = req.reset_code.strip().upper()
+        if not AuthService.verify_password(normalized_key, str(target_user.recovery_key_hash)):
+            _register_failed_recovery(target_user, db)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La Llave Maestra de Recuperación es inválida.",
+            )
+        # Rotación obligatoria tras uso único: invalidar llave consumida y emitir una nueva
+        new_rotated_key = AuthService.generate_recovery_key()
+        target_user.recovery_key_hash = AuthService.hash_password(new_rotated_key)  # type: ignore[assignment]
+
+    target_user.password_hash = AuthService.hash_password(req.new_password)  # type: ignore[assignment]
+    target_user.failed_recovery_attempts = 0  # type: ignore[assignment]
+    target_user.recovery_locked_until = None  # type: ignore[assignment]
     db.commit()
 
-    # Consumir el código para evitar reuso
-    _RECOVERY_CODES.pop(lookup_key, None)
-
-    return {
+    response_payload: dict[str, Any] = {
         "success": True,
         "message": "Contraseña restablecida exitosamente. Ya puedes iniciar sesión con tu nueva contraseña.",
     }
+    if new_rotated_key:
+        response_payload["new_recovery_key"] = new_rotated_key
+    return response_payload
 
 
 @router.post("/telegram", response_model=TokenResponse)
@@ -415,6 +574,69 @@ def get_my_profile(
 ) -> UserPublicResponse:
     """Retorna los datos de perfil del usuario que posee la sesión activa."""
     return UserPublicResponse.model_validate(current_user)
+
+
+@router.post("/recovery-profile")
+def update_recovery_profile(
+    req: RecoveryProfileUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """Configura o actualiza correo de respaldo, nombre, pregunta secreta y Llave Maestra del usuario autenticado."""
+    user_repo = UserRepository(db)
+
+    if req.full_name is not None:
+        current_user.full_name = req.full_name.strip() or None  # type: ignore[assignment]
+
+    if req.email is not None:
+        clean_email = _validate_and_normalize_email(req.email)
+        if clean_email:
+            owner = user_repo.get_by_email(clean_email)
+            if owner is not None and int(owner.id) != int(current_user.id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Este correo electrónico ya está en uso por otro operador.",
+                )
+        current_user.email = clean_email  # type: ignore[assignment]
+
+    clean_q = req.security_question.strip() if req.security_question and req.security_question.strip() else None
+    clean_a = req.security_answer.strip() if req.security_answer and req.security_answer.strip() else None
+    if clean_q and not clean_a and not current_user.security_answer_hash:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Debes proporcionar una respuesta secreta al definir la pregunta de seguridad.",
+        )
+    if clean_a:
+        if len(clean_a) < 3:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="La respuesta secreta debe tener al menos 3 caracteres.",
+            )
+        if not clean_q and not current_user.security_question:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Debes seleccionar o escribir una pregunta de seguridad.",
+            )
+        if clean_q:
+            current_user.security_question = clean_q  # type: ignore[assignment]
+        current_user.security_answer_hash = AuthService.hash_secret_answer(clean_a)  # type: ignore[assignment]
+    elif clean_q:
+        current_user.security_question = clean_q  # type: ignore[assignment]
+
+    new_plain_key: str | None = None
+    if req.regenerate_recovery_key or not current_user.recovery_key_hash:
+        new_plain_key = AuthService.generate_recovery_key()
+        current_user.recovery_key_hash = AuthService.hash_password(new_plain_key)  # type: ignore[assignment]
+
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "success": True,
+        "message": "Datos de recuperación de perfil actualizados de forma segura.",
+        "user": UserPublicResponse.model_validate(current_user),
+        "recovery_key": new_plain_key,
+    }
 
 
 @router.post("/refresh", response_model=TokenResponse)

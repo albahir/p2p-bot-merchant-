@@ -1,18 +1,23 @@
 """Rutas para gestión segura de credenciales de Binance y diagnóstico en vivo."""
 
+import json
 import logging
 import time
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import Settings
 from src.api.deps import get_db, get_settings, require_authenticated, require_trader
 from src.api.schemas.settings import (
     BinanceStatusResponse,
+    GoogleOAuthCallbackRequest,
+    GoogleOAuthClientConfigRequest,
+    GoogleOAuthStartResponse,
     GoogleSheetsConfigResponse,
     GoogleSheetsSyncResponse,
     SaveBinanceKeysRequest,
@@ -21,6 +26,14 @@ from src.api.schemas.settings import (
     VerifyBinanceResponse,
 )
 from src.data.models import User
+from src.integrations.google_oauth import (
+    GoogleOAuthError,
+    build_authorization_url,
+    create_state,
+    exchange_code,
+    is_oauth_configured,
+    verify_state,
+)
 from src.reporting.sheets_exporter import SheetsExporter
 from src.security.api_key_manager import ApiKeyManager
 
@@ -246,34 +259,167 @@ def _extract_sheet_id(raw_input: str | None) -> str | None:
     return cleaned
 
 
-@router.get("/sheets", response_model=GoogleSheetsConfigResponse)
-def get_user_sheets_config(
-    current_user: Annotated[User, Depends(require_trader)],
-    settings: Annotated[Settings, Depends(get_settings)],
+def _parse_oauth_vault_marker(user: User) -> tuple[bool, str | None]:
+    """Interpreta el marcador no secreto `google_refresh_token_enc` sin almacenar tokens planos."""
+    raw = str(getattr(user, "google_refresh_token_enc", "") or "").strip()
+    if not raw:
+        return (False, None)
+    if raw.startswith("vault:"):
+        email = raw.split("vault:", 1)[1].strip() or None
+        return (True, email)
+    return (True, None)
+
+
+def _validate_oauth_redirect_uri(redirect_uri: str | None, settings: Settings) -> str:
+    """Valida que el redirect_uri pertenezca a los orígenes permitidos para evitar open redirect."""
+    default_uri = settings.GOOGLE_OAUTH_REDIRECT_URI.strip()
+    if not redirect_uri or not isinstance(redirect_uri, str):
+        return default_uri
+    candidate = redirect_uri.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="redirect_uri OAuth inválido.")
+
+    allowed_hosts = {urlparse(default_uri).netloc, "localhost:3000", "127.0.0.1:3000"}
+    for origin in settings.cors_origins_list:
+        if origin != "*":
+            origin_netloc = urlparse(origin).netloc
+            if origin_netloc:
+                allowed_hosts.add(origin_netloc)
+
+    if parsed.netloc not in allowed_hosts or parsed.path != "/sheets":
+        raise HTTPException(status_code=400, detail="redirect_uri OAuth no autorizado.")
+    return candidate
+
+
+def _resolve_oauth_settings(
+    settings: Settings,
+    db: Session | None,
+    user_id: int | None,
+) -> tuple[Settings, bool]:
+    """Resuelve credenciales OAuth desde `.env` o desde la bóveda AES-256-GCM en DB."""
+    if is_oauth_configured(settings):
+        return settings, False
+
+    if not isinstance(db, Session):
+        return settings, False
+
+    try:
+        factory = sessionmaker(bind=db.get_bind())
+        km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+    except ValueError:
+        return settings, False
+
+    candidate_keys: list[str] = []
+    if user_id is not None:
+        candidate_keys.append(f"user_{user_id}:google_oauth_client")
+    candidate_keys.append("system:google_oauth_client")
+
+    for key_name in candidate_keys:
+        try:
+            raw_json = km.get_secret(key_name)
+            parsed = json.loads(raw_json)
+            cid = str(parsed.get("client_id") or "").strip()
+            csec = str(parsed.get("client_secret") or "").strip()
+            ruri = str(parsed.get("redirect_uri") or settings.GOOGLE_OAUTH_REDIRECT_URI).strip()
+            if cid and csec:
+                effective = settings.model_copy(
+                    update={
+                        "GOOGLE_OAUTH_CLIENT_ID": cid,
+                        "GOOGLE_OAUTH_CLIENT_SECRET": csec,
+                        "GOOGLE_OAUTH_REDIRECT_URI": ruri or settings.GOOGLE_OAUTH_REDIRECT_URI,
+                    }
+                )
+                return effective, True
+        except (KeyError, ValueError, RuntimeError, TypeError, json.JSONDecodeError):
+            continue
+
+    return settings, False
+
+
+def build_user_sheets_exporter(user: User, settings: Settings, db: Session) -> SheetsExporter:
+    """Construye un `SheetsExporter` autenticado con OAuth 2.0 o Service Account según el perfil."""
+    auth_type = str(getattr(user, "google_auth_type", "") or "SERVICE_ACCOUNT")
+    has_oauth_marker, account_email = _parse_oauth_vault_marker(user)
+    uid = int(user.id) if user and user.id is not None else None
+
+    if auth_type == "OAUTH2" and has_oauth_marker and uid is not None:
+        effective_settings, _ = _resolve_oauth_settings(settings, db, uid)
+        if not is_oauth_configured(effective_settings):
+            return SheetsExporter(
+                auth_error="Falta configurar el cliente OAuth de Google. Carga las credenciales API en Hoja de Cálculo."
+            )
+        try:
+            factory = sessionmaker(bind=db.get_bind())
+            km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+            refresh_token = km.get_secret(f"user_{uid}:google_refresh_token")
+        except (KeyError, ValueError, RuntimeError):
+            return SheetsExporter(
+                auth_error="Tu sesión de Google expiró o fue removida. Reconecta tu cuenta en Hoja de Cálculo."
+            )
+        return SheetsExporter(
+            oauth_credentials={
+                "client_id": (effective_settings.GOOGLE_OAUTH_CLIENT_ID or "").strip(),
+                "client_secret": (effective_settings.GOOGLE_OAUTH_CLIENT_SECRET or "").strip(),
+                "refresh_token": refresh_token,
+                "email": account_email,
+            }
+        )
+
+    return SheetsExporter(
+        credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
+        credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+    )
+
+
+def _build_sheets_config_response(
+    current_user: User,
+    settings: Settings,
+    db: Session | None = None,
+    message: str | None = None,
 ) -> GoogleSheetsConfigResponse:
-    """Retorna la configuración de Google Sheets personal del usuario autenticado (sin heredar hojas globales)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    effective_settings, custom_configured = _resolve_oauth_settings(settings, db, uid)
     exporter = SheetsExporter(
         credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
         credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
     )
     raw_sheet_id = current_user.google_sheet_id
     user_sheet_id = str(raw_sheet_id).strip() if raw_sheet_id else None
+    auth_type_str = str(current_user.google_auth_type or "SERVICE_ACCOUNT")
+    has_marker, google_email = _parse_oauth_vault_marker(current_user)
+    oauth_connected = auth_type_str == "OAUTH2" and has_marker
     is_connected = bool(user_sheet_id)
     sheet_url = SheetsExporter.get_sheet_url(user_sheet_id) if user_sheet_id else None
-    auth_type_str = str(current_user.google_auth_type or "SERVICE_ACCOUNT")
+
+    default_msg = (
+        "Google Sheets listo para sincronizar."
+        if is_connected
+        else "Conecta tu cuenta de Google o vincula una hoja para empezar."
+    )
 
     return GoogleSheetsConfigResponse(
         google_sheet_id=user_sheet_id,
         google_sheet_url=sheet_url,
         google_auth_type=auth_type_str,
         service_account_email=exporter.client_email,
+        oauth_available=is_oauth_configured(effective_settings),
+        oauth_connected=oauth_connected,
+        google_account_email=google_email,
+        oauth_custom_configured=custom_configured,
         is_connected=is_connected,
-        message=(
-            "Google Sheets sincronizado y listo para recibir asientos."
-            if is_connected
-            else "No has vinculado tu Google Sheet personal todavía."
-        ),
+        message=message or default_msg,
     )
+
+
+@router.get("/sheets", response_model=GoogleSheetsConfigResponse)
+def get_user_sheets_config(
+    current_user: Annotated[User, Depends(require_trader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session | None, Depends(get_db)] = None,
+) -> GoogleSheetsConfigResponse:
+    """Retorna la configuración de Google Sheets personal del usuario autenticado."""
+    return _build_sheets_config_response(current_user, settings, db)
 
 
 @router.post("/sheets", response_model=GoogleSheetsConfigResponse)
@@ -289,21 +435,152 @@ def update_user_sheets_config(
     current_user.google_auth_type = payload.google_auth_type  # type: ignore[assignment]
     db.commit()
     db.refresh(current_user)
-
-    exporter = SheetsExporter(
-        credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
-        credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
+    return _build_sheets_config_response(
+        current_user,
+        settings,
+        db,
+        message="Hoja vinculada." if sheet_id else "Hoja desvinculada.",
     )
-    sheet_url = SheetsExporter.get_sheet_url(sheet_id) if sheet_id else None
-    updated_auth_type = str(current_user.google_auth_type or "SERVICE_ACCOUNT")
 
-    return GoogleSheetsConfigResponse(
-        google_sheet_id=sheet_id,
-        google_sheet_url=sheet_url,
-        google_auth_type=updated_auth_type,
-        service_account_email=exporter.client_email,
-        is_connected=bool(sheet_id),
-        message="Configuración de Google Sheets guardada exitosamente.",
+
+@router.get("/sheets/oauth/start", response_model=GoogleOAuthStartResponse)
+def start_google_oauth(
+    current_user: Annotated[User, Depends(require_trader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    redirect_uri: Annotated[str | None, Query()] = None,
+    db: Annotated[Session | None, Depends(get_db)] = None,
+) -> GoogleOAuthStartResponse:
+    """Genera la URL segura de autorización de Google OAuth 2.0 para el operador actual."""
+    uid = int(current_user.id)
+    effective_settings, _ = _resolve_oauth_settings(settings, db, uid)
+
+    if not is_oauth_configured(effective_settings):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google OAuth no está configurado. Carga Client ID y Client Secret de Google Cloud.",
+        )
+
+    safe_redirect = _validate_oauth_redirect_uri(redirect_uri, effective_settings)
+    state = create_state(user_id=uid, secret=settings.jwt_secret)
+    auth_url = build_authorization_url(effective_settings, state=state, redirect_uri=safe_redirect)
+    return GoogleOAuthStartResponse(authorization_url=auth_url)
+
+
+@router.post("/sheets/oauth/callback", response_model=GoogleSheetsConfigResponse)
+def complete_google_oauth(
+    payload: GoogleOAuthCallbackRequest,
+    current_user: Annotated[User, Depends(require_trader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GoogleSheetsConfigResponse:
+    """Completa la autorización OAuth 2.0, cifra el refresh token y crea la hoja si no existe."""
+    try:
+        state_user_id = verify_state(payload.state, secret=settings.jwt_secret)
+    except GoogleOAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    uid = int(current_user.id)
+    if state_user_id != uid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El estado OAuth no corresponde al usuario autenticado.",
+        )
+
+    effective_settings, _ = _resolve_oauth_settings(settings, db, uid)
+    safe_redirect = _validate_oauth_redirect_uri(payload.redirect_uri, effective_settings)
+
+    try:
+        tokens = exchange_code(effective_settings, payload.code, redirect_uri=safe_redirect)
+    except GoogleOAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    refresh_token = str(tokens.get("refresh_token") or "").strip()
+    email = str(tokens.get("email") or "").strip() or None
+
+    factory = sessionmaker(bind=db.get_bind())
+    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+    km.store_secret(f"user_{uid}:google_refresh_token", refresh_token)
+
+    vault_marker = f"vault:{email}" if email else "vault"
+    current_user.google_auth_type = "OAUTH2"  # type: ignore[assignment]
+    current_user.google_refresh_token_enc = vault_marker  # type: ignore[assignment]
+
+    if not current_user.google_sheet_id:
+        exporter = SheetsExporter(
+            oauth_credentials={
+                "client_id": (effective_settings.GOOGLE_OAUTH_CLIENT_ID or "").strip(),
+                "client_secret": (effective_settings.GOOGLE_OAUTH_CLIENT_SECRET or "").strip(),
+                "refresh_token": refresh_token,
+                "email": email,
+            }
+        )
+        created_sheet_id = exporter.create_spreadsheet("P2P Merchant - Contabilidad")
+        if created_sheet_id:
+            current_user.google_sheet_id = created_sheet_id  # type: ignore[assignment]
+
+    db.commit()
+    db.refresh(current_user)
+    return _build_sheets_config_response(
+        current_user,
+        settings,
+        db,
+        message="Cuenta de Google conectada y hoja lista para sincronizar.",
+    )
+
+
+@router.post("/sheets/oauth/credentials", response_model=GoogleSheetsConfigResponse)
+def save_google_oauth_client(
+    payload: GoogleOAuthClientConfigRequest,
+    current_user: Annotated[User, Depends(require_trader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GoogleSheetsConfigResponse:
+    """Almacena cifradas con AES-256-GCM las credenciales OAuth 2.0 de Google Cloud API."""
+    uid = int(current_user.id)
+    redirect_val = (
+        _validate_oauth_redirect_uri(payload.redirect_uri, settings)
+        if payload.redirect_uri
+        else settings.GOOGLE_OAUTH_REDIRECT_URI
+    )
+    secret_payload = json.dumps(
+        {
+            "client_id": payload.client_id.strip(),
+            "client_secret": payload.client_secret.strip(),
+            "redirect_uri": redirect_val,
+        }
+    )
+
+    factory = sessionmaker(bind=db.get_bind())
+    km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+    km.store_secret(f"user_{uid}:google_oauth_client", secret_payload)
+    if str(current_user.role) == "ADMIN":
+        km.store_secret("system:google_oauth_client", secret_payload)
+
+    return _build_sheets_config_response(
+        current_user,
+        settings,
+        db,
+        message="Credenciales de API Google guardadas. Ya puedes iniciar sesión con Google.",
+    )
+
+
+@router.post("/sheets/oauth/disconnect", response_model=GoogleSheetsConfigResponse)
+def disconnect_google_oauth(
+    current_user: Annotated[User, Depends(require_trader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GoogleSheetsConfigResponse:
+    """Desvincula la sesión OAuth de Google del perfil manteniendo compatibilidad con otros modos."""
+    current_user.google_refresh_token_enc = None  # type: ignore[assignment]
+    if str(current_user.google_auth_type or "") == "OAUTH2":
+        current_user.google_auth_type = "SERVICE_ACCOUNT"  # type: ignore[assignment]
+    db.commit()
+    db.refresh(current_user)
+    return _build_sheets_config_response(
+        current_user,
+        settings,
+        db,
+        message="Cuenta de Google desvinculada.",
     )
 
 
@@ -313,16 +590,21 @@ def sync_user_sheets_now(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> GoogleSheetsSyncResponse:
-    """Dispara en vivo la exportación del historial fiscal y contable hacia la hoja personal de Google Sheets."""
+    """Dispara en vivo la exportación del historial fiscal y contable hacia Google Sheets."""
     from src.data.repositories import JournalEntryRepository, OrderRepository
     from src.reporting.accounting_engine import AccountingEngine
     from src.reporting.tax_engine import FIFOCostMethod
 
+    exporter = build_user_sheets_exporter(current_user, settings, db)
     sheet_id = str(current_user.google_sheet_id or "").strip()
-    exporter = SheetsExporter(
-        credentials_path=settings.GOOGLE_CREDENTIALS_FILE,
-        credentials_json=settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-    )
+
+    if not sheet_id and exporter.uses_oauth:
+        created_id = exporter.create_spreadsheet("P2P Merchant - Contabilidad")
+        if created_id:
+            current_user.google_sheet_id = created_id  # type: ignore[assignment]
+            db.commit()
+            db.refresh(current_user)
+            sheet_id = created_id
 
     if not sheet_id:
         return GoogleSheetsSyncResponse(
@@ -330,7 +612,8 @@ def sync_user_sheets_now(
             google_sheet_id=None,
             google_sheet_url=None,
             service_account_email=exporter.client_email,
-            message="No hay ningún Google Sheet ID personal vinculado. Ingresa el enlace o ID primero.",
+            oauth_connected=exporter.uses_oauth,
+            message=exporter.last_error or "Vincula una hoja o conecta tu cuenta de Google primero.",
         )
 
     uid = int(current_user.id) if current_user and current_user.id is not None else None
@@ -354,7 +637,8 @@ def sync_user_sheets_now(
             google_sheet_id=sheet_id,
             google_sheet_url=sheet_url,
             service_account_email=exporter.client_email,
-            message=exporter.last_error or "Error al sincronizar con Google Sheets. Verifica permisos de editor.",
+            oauth_connected=exporter.uses_oauth,
+            message=exporter.last_error or "No se pudo sincronizar con Google Sheets.",
         )
 
     return GoogleSheetsSyncResponse(
@@ -364,9 +648,10 @@ def sync_user_sheets_now(
         rows_exported=len(trade_results),
         journal_entries_exported=len(journal_entries) if ok_acc else 0,
         service_account_email=exporter.client_email,
+        oauth_connected=exporter.uses_oauth,
         message=(
-            f"Sincronización completada: {len(trade_results)} operaciones fiscales y "
-            f"{len(journal_entries) if ok_acc else 0} asientos contables exportados."
+            f"Sincronizado: {len(trade_results)} órdenes y "
+            f"{len(journal_entries) if ok_acc else 0} asientos."
         ),
     )
 
@@ -376,7 +661,7 @@ def _mask_bot_token(token: str | None) -> str:
         return "No configurado"
     prefix = token.split(":")[0] if ":" in token else token[:4]
     masked_prefix = f"{prefix[:3]}••••" if len(prefix) > 3 else "••••"
-    return f"Configurado en Bóveda (.env) — {masked_prefix}:AAH••••"
+    return f"Activo ({masked_prefix}:AAH••••)"
 
 
 @router.get("/telegram", response_model=TelegramStatusResponse)
@@ -391,7 +676,7 @@ def get_telegram_status(
 
     return TelegramStatusResponse(
         is_configured=is_configured,
-        bot_token_masked=_mask_bot_token(raw_token) if is_configured else "No configurado en .env",
+        bot_token_masked=_mask_bot_token(raw_token) if is_configured else "Sin configurar",
         linked_chat_id=linked_chat,
         fail_closed_5xx_enabled=True,
         weight_pause_enabled=True,

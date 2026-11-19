@@ -31,41 +31,41 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   {
     href: "/",
-    label: "Matriz de Márgenes y Bancos",
+    label: "Matriz",
     shortLabel: "Matriz",
     icon: "grid_view",
   },
   {
     href: "/calculator",
-    label: "Calculadora de Ciclos",
+    label: "Calculadora",
     shortLabel: "Calculadora",
     icon: "calculate",
   },
   {
     href: "/orders",
-    label: "Ganancias y Órdenes",
+    label: "Órdenes",
     shortLabel: "Órdenes",
     icon: "receipt_long",
     requiresTrader: true,
   },
   {
     href: "/accounting",
-    label: "Contabilidad y Diario",
+    label: "Contabilidad",
     shortLabel: "Contabilidad",
     icon: "menu_book",
     requiresTrader: true,
   },
   {
     href: "/sheets",
-    label: "Hoja de Cálculo",
-    shortLabel: "Hoja",
+    label: "Google Sheets",
+    shortLabel: "Sheets",
     icon: "sync_alt",
     requiresTrader: true,
   },
   {
     href: "/settings",
-    label: "Configuración y Seguridad",
-    shortLabel: "Seguridad",
+    label: "Configuración",
+    shortLabel: "Ajustes",
     icon: "tune",
     requiresTrader: true,
   },
@@ -205,7 +205,9 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
 
       {/* Sidebar Institucional */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-surface border-r border-[#1e2430] flex flex-col justify-between transition-transform duration-200 lg:translate-x-0 ${
+        id="primary-navigation-drawer"
+        aria-label="Navegación principal"
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-surface border-r border-[#1e2430] flex flex-col justify-between overflow-y-auto overscroll-contain touch-pan-y transition-transform duration-200 lg:translate-x-0 ${
           mobileMenuOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
@@ -218,10 +220,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               </div>
               <div>
                 <div className="text-sm font-bold tracking-tight text-white leading-none">
-                  Sistema Comerciante P2P
-                </div>
-                <div className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mt-1">
-                  Arbitraje Binance
+                  Comerciante P2P
                 </div>
               </div>
             </Link>
@@ -238,7 +237,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
           {/* Menú Operativo de 6 Módulos */}
           <div className="px-3 py-4">
             <div className="px-3 mb-2 text-[10px] font-mono uppercase tracking-widest text-slate-500">
-              Mesa Operativa
+              Menú
             </div>
             <nav className="space-y-1">
               {NAV_ITEMS.map((item) => {
@@ -253,6 +252,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                   <Link
                     key={item.href}
                     href={item.href}
+                    aria-current={isActive ? "page" : undefined}
                     onClick={() => setMobileMenuOpen(false)}
                     className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-xs transition-all ${
                       isActive
@@ -273,7 +273,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                     {isRestricted && (
                       <span
                         className="material-symbols-outlined text-[14px] text-slate-600"
-                        title="Requiere rol TRADER o ADMIN"
+                        title="Requiere rol comerciante"
                       >
                         lock
                       </span>
@@ -293,14 +293,14 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 verified_user
               </span>
               <span className="text-[10px] font-mono text-slate-300">
-                Parada Segura • AES-256
+                {wsConnected ? "En vivo" : "Sin conexión"}
               </span>
             </div>
             <span
               className={`w-2 h-2 rounded-full ${
                 wsConnected ? "bg-tertiary animate-pulse" : "bg-primary-container"
               }`}
-              title={wsConnected ? "Conexión en vivo activa" : "Consulta periódica activa"}
+              title={wsConnected ? "En vivo" : "Actualización periódica"}
             />
           </div>
 
@@ -359,6 +359,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
         {isPaused && (
           <div
             role="alert"
+            aria-live="assertive"
             className="sticky top-0 z-40 w-full bg-error/20 border-b border-error/50 backdrop-blur-md px-4 lg:px-6 py-2 flex items-center justify-between gap-3 text-xs text-error"
           >
             <div className="flex items-center gap-2 font-mono font-bold">
@@ -366,7 +367,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 warning
               </span>
               <span>
-                PARADA DE EMERGENCIA ACTIVA — El sistema se encuentra en pausa preventiva de seguridad.
+                Sistema en pausa
               </span>
             </div>
             {user?.role === "ADMIN" && (
@@ -376,7 +377,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 disabled={togglingBot}
                 className="px-2.5 py-1 rounded bg-error text-white font-mono text-[11px] font-bold hover:brightness-110 transition-all shrink-0 cursor-pointer"
               >
-                Reanudar Sistema
+                Reanudar
               </button>
             )}
           </div>
@@ -392,6 +393,8 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
+              aria-expanded={mobileMenuOpen}
+              aria-controls="primary-navigation-drawer"
               className="lg:hidden p-1.5 rounded-lg bg-surface-container border border-[#1e2430] text-slate-300 hover:text-white"
               aria-label="Abrir navegación"
             >
@@ -399,7 +402,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
             </button>
 
             {/* Telemetría BCV, USDT/VES y Weight */}
-            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+            <div className="flex items-center gap-2 overflow-x-auto overscroll-x-contain touch-pan-x no-scrollbar py-1">
               <div className="px-2.5 py-1 rounded-md bg-surface-container border border-[#1e2430] flex items-center gap-1.5 shrink-0">
                 <span className="text-[10px] font-mono uppercase text-slate-400">BCV</span>
                 <span className="text-xs font-mono font-semibold text-secondary tabular-nums">
@@ -422,15 +425,17 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 )}
               </div>
 
-              <div
-                className={`hidden md:flex px-2.5 py-1 rounded-md border items-center gap-1.5 shrink-0 ${weightColor}`}
-                title="Consumo de cuota de API Binance (Pausa automática > 5000)"
-              >
-                <span className="material-symbols-outlined text-[14px]">speed</span>
-                <span className="text-[11px] font-mono tabular-nums">
-                  Peso API: {usedWeight}/{maxWeight}
-                </span>
-              </div>
+              {usedWeight >= 3500 && (
+                <div
+                  className={`hidden md:flex px-2.5 py-1 rounded-md border items-center gap-1.5 shrink-0 ${weightColor}`}
+                  title="Cuota API (pausa > 5.000)"
+                >
+                  <span className="material-symbols-outlined text-[14px]">speed</span>
+                  <span className="text-[11px] font-mono tabular-nums">
+                    API {usedWeight}/{maxWeight}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -443,9 +448,9 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               title={
                 user?.role === "ADMIN"
                   ? isPaused
-                    ? "Clic para reanudar motor operativo"
-                    : "Clic para activar pausa de seguridad"
-                  : "Estado del motor P2P"
+                    ? "Reanudar motor"
+                    : "Pausar motor"
+                  : "Estado del motor"
               }
               className={`px-2.5 py-1 rounded-md border text-[11px] font-mono font-semibold flex items-center gap-1.5 transition-colors ${
                 isPaused
@@ -459,7 +464,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 }`}
               />
               <span className="hidden sm:inline">
-                {isPaused ? "PAUSA DE SEGURIDAD" : "MOTOR ACTIVO"}
+                {isPaused ? "PAUSADO" : "ACTIVO"}
               </span>
             </button>
 
@@ -517,9 +522,13 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
         <main className="flex-1 px-4 lg:px-6 py-4 pb-20 lg:pb-8">{children}</main>
 
         {/* Barra Táctica Móvil Simplificada (Calculadora + Confirmación de Fondos + Matriz + Menú) */}
-        <nav className="lg:hidden fixed bottom-0 inset-x-0 z-30 h-16 bg-surface/95 backdrop-blur-md border-t border-[#1e2430] grid grid-cols-4 px-2">
+        <nav
+          aria-label="Navegación rápida móvil"
+          className="lg:hidden fixed bottom-0 inset-x-0 z-30 h-16 bg-surface/95 backdrop-blur-md border-t border-[#1e2430] grid grid-cols-4 px-2"
+        >
           <Link
             href="/calculator"
+            aria-current={pathname?.startsWith("/calculator") ? "page" : undefined}
             className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
               pathname?.startsWith("/calculator")
                 ? "text-primary"
@@ -531,6 +540,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
           </Link>
           <Link
             href="/accounting"
+            aria-current={pathname?.startsWith("/accounting") ? "page" : undefined}
             className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
               pathname?.startsWith("/accounting")
                 ? "text-tertiary"
@@ -538,24 +548,27 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
             }`}
           >
             <span className="material-symbols-outlined text-[20px]">verified</span>
-            <span className="truncate">Confirmar Pago</span>
+            <span className="truncate">Pagos</span>
           </Link>
           <Link
             href="/"
+            aria-current={pathname === "/" ? "page" : undefined}
             className={`flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
               pathname === "/" ? "text-primary" : "text-slate-300 hover:text-white"
             }`}
           >
             <span className="material-symbols-outlined text-[20px]">grid_view</span>
-            <span className="truncate">Matriz P2P</span>
+            <span className="truncate">Matriz</span>
           </Link>
           <button
             type="button"
             onClick={() => setMobileMenuOpen(true)}
+            aria-expanded={mobileMenuOpen}
+            aria-controls="primary-navigation-drawer"
             className="flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold text-slate-300 hover:text-white"
           >
             <span className="material-symbols-outlined text-[20px]">apps</span>
-            <span className="truncate">Módulos</span>
+            <span className="truncate">Menú</span>
           </button>
         </nav>
       </div>

@@ -320,8 +320,28 @@ class UserRepository:
     def get_by_username(self, username: str) -> User | None:
         return self.db.query(User).filter(User.username == username).first()
 
+    def get_by_email(self, email: str) -> User | None:
+        clean_email = email.strip().lower()
+        if not clean_email:
+            return None
+        return self.db.query(User).filter(User.email == clean_email).first()
+
     def get_by_telegram_id(self, telegram_id: str | int) -> User | None:
         return self.db.query(User).filter(User.telegram_id == str(telegram_id)).first()
+
+    def get_by_identifier(self, identifier: str) -> User | None:
+        """Busca un usuario por alias (username), correo electrónico o Telegram ID."""
+        clean = identifier.strip()
+        if not clean:
+            return None
+        user = self.get_by_username(clean)
+        if user:
+            return user
+        if "@" in clean:
+            user = self.get_by_email(clean)
+            if user:
+                return user
+        return self.get_by_telegram_id(clean)
 
     def create_user(
         self,
@@ -330,6 +350,11 @@ class UserRepository:
         role: str = "INVITADO",
         telegram_id: str | int | None = None,
         is_active: bool = True,
+        full_name: str | None = None,
+        email: str | None = None,
+        security_question: str | None = None,
+        security_answer_hash: str | None = None,
+        recovery_key_hash: str | None = None,
     ) -> User:
         user = User(
             username=username,
@@ -337,6 +362,11 @@ class UserRepository:
             role=role,
             telegram_id=str(telegram_id) if telegram_id is not None else None,
             is_active=is_active,
+            full_name=full_name.strip() if full_name else None,
+            email=email.strip().lower() if email else None,
+            security_question=security_question.strip() if security_question else None,
+            security_answer_hash=security_answer_hash,
+            recovery_key_hash=recovery_key_hash,
         )
         self.db.add(user)
         self.db.commit()

@@ -48,6 +48,76 @@ def test_telegram_command_bcv():
     assert "BCV" in res
     assert "USD" in res
     assert "Brecha" in res or "P2P" in res
+    assert "FIFO" not in res
+    assert "SENIAT" not in res
+
+
+def test_telegram_command_bcv_today_and_tomorrow_with_live_p2p(monkeypatch):
+    """Verifica que /bcv muestre tasa vigente de HOY, tasa de MAÑANA (si ya fue publicada),
+    P2P real en vivo (sin usar 1007.50 de sandbox) y omita menciones a FIFO/SENIAT.
+    """
+    from datetime import date
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.core.spread_monitor import BankRateQuote, SpreadMonitor
+    from src.data.database import Base
+    from src.data.models import BCVRateHistory
+    from src.data.repositories import BCVHistoryRepository
+    from src.reporting.bcv_service import BCVService
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+
+    from datetime import datetime
+
+    from src.reporting.bcv_history_service import VET_TIMEZONE, BCVHistoryService
+
+    today_ve = BCVHistoryService.effective_business_date(datetime.now(VET_TIMEZONE).date())
+    tomorrow_ve = date.fromordinal(today_ve.toordinal() + 1)
+
+    # Sembrar tasa vigente de HOY en BD
+    repo = BCVHistoryRepository(db)
+    repo.upsert_rate(
+        BCVRateHistory(fecha_valor=today_ve, usd_rate=914.02, eur_rate=1010.56, source="bcv_official")
+    )
+
+    tomorrow_str = tomorrow_ve.strftime("%d/%m/%Y")
+    monkeypatch.setattr(
+        BCVService,
+        "fetch_full_rates",
+        lambda self: {"usd": 915.75, "eur": 1008.31, "fecha_valor": tomorrow_str},
+    )
+    monkeypatch.setattr(
+        SpreadMonitor,
+        "fetch_live_quotes",
+        lambda self, **kwargs: [
+            BankRateQuote(bank_name="Banesco", buy_rate=1075.0, sell_rate=1085.0),
+        ],
+    )
+
+    notifier = TelegramNotifier(
+        bot_token="fake_token",
+        default_chat_id="1001",
+        allowed_user_ids=[1001],
+        session_factory=Session,
+    )
+    res = notifier.handle_command(user_id=1001, command="/bcv")
+
+    # No debe incluir explicación de FIFO ni SENIAT ni usar 1,007.50
+    assert "FIFO" not in res
+    assert "SENIAT" not in res
+    assert "1,007.50" not in res
+    # Debe mostrar P2P real (~1,080.00), tasa de hoy (914.02) y tasa de mañana (915.75)
+    assert "1,080.00" in res
+    assert "914.02" in res
+    assert "915.75" in res
+    assert "Hoy" in res or "Vigente" in res
+    assert "Mañana" in res
+    db.close()
 
 
 def test_telegram_poller_handles_callback_query():
