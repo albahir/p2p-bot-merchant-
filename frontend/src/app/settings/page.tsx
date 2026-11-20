@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import {
@@ -19,13 +19,42 @@ import {
   pauseBot,
   resumeBot,
   saveBinanceSettings,
+  sendEmailVerificationCode,
   sendTelegramTestAlert,
   updateRecoveryProfile,
   updateUserRole,
   updateUserSheet,
   updateUserStatus,
   verifyBinanceConnection,
+  verifyEmailCode,
 } from "@/lib/api";
+
+type TaxDocPrefix = "V" | "E" | "J" | "G" | "P" | "NONE";
+type EmailDomainOption =
+  | "@gmail.com"
+  | "@hotmail.com"
+  | "@outlook.com"
+  | "@yahoo.com"
+  | "@icloud.com"
+  | "__custom__";
+
+const TAX_PREFIX_OPTIONS: Array<{ id: TaxDocPrefix; label: string; isRif: boolean }> = [
+  { id: "V", label: "V-", isRif: false },
+  { id: "E", label: "E-", isRif: false },
+  { id: "J", label: "J-", isRif: true },
+  { id: "G", label: "G-", isRif: true },
+  { id: "P", label: "P-", isRif: false },
+  { id: "NONE", label: "Sin RIF", isRif: false },
+];
+
+const EMAIL_DOMAIN_OPTIONS: EmailDomainOption[] = [
+  "@gmail.com",
+  "@hotmail.com",
+  "@outlook.com",
+  "@yahoo.com",
+  "@icloud.com",
+  "__custom__",
+];
 
 export default function SettingsSecurityPage() {
   const initialUser = typeof window !== "undefined" ? getCurrentUser() : null;
@@ -40,7 +69,7 @@ export default function SettingsSecurityPage() {
   const initialBot =
     typeof window !== "undefined" ? getCachedApiResponse<BotStatus>("/api/bot/status") : null;
 
-  const [currentUser, setCurrentUser] = useState<User | null>(initialUser);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [binanceStatus, setBinanceStatus] = useState<BinanceStatusResponse | null>(
     initialBinance
   );
@@ -67,8 +96,20 @@ export default function SettingsSecurityPage() {
 
   // Recuperación segura y respaldo de perfil propio
   const [recFullName, setRecFullName] = useState<string>("");
-  const [recTaxId, setRecTaxId] = useState<string>("");
-  const [recEmail, setRecEmail] = useState<string>("");
+  const [recTaxPrefix, setRecTaxPrefix] = useState<TaxDocPrefix>("V");
+  const [recTaxNumber, setRecTaxNumber] = useState<string>("");
+  const [recEmailLocal, setRecEmailLocal] = useState<string>("");
+  const [recEmailDomain, setRecEmailDomain] = useState<EmailDomainOption>("@gmail.com");
+  const [recCustomEmail, setRecCustomEmail] = useState<string>("");
+  const [recEmailCode, setRecEmailCode] = useState<string>("");
+  const [recEmailCodeSent, setRecEmailCodeSent] = useState<boolean>(false);
+  const [recEmailSendingCode, setRecEmailSendingCode] = useState<boolean>(false);
+  const [recEmailVerifying, setRecEmailVerifying] = useState<boolean>(false);
+  const [recEmailVerifiedToken, setRecEmailVerifiedToken] = useState<string>("");
+  const [recEmailStatusMsg, setRecEmailStatusMsg] = useState<{
+    text: string;
+    tone: "info" | "ok" | "warn" | "error";
+  } | null>(null);
   const [recQuestion, setRecQuestion] = useState<string>("");
   const [recAnswer, setRecAnswer] = useState<string>("");
   const [savingRecovery, setSavingRecovery] = useState<boolean>(false);
@@ -106,8 +147,41 @@ export default function SettingsSecurityPage() {
       if (myProfile) {
         setCurrentUser(myProfile);
         setRecFullName(myProfile.full_name || "");
-        setRecTaxId(myProfile.tax_id || "");
-        setRecEmail(myProfile.email || "");
+        if (myProfile.tax_id) {
+          const match = myProfile.tax_id.match(/^([VEJGP])-(.+)$/i);
+          if (match) {
+            setRecTaxPrefix(match[1].toUpperCase() as TaxDocPrefix);
+            setRecTaxNumber(match[2].replace(/\D/g, ""));
+          } else {
+            setRecTaxPrefix("V");
+            setRecTaxNumber(myProfile.tax_id.replace(/\D/g, ""));
+          }
+        } else {
+          setRecTaxPrefix("NONE");
+          setRecTaxNumber("");
+        }
+        if (myProfile.email) {
+          const cleanEmail = myProfile.email.trim().toLowerCase();
+          const atIdx = cleanEmail.indexOf("@");
+          if (atIdx > 0) {
+            const localPart = cleanEmail.slice(0, atIdx);
+            const domainPart = cleanEmail.slice(atIdx);
+            const matchedDom = EMAIL_DOMAIN_OPTIONS.find(
+              (d) => d !== "__custom__" && d === domainPart
+            );
+            if (matchedDom) {
+              setRecEmailLocal(localPart);
+              setRecEmailDomain(matchedDom);
+              setRecCustomEmail("");
+            } else {
+              setRecEmailDomain("__custom__");
+              setRecCustomEmail(cleanEmail);
+            }
+          } else {
+            setRecEmailDomain("__custom__");
+            setRecCustomEmail(cleanEmail);
+          }
+        }
       }
 
       if (bStatus) {
@@ -220,6 +294,132 @@ export default function SettingsSecurityPage() {
     }
   }
 
+  const selectedRecTaxMeta =
+    TAX_PREFIX_OPTIONS.find((opt) => opt.id === recTaxPrefix) || TAX_PREFIX_OPTIONS[0];
+
+  const formattedRecTaxId = useMemo(() => {
+    if (recTaxPrefix === "NONE") return "";
+    const digits = recTaxNumber.replace(/\D/g, "");
+    if (!digits) return "";
+    if (selectedRecTaxMeta.isRif && digits.length >= 9) {
+      return `${recTaxPrefix}-${digits.slice(0, 8)}-${digits.slice(8, 9)}`;
+    }
+    return `${recTaxPrefix}-${digits}`;
+  }, [recTaxPrefix, recTaxNumber, selectedRecTaxMeta.isRif]);
+
+  const recEmailComputed = useMemo(() => {
+    if (recEmailDomain === "__custom__") {
+      return recCustomEmail.trim().toLowerCase();
+    }
+    const local = recEmailLocal.trim().toLowerCase();
+    return local ? `${local}${recEmailDomain}` : "";
+  }, [recEmailLocal, recEmailDomain, recCustomEmail]);
+
+  function resetRecEmailVerification() {
+    setRecEmailVerifiedToken("");
+    setRecEmailCodeSent(false);
+    setRecEmailCode("");
+    setRecEmailStatusMsg(null);
+  }
+
+  function handleRecEmailTextChange(raw: string) {
+    const cleaned = raw.replace(/\s+/g, "").toLowerCase();
+    resetRecEmailVerification();
+    if (recEmailDomain === "__custom__") {
+      setRecCustomEmail(cleaned);
+      return;
+    }
+    if (cleaned.includes("@")) {
+      const [localPart, domainPart] = cleaned.split("@", 2);
+      const withAt = domainPart ? `@${domainPart}` : "";
+      const matched = EMAIL_DOMAIN_OPTIONS.find(
+        (d) => d !== "__custom__" && d === withAt
+      );
+      if (matched) {
+        setRecEmailLocal(localPart);
+        setRecEmailDomain(matched);
+      } else if (domainPart) {
+        setRecEmailDomain("__custom__");
+        setRecCustomEmail(cleaned);
+      } else {
+        setRecEmailLocal(localPart);
+      }
+      return;
+    }
+    setRecEmailLocal(cleaned);
+  }
+
+  function handleRecEmailDomainChange(nextDomain: EmailDomainOption) {
+    resetRecEmailVerification();
+    if (nextDomain === "__custom__") {
+      const seed = recEmailLocal.trim().toLowerCase();
+      setRecCustomEmail(seed ? `${seed}@` : "");
+      setRecEmailDomain("__custom__");
+      return;
+    }
+    if (recEmailDomain === "__custom__" && recCustomEmail.includes("@")) {
+      setRecEmailLocal(recCustomEmail.split("@")[0]);
+    } else if (recEmailDomain === "__custom__" && recCustomEmail.trim()) {
+      setRecEmailLocal(recCustomEmail.trim());
+    }
+    setRecEmailDomain(nextDomain);
+  }
+
+  async function handleSendRecEmailCode() {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(recEmailComputed)) {
+      setRecEmailStatusMsg({ text: "Ingresa un correo válido.", tone: "error" });
+      return;
+    }
+    setRecEmailSendingCode(true);
+    setRecEmailStatusMsg(null);
+    try {
+      const res = await sendEmailVerificationCode(recEmailComputed);
+      if (res.sent) {
+        setRecEmailCodeSent(true);
+        setRecEmailCode("");
+        setRecEmailStatusMsg({ text: res.message, tone: "info" });
+        setTimeout(() => document.getElementById("rec-email-code")?.focus(), 0);
+      } else {
+        setRecEmailCodeSent(false);
+        setRecEmailStatusMsg({ text: res.message, tone: "warn" });
+      }
+    } catch (err: any) {
+      setRecEmailStatusMsg({
+        text: err.message || "No se pudo enviar el código al correo.",
+        tone: "error",
+      });
+    } finally {
+      setRecEmailSendingCode(false);
+    }
+  }
+
+  async function handleVerifyRecEmailCode() {
+    const cleaned = recEmailCode.replace(/\D/g, "").slice(0, 6);
+    if (cleaned.length !== 6) {
+      setRecEmailStatusMsg({ text: "Ingresa los 6 dígitos.", tone: "error" });
+      document.getElementById("rec-email-code")?.focus();
+      return;
+    }
+    setRecEmailVerifying(true);
+    setRecEmailStatusMsg(null);
+    try {
+      const res = await verifyEmailCode(recEmailComputed, cleaned);
+      if (res.verified && res.verification_token) {
+        setRecEmailVerifiedToken(res.verification_token);
+        setRecEmailCodeSent(false);
+        setRecEmailCode("");
+        setRecEmailStatusMsg({ text: res.message || "Correo verificado.", tone: "ok" });
+      }
+    } catch (err: any) {
+      setRecEmailStatusMsg({
+        text: err.message || "Código incorrecto o expirado.",
+        tone: "error",
+      });
+    } finally {
+      setRecEmailVerifying(false);
+    }
+  }
+
   async function handleSaveRecoveryProfile(
     e: React.FormEvent,
     regenerateKey = false
@@ -231,14 +431,14 @@ export default function SettingsSecurityPage() {
     try {
       const res = await updateRecoveryProfile({
         full_name: recFullName.trim() || undefined,
-        tax_id: recTaxId.trim() || undefined,
-        email: recEmail.trim() || undefined,
+        tax_id: formattedRecTaxId || undefined,
+        email: recEmailComputed || undefined,
         security_question: recQuestion.trim() || undefined,
         security_answer: recAnswer.trim() || undefined,
         regenerate_recovery_key: regenerateKey,
       });
       setCurrentUser(res.user);
-      setRecTaxId(res.user.tax_id || recTaxId.trim());
+      setRecQuestion("");
       setRecAnswer("");
       if (res.recovery_key) {
         setNewMasterKey(res.recovery_key);
@@ -778,12 +978,18 @@ export default function SettingsSecurityPage() {
               </span>
               <span
                 className={`px-2 py-0.5 rounded border ${
-                  currentUser.email
+                  currentUser.email_verified || recEmailVerifiedToken
                     ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
+                    : currentUser.email
+                    ? "bg-amber-500/15 border-amber-500/30 text-amber-400"
                     : "bg-surface-container border-[#1e2430] text-slate-400"
                 }`}
               >
-                {currentUser.email ? "● Correo Configurado" : "○ Sin Correo"}
+                {currentUser.email_verified || recEmailVerifiedToken
+                  ? "● Correo Verificado"
+                  : currentUser.email
+                  ? "● Correo Sin Verificar"
+                  : "○ Sin Correo"}
               </span>
               <span
                 className={`px-2 py-0.5 rounded border ${
@@ -854,42 +1060,169 @@ export default function SettingsSecurityPage() {
             </div>
 
             <div>
-              <label
-                htmlFor="rec-tax-id"
-                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
-              >
-                Cédula o RIF
-              </label>
-              <input
-                id="rec-tax-id"
-                type="text"
-                autoComplete="off"
-                enterKeyHint="next"
-                value={recTaxId}
-                onChange={(e) => setRecTaxId(e.target.value.toUpperCase())}
-                placeholder="V-12345678 o J-12345678-9"
-                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white placeholder:text-slate-600"
-              />
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="rec-tax-id"
+                  className="text-[10px] font-mono uppercase text-slate-400"
+                >
+                  Cédula o RIF
+                </label>
+                {formattedRecTaxId && (
+                  <span className="text-[10px] font-mono text-primary font-bold">
+                    {formattedRecTaxId}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-stretch rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden focus-within:border-primary-container">
+                <select
+                  aria-label="Tipo de documento"
+                  value={recTaxPrefix}
+                  onChange={(e) => {
+                    const next = e.target.value as TaxDocPrefix;
+                    setRecTaxPrefix(next);
+                    if (next === "NONE") setRecTaxNumber("");
+                  }}
+                  className="px-2 py-2 bg-surface-container border-r border-[#1e2430] text-xs font-mono font-bold text-primary focus:outline-hidden cursor-pointer shrink-0"
+                >
+                  {TAX_PREFIX_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id} className="bg-[#141920] text-white">
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  id="rec-tax-id"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  enterKeyHint="next"
+                  disabled={recTaxPrefix === "NONE"}
+                  maxLength={selectedRecTaxMeta.isRif ? 9 : 10}
+                  value={recTaxNumber}
+                  onChange={(e) =>
+                    setRecTaxNumber(
+                      e.target.value
+                        .replace(/\D/g, "")
+                        .slice(0, selectedRecTaxMeta.isRif ? 9 : 10)
+                    )
+                  }
+                  placeholder={
+                    recTaxPrefix === "NONE"
+                      ? "Omitido"
+                      : selectedRecTaxMeta.isRif
+                      ? "9 dígitos"
+                      : "12345678"
+                  }
+                  className="w-full px-2.5 py-2 bg-transparent focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-40"
+                />
+              </div>
             </div>
 
             <div>
-              <label
-                htmlFor="rec-email"
-                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
-              >
-                Correo de Respaldo
-              </label>
-              <input
-                id="rec-email"
-                type="email"
-                autoComplete="email"
-                inputMode="email"
-                enterKeyHint="next"
-                value={recEmail}
-                onChange={(e) => setRecEmail(e.target.value)}
-                placeholder="correo@ejemplo.com"
-                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
-              />
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="rec-email"
+                  className="text-[10px] font-mono uppercase text-slate-400"
+                >
+                  Correo de Respaldo
+                </label>
+                {recEmailVerifiedToken ||
+                (currentUser.email_verified && recEmailComputed === currentUser.email) ? (
+                  <span className="text-[10px] font-mono font-semibold text-tertiary">
+                    ✓ Verificado
+                  </span>
+                ) : /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(recEmailComputed) ? (
+                  <button
+                    type="button"
+                    onClick={handleSendRecEmailCode}
+                    disabled={recEmailSendingCode}
+                    className="text-[10px] font-mono font-semibold text-primary hover:underline disabled:opacity-50 cursor-pointer"
+                  >
+                    {recEmailSendingCode
+                      ? "Enviando..."
+                      : recEmailCodeSent
+                      ? "Reenviar código"
+                      : "Verificar correo"}
+                  </button>
+                ) : null}
+              </div>
+              <div className="flex items-stretch rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden focus-within:border-primary-container">
+                <input
+                  id="rec-email"
+                  type={recEmailDomain === "__custom__" ? "email" : "text"}
+                  autoComplete="email"
+                  inputMode="email"
+                  enterKeyHint="next"
+                  value={recEmailDomain === "__custom__" ? recCustomEmail : recEmailLocal}
+                  onChange={(e) => handleRecEmailTextChange(e.target.value)}
+                  placeholder={
+                    recEmailDomain === "__custom__" ? "carlos@dominio.com" : "carlos.p2p"
+                  }
+                  className="flex-1 min-w-0 px-2.5 py-2 bg-transparent focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
+                />
+                <select
+                  aria-label="Dominio del correo"
+                  value={recEmailDomain}
+                  onChange={(e) =>
+                    handleRecEmailDomainChange(e.target.value as EmailDomainOption)
+                  }
+                  className="px-2 py-2 bg-surface-container border-l border-[#1e2430] text-xs font-mono font-semibold text-primary focus:outline-hidden cursor-pointer shrink-0"
+                >
+                  {EMAIL_DOMAIN_OPTIONS.map((dom) => (
+                    <option key={dom} value={dom} className="bg-[#141920] text-white">
+                      {dom === "__custom__" ? "Otro..." : dom}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {recEmailCodeSent && !recEmailVerifiedToken && (
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <input
+                    id="rec-email-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={recEmailCode}
+                    onChange={(e) => {
+                      setRecEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      if (recEmailStatusMsg?.tone === "error") setRecEmailStatusMsg(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleVerifyRecEmailCode();
+                      }
+                    }}
+                    placeholder="Código 6 dígitos"
+                    aria-label="Código de verificación de correo"
+                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono tracking-[0.2em] text-white placeholder:tracking-normal placeholder:text-slate-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVerifyRecEmailCode}
+                    disabled={recEmailVerifying || recEmailCode.length !== 6}
+                    className="px-2.5 py-1.5 rounded-lg bg-primary-container/20 border border-primary-container/40 text-xs font-semibold text-primary hover:bg-primary-container/30 disabled:opacity-40 cursor-pointer shrink-0"
+                  >
+                    {recEmailVerifying ? "..." : "Confirmar"}
+                  </button>
+                </div>
+              )}
+              {recEmailStatusMsg && (
+                <p
+                  className={`text-[10px] mt-1 ${
+                    recEmailStatusMsg.tone === "ok"
+                      ? "text-tertiary"
+                      : recEmailStatusMsg.tone === "error"
+                      ? "text-error"
+                      : recEmailStatusMsg.tone === "warn"
+                      ? "text-amber-400"
+                      : "text-slate-400"
+                  }`}
+                >
+                  {recEmailStatusMsg.text}
+                </p>
+              )}
             </div>
 
             <div>

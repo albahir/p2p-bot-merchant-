@@ -1,8 +1,11 @@
 """Punto de entrada y configuración de la aplicación FastAPI (P2P Merchant API)."""
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+import os
+from contextlib import asynccontextmanager, suppress
 
+import httpx
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,8 +14,9 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config.settings import Settings
-from src.api.routes import accounting, auth, bot, fiscal, orders, spreads, users, websockets
+from src.api.routes import accounting, auth, bot, fiscal, market, orders, spreads, users, websockets
 from src.api.routes import settings as settings_route
+from src.core.market_analytics import MarketCollectorService
 from src.data.database import SessionLocal, init_db, seed_env_operators
 from src.security.auth_service import AuthService
 
@@ -43,7 +47,32 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    collector_task: asyncio.Task[None] | None = None
+    if os.getenv("DISABLE_MARKET_COLLECTOR") != "1":
+        def _collect_market_once() -> None:
+            session = SessionLocal()
+            try:
+                MarketCollectorService(session).capture_snapshot()
+            finally:
+                session.close()
+
+        async def _market_collector_loop() -> None:
+            await asyncio.sleep(3.0)
+            while True:
+                try:
+                    await asyncio.to_thread(_collect_market_once)
+                except (httpx.HTTPError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                    logger.debug("Recolector P2P en espera (%s)", exc)
+                await asyncio.sleep(120.0)
+
+        collector_task = asyncio.create_task(_market_collector_loop())
+
     yield
+
+    if collector_task is not None:
+        collector_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await collector_task
 
     logger.info("Deteniendo P2P Merchant API.")
 
@@ -119,6 +148,7 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
     app.include_router(settings_route.router)
     app.include_router(bot.router)
     app.include_router(websockets.router)
+    app.include_router(market.router)
 
     @app.get("/", tags=["Salud"])
     @app.head("/", tags=["Salud"])

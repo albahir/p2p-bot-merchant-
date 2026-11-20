@@ -34,6 +34,12 @@ const NAV_ITEMS: NavItem[] = [
     icon: "calculate",
   },
   {
+    href: "/market",
+    label: "Velas P2P",
+    shortLabel: "Velas",
+    icon: "candlestick_chart",
+  },
+  {
     href: "/orders",
     label: "Órdenes",
     shortLabel: "Órdenes",

@@ -19,6 +19,7 @@ class RegisterRequest(BaseModel):
     full_name: str | None = Field(default=None, max_length=120, description="Nombre completo o razón comercial")
     tax_id: str | None = Field(default=None, max_length=30, description="Cédula de Identidad o RIF (ej. V-12345678 o J-12345678-9)")
     email: str | None = Field(default=None, max_length=150, description="Correo electrónico de respaldo y recuperación")
+    email_verification_token: str | None = Field(default=None, description="Token firmado tras verificar correo por OTP")
     telegram_id: str | None = Field(default=None, description="ID numérico de Telegram para vincular cuenta")
     google_sheet_id: str | None = Field(default=None, description="ID o URL de Google Sheets opcional")
     preferred_banks: list[str] = Field(default_factory=list, description="Bancos venezolanos con los que opera el usuario")
@@ -26,13 +27,30 @@ class RegisterRequest(BaseModel):
     security_answer: str | None = Field(default=None, max_length=120, description="Respuesta secreta de recuperación")
 
 
+class EmailSendCodeRequest(BaseModel):
+    """Solicitud para enviar código OTP de 6 dígitos al correo durante registro."""
+    email: str = Field(..., min_length=5, max_length=150)
+
+
+class EmailVerifyCodeRequest(BaseModel):
+    """Solicitud para validar el código OTP de 6 dígitos recibido en el correo."""
+    email: str = Field(..., min_length=5, max_length=150)
+    code: str = Field(..., min_length=6, max_length=6)
+
+
 class PasswordRecoveryRequest(BaseModel):
     """Solicitud de recuperación de contraseña."""
     username: str = Field(..., description="Alias de usuario, correo electrónico o ID de Telegram registrado")
+    channel: str = Field(
+        default="telegram",
+        pattern="^(telegram|email)$",
+        description="Canal para envío del código OTP de recuperación",
+    )
 
 
 class RecoveryOptionsResponse(BaseModel):
     """Métodos de recuperación disponibles para un perfil."""
+    has_email: bool = False
     has_telegram: bool = False
     has_security_question: bool = False
     security_question: str | None = None
@@ -47,7 +65,7 @@ class PasswordResetRequest(BaseModel):
     new_password: str = Field(..., min_length=8, description="Nueva contraseña segura")
     method: str = Field(
         default="telegram_otp",
-        pattern="^(telegram_otp|security_question|recovery_key)$",
+        pattern="^(telegram_otp|email_otp|security_question|recovery_key)$",
         description="Método de recuperación utilizado",
     )
 
@@ -87,6 +105,7 @@ class UserPublicResponse(BaseModel):
     full_name: str | None = None
     tax_id: str | None = None
     email: str | None = None
+    email_verified: bool = False
     role: str
     telegram_id: str | None = None
     google_sheet_id: str | None = None
@@ -130,6 +149,7 @@ class UserPublicResponse(BaseModel):
             "full_name": getattr(data, "full_name", None),
             "tax_id": getattr(data, "tax_id", None),
             "email": getattr(data, "email", None),
+            "email_verified": bool(getattr(data, "email_verified", False)),
             "role": getattr(data, "role", "INVITADO"),
             "telegram_id": tg_id,
             "google_sheet_id": sheet_id,

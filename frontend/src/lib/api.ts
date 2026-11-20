@@ -21,6 +21,7 @@ export interface User {
   role: "ADMIN" | "TRADER" | "INVITADO";
   telegram_id?: string | null;
   google_sheet_id?: string | null;
+  email_verified?: boolean;
   google_auth_type?: "OAUTH2" | "SERVICE_ACCOUNT" | string | null;
   google_oauth_connected?: boolean;
   google_account_email?: string | null;
@@ -274,8 +275,11 @@ export function clearApiCache(endpointPrefix?: string): void {
 function resolveCacheKey(endpoint: string): string {
   const isPublicEndpoint =
     endpoint.startsWith("/api/spreads/") ||
+    endpoint.startsWith("/api/market/") ||
     endpoint.startsWith("/api/auth/login") ||
     endpoint.startsWith("/api/auth/register") ||
+    endpoint.startsWith("/api/auth/email/") ||
+    endpoint.startsWith("/api/auth/telegram-bot-info") ||
     endpoint.startsWith("/api/auth/recover-") ||
     endpoint.startsWith("/api/auth/reset-password");
   const token = getToken();
@@ -327,8 +331,11 @@ export async function apiRequest<T>(
   }
   const isPublicEndpoint =
     endpoint.startsWith("/api/spreads/") ||
+    endpoint.startsWith("/api/market/") ||
     endpoint.startsWith("/api/auth/login") ||
     endpoint.startsWith("/api/auth/register") ||
+    endpoint.startsWith("/api/auth/email/") ||
+    endpoint.startsWith("/api/auth/telegram-bot-info") ||
     endpoint.startsWith("/api/auth/recover-") ||
     endpoint.startsWith("/api/auth/reset-password");
 
@@ -566,6 +573,15 @@ export function prefetchRouteData(href: string): void {
     void apiRequest("/api/spreads/matrix?amount_usdt=100&merchant_only=false", { priority: "low" }).catch(() => {});
     return;
   }
+  if (href === "/market") {
+    void apiRequest("/api/market/candles?side=sell&timeframe=5m&bank=*&ticket_ves=1000000&limit=240", {
+      priority: "low",
+    }).catch(() => {});
+    void apiRequest("/api/market/analytics?bank=*&ticket_ves=1000000", {
+      priority: "low",
+    }).catch(() => {});
+    return;
+  }
   if (!hasTrader) return;
   if (href === "/orders") {
     void apiRequest("/api/orders?page=1&page_size=20", { priority: "low" }).catch(() => {});
@@ -714,6 +730,7 @@ export interface RegisterData {
   full_name?: string;
   tax_id?: string;
   email?: string;
+  email_verification_token?: string;
   telegram_id?: string;
   google_sheet_id?: string;
   preferred_banks?: string[];
@@ -722,6 +739,7 @@ export interface RegisterData {
 }
 
 export interface RecoveryOptions {
+  has_email?: boolean;
   has_telegram: boolean;
   has_security_question: boolean;
   security_question?: string | null;
@@ -729,7 +747,11 @@ export interface RecoveryOptions {
   is_locked: boolean;
 }
 
-export type RecoveryMethod = "telegram_otp" | "security_question" | "recovery_key";
+export type RecoveryMethod =
+  | "email_otp"
+  | "telegram_otp"
+  | "security_question"
+  | "recovery_key";
 
 export interface RecoveryProfileUpdateData {
   full_name?: string;
@@ -738,6 +760,48 @@ export interface RecoveryProfileUpdateData {
   security_question?: string;
   security_answer?: string;
   regenerate_recovery_key?: boolean;
+}
+
+export interface TelegramBotInfo {
+  available: boolean;
+  bot_username: string | null;
+  bot_mention: string | null;
+  bot_name: string;
+  bot_url: string | null;
+  command: string;
+}
+
+export async function getTelegramBotInfo(): Promise<TelegramBotInfo> {
+  return apiRequest<TelegramBotInfo>("/api/auth/telegram-bot-info", {
+    cacheTtlMs: 300_000,
+  });
+}
+
+export async function sendEmailVerificationCode(email: string): Promise<{
+  sent: boolean;
+  smtp_configured: boolean;
+  cooldown_seconds?: number;
+  message: string;
+}> {
+  return apiRequest("/api/auth/email/send-code", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function verifyEmailCode(
+  email: string,
+  code: string
+): Promise<{
+  verified: boolean;
+  email: string;
+  verification_token: string;
+  message: string;
+}> {
+  return apiRequest("/api/auth/email/verify-code", {
+    method: "POST",
+    body: JSON.stringify({ email, code }),
+  });
 }
 
 export async function registerUser(data: RegisterData): Promise<AuthResponse> {
@@ -759,15 +823,19 @@ export async function getRecoveryOptions(usernameOrEmail: string): Promise<Recov
   });
 }
 
-export async function recoverPassword(username: string): Promise<{
+export async function recoverPassword(
+  username: string,
+  channel: "telegram" | "email" = "telegram"
+): Promise<{
   success: boolean;
   message: string;
-  has_telegram: boolean;
+  has_telegram?: boolean;
+  has_email?: boolean;
   debug_code?: string;
 }> {
   return apiRequest("/api/auth/recover-password", {
     method: "POST",
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ username, channel }),
   });
 }
 
@@ -1530,5 +1598,182 @@ export async function commitBankStatement(data: {
   return apiRequest<StatementCommitResponse>("/api/accounting/statements/commit", {
     method: "POST",
     body: JSON.stringify(data),
+  });
+}
+
+// ---------- Terminal de Velas P2P y Predictor Estadístico (SPEC-025) ----------
+
+export type MarketSideMode = "sell" | "buy" | "bank" | "evolucion" | "brecha";
+export type MarketTimeframe = "1m" | "5m" | "15m" | "1h" | "4h" | "1D";
+
+export interface MarketCandlePoint {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number | null;
+}
+
+export interface MarketLinePoint {
+  time: number;
+  value: number | null;
+}
+
+export interface MarketPercentileBand {
+  floor: number;
+  ceiling: number;
+  coverage: number;
+  r_low_pct: number;
+  r_high_pct: number;
+}
+
+export interface MarketBandBacktest {
+  hits: number;
+  evaluated: number;
+  hit_rate_pct: number;
+}
+
+export interface MarketCandlesResponse {
+  side: MarketSideMode;
+  timeframe: MarketTimeframe;
+  bank: string;
+  ticket_ves: number;
+  candles: MarketCandlePoint[];
+  ema9: MarketLinePoint[];
+  ema21: MarketLinePoint[];
+  rsi14: MarketLinePoint[];
+  bcv_series: MarketLinePoint[];
+  band: MarketPercentileBand | null;
+  mature_days: number;
+  samples_total: number;
+  bank_options: string[];
+  warnings: string[];
+}
+
+export interface MarketDepthBucket {
+  buy_usdt: number;
+  sell_usdt: number;
+  top1_share_pct: number;
+  imbalance: number;
+}
+
+export interface MarketDepthSummary {
+  top5: MarketDepthBucket;
+  top10: MarketDepthBucket;
+  top20: MarketDepthBucket;
+  imbalance: number;
+}
+
+export interface MarketTicketVwap {
+  fillable: boolean;
+  vwap_price: number;
+  best_price: number;
+  slippage_pct: number;
+  top_price_covers_ticket: boolean;
+  covered_ves: number;
+  ads_needed: number;
+}
+
+export interface MarketLiquidityAlert {
+  detected: boolean;
+  ratio_pct: number | null;
+  baseline_median_usdt: number | null;
+  status: string;
+}
+
+export interface MarketBankCell {
+  bank: string;
+  sell_best: number;
+  sell_avg: number;
+  buy_best: number;
+  buy_avg: number;
+  sustained_high_pc: number | null;
+  vol_buy: number;
+  vol_sell: number;
+}
+
+export interface MarketAnalyticsResponse {
+  rsi14_current: number | null;
+  ema4_vs_ema12_pct: number | null;
+  ema5_vs_ema20_pct: number | null;
+  brecha_velocity: number | null;
+  depth_summary: MarketDepthSummary;
+  vwap_buy: MarketTicketVwap;
+  vwap_sell: MarketTicketVwap;
+  liquidity_alert: MarketLiquidityAlert;
+  band: MarketPercentileBand | null;
+  band_backtest: MarketBandBacktest | null;
+  samples_total: number;
+  days_count: number;
+  min_prediction_days: number;
+  live_bcv: number;
+  live_p2p_buy: number;
+  live_p2p_sell: number;
+  brecha_pct: number;
+  banks_snapshot: MarketBankCell[];
+  verdict_label: string;
+  warnings: string[];
+}
+
+export interface MarketCollectResponse {
+  captured: boolean;
+  cooldown_remaining_s: number;
+  message: string;
+  snapshot_timestamp?: string | null;
+}
+
+export async function getMarketCandles(params: {
+  side?: MarketSideMode;
+  timeframe?: MarketTimeframe;
+  bank?: string;
+  ticketVes?: number;
+  limit?: number;
+  fresh?: boolean;
+  signal?: AbortSignal;
+} = {}): Promise<MarketCandlesResponse> {
+  const query = new URLSearchParams();
+  query.set("side", params.side ?? "sell");
+  query.set("timeframe", params.timeframe ?? "5m");
+  query.set("bank", params.bank ?? "*");
+  query.set("ticket_ves", String(params.ticketVes ?? 1_000_000));
+  query.set("limit", String(params.limit ?? 240));
+  return apiRequest<MarketCandlesResponse>(`/api/market/candles?${query.toString()}`, {
+    fresh: params.fresh,
+    signal: params.signal,
+  });
+}
+
+export async function getMarketAnalytics(params: {
+  bank?: string;
+  ticketVes?: number;
+  side?: MarketSideMode;
+  fresh?: boolean;
+  signal?: AbortSignal;
+} = {}): Promise<MarketAnalyticsResponse> {
+  const query = new URLSearchParams();
+  query.set("bank", params.bank ?? "*");
+  query.set("ticket_ves", String(params.ticketVes ?? 1_000_000));
+  if (params.side) {
+    query.set("side", params.side);
+  }
+  return apiRequest<MarketAnalyticsResponse>(`/api/market/analytics?${query.toString()}`, {
+    fresh: params.fresh,
+    signal: params.signal,
+  });
+}
+
+export async function triggerMarketCollect(params: {
+  bank?: string;
+  ticketVes?: number;
+} = {}): Promise<MarketCollectResponse> {
+  const query = new URLSearchParams();
+  if (params.bank) query.set("bank", params.bank);
+  if (params.ticketVes && params.ticketVes > 0) {
+    query.set("ticket_ves", String(params.ticketVes));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<MarketCollectResponse>(`/api/market/collect${suffix}`, {
+    method: "POST",
   });
 }

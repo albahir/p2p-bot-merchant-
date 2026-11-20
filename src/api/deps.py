@@ -29,6 +29,7 @@ _USER_SNAPSHOT_FIELDS: tuple[str, ...] = (
     "full_name",
     "tax_id",
     "email",
+    "email_verified",
     "password_hash",
     "security_question",
     "security_answer_hash",

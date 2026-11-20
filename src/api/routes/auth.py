@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from config.settings import Settings
 from src.api.deps import get_current_user, get_db, get_settings
 from src.api.schemas.auth import (
+    EmailSendCodeRequest,
+    EmailVerifyCodeRequest,
     LoginRequest,
     PasswordRecoveryRequest,
     PasswordResetRequest,
@@ -25,6 +27,7 @@ from src.api.schemas.auth import (
 )
 from src.api.security import (
     create_access_token,
+    decode_access_token,
     verify_telegram_auth_data,
     verify_telegram_webapp_data,
 )
@@ -34,8 +37,436 @@ from src.security.auth_service import AuthService
 
 router = APIRouter(prefix="/api/auth", tags=["Autenticación"])
 
-# Almacén volátil de códigos OTP de recuperación (expiran en 15 minutos)
+# Almacén de códigos OTP de recuperación (sincronizado con Neon PostgreSQL SystemState para Render + Local)
 _RECOVERY_CODES: dict[str, dict[str, Any]] = {}
+_BOT_PROFILE_CACHE: dict[str, Any] = {"expires_at": 0.0, "data": None}
+
+
+def _hash_otp(username: str, otp: str) -> str:
+    """Calcula un hash HMAC-SHA256 del código OTP para no almacenarlo jamás en texto plano."""
+    import hashlib
+    import hmac
+
+    try:
+        secret = get_settings().jwt_secret.encode("utf-8")
+    except (RuntimeError, ValueError, OSError):
+        secret = b"p2p-otp-fallback-key"
+    msg = f"{username.strip().lower()}:{otp.strip()}".encode()
+    return hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+
+def save_shared_recovery_otp(
+    db: Session,
+    username: str,
+    user_id: int,
+    otp: str | None = None,
+    expires_at: float = 0.0,
+    attempts: int = 0,
+    otp_hash: str | None = None,
+) -> None:
+    """Persiste el hash del código OTP en SystemState (PostgreSQL/SQLite) para compartirlo entre Local y Render."""
+    import json
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+
+    clean_user = username.strip().lower()
+    key_str = f"recovery_otp:{clean_user}"[:64]
+    final_hash = otp_hash or _hash_otp(clean_user, str(otp or ""))
+    payload = json.dumps(
+        {"h": final_hash, "e": int(expires_at), "u": int(user_id), "a": int(attempts)},
+        separators=(",", ":"),
+    )
+    _RECOVERY_CODES[clean_user] = {
+        "code_hash": final_hash,
+        "expires_at": float(expires_at),
+        "user_id": int(user_id),
+        "attempts": int(attempts),
+    }
+    try:
+        row = db.query(SystemState).filter(SystemState.key == key_str).first()
+        if row is not None:
+            row.value = payload  # type: ignore[assignment]
+        else:
+            db.add(SystemState(key=key_str, value=payload))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+
+
+def load_shared_recovery_otp(db: Session, username: str) -> dict[str, Any] | None:
+    """Carga el registro hasheado del OTP activo desde la base de datos compartida (o memoria local)."""
+    import json
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+
+    clean_user = username.strip().lower()
+    key_str = f"recovery_otp:{clean_user}"[:64]
+    try:
+        row = db.query(SystemState).filter(SystemState.key == key_str).first()
+        if row is not None and row.value:
+            data = json.loads(str(row.value))
+            record = {
+                "code_hash": str(data["h"]),
+                "expires_at": float(data["e"]),
+                "user_id": int(data["u"]),
+                "attempts": int(data.get("a", 0)),
+            }
+            _RECOVERY_CODES[clean_user] = record
+            return record
+    except (SQLAlchemyError, ValueError, KeyError, TypeError):
+        pass
+    return _RECOVERY_CODES.get(clean_user)
+
+
+def delete_shared_recovery_otp(db: Session, username: str) -> None:
+    """Elimina un código OTP consumido o expirado de memoria y de la base de datos compartida."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+
+    clean_user = username.strip().lower()
+    _RECOVERY_CODES.pop(clean_user, None)
+    key_str = f"recovery_otp:{clean_user}"[:64]
+    try:
+        row = db.query(SystemState).filter(SystemState.key == key_str).first()
+        if row is not None:
+            db.delete(row)
+            db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+
+
+def enqueue_render_otp_outbox(
+    db: Session,
+    username: str,
+    chat_id: str,
+    otp: str,
+    expires_at: float,
+) -> bool:
+    """Encola el envío del OTP en SystemState para que el Bot alojado en Render lo despache a Telegram."""
+    import json
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+
+    clean_user = username.strip().lower()
+    key_str = f"tg_outbox:{clean_user}"[:64]
+    payload = json.dumps(
+        {
+            "c": str(chat_id).strip(),
+            "u": username.strip()[:30],
+            "o": str(otp),
+            "e": int(expires_at),
+        },
+        separators=(",", ":"),
+    )
+    try:
+        row = db.query(SystemState).filter(SystemState.key == key_str).first()
+        if row is not None:
+            row.value = payload  # type: ignore[assignment]
+        else:
+            db.add(SystemState(key=key_str, value=payload))
+        db.commit()
+        return True
+    except SQLAlchemyError:
+        db.rollback()
+        return False
+
+
+def _email_otp_state_key(clean_email: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(clean_email.encode()).hexdigest()[:24]
+    return f"email_otp:{digest}"
+
+
+@router.post("/email/send-code")
+def send_email_verification_code(
+    req: EmailSendCodeRequest,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Envía un código OTP de 6 dígitos al correo vía SMTP durante el registro."""
+    import json
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+    from src.integrations.email_verifier import EmailVerificationService
+
+    clean_email = _validate_and_normalize_email(req.email)
+    if not clean_email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Ingresa un correo electrónico válido.",
+        )
+
+    existing = UserRepository(db).get_by_email(clean_email)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este correo electrónico ya está asociado a otra cuenta.",
+        )
+
+    mailer = EmailVerificationService(settings)
+    if not mailer.is_configured:
+        return {
+            "sent": False,
+            "smtp_configured": False,
+            "message": (
+                "SMTP no configurado aún en el servidor. "
+                "Agrega SMTP_USER y SMTP_PASSWORD (App Password de Gmail) en config/.env."
+            ),
+        }
+
+    key_str = _email_otp_state_key(clean_email)
+    now_ts = time.time()
+    try:
+        existing_row = db.query(SystemState).filter(SystemState.key == key_str).first()
+        if existing_row is not None and existing_row.value:
+            prev = json.loads(str(existing_row.value))
+            locked_until = float(prev.get("l", 0))
+            if locked_until > now_ts:
+                rem_min = max(1, int((locked_until - now_ts) // 60) + 1)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Demasiados intentos fallidos. Espera {rem_min} minuto(s).",
+                )
+            last_sent = float(prev.get("s", 0))
+            if last_sent > 0 and (now_ts - last_sent) < 30:
+                wait_s = max(1, int(30 - (now_ts - last_sent)))
+                return {
+                    "sent": True,
+                    "smtp_configured": True,
+                    "cooldown_seconds": wait_s,
+                    "message": f"Ya enviamos un código hace unos segundos. Revisa tu bandeja o espera {wait_s}s.",
+                }
+    except HTTPException:
+        raise
+    except (SQLAlchemyError, ValueError, TypeError, KeyError):
+        existing_row = None
+
+    otp = "".join([str(secrets.randbelow(10)) for _ in range(6)])
+    otp_hash = _hash_otp(clean_email, otp)
+    sent_ok, err_msg = mailer.send_verification_code(to_email=clean_email, code=otp)
+    if not sent_ok:
+        return {
+            "sent": False,
+            "smtp_configured": True,
+            "message": err_msg or "No se pudo enviar el código de verificación por SMTP.",
+        }
+
+    payload = json.dumps(
+        {
+            "h": otp_hash,
+            "e": int(now_ts + 900),
+            "a": 0,
+            "s": int(now_ts),
+            "l": 0,
+        },
+        separators=(",", ":"),
+    )
+    try:
+        row = db.query(SystemState).filter(SystemState.key == key_str).first()
+        if row is not None:
+            row.value = payload  # type: ignore[assignment]
+        else:
+            db.add(SystemState(key=key_str, value=payload))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+
+    return {
+        "sent": True,
+        "smtp_configured": True,
+        "message": f"Código de 6 dígitos enviado a {clean_email}.",
+    }
+
+
+@router.post("/email/verify-code")
+def verify_email_code(
+    req: EmailVerifyCodeRequest,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Valida el código OTP de 6 dígitos enviado al correo con límite anti-fuerza bruta."""
+    import json
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+
+    clean_email = _validate_and_normalize_email(req.email)
+    if not clean_email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Correo inválido.",
+        )
+
+    key_str = _email_otp_state_key(clean_email)
+    now_ts = time.time()
+    row = db.query(SystemState).filter(SystemState.key == key_str).first()
+    if row is None or not row.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No hay ningún código pendiente para este correo. Solicita uno nuevo.",
+        )
+
+    try:
+        data = json.loads(str(row.value))
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Solicitud de verificación inválida. Solicita un código nuevo.",
+        )
+
+    locked_until = float(data.get("l", 0))
+    if locked_until > now_ts:
+        rem_min = max(1, int((locked_until - now_ts) // 60) + 1)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Demasiados intentos incorrectos. Intenta en {rem_min} minuto(s).",
+        )
+
+    if now_ts > float(data.get("e", 0)):
+        db.delete(row)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El código de verificación expiró (15 min). Solicita uno nuevo.",
+        )
+
+    submitted_hash = _hash_otp(clean_email, req.code.strip())
+    if not secrets.compare_digest(str(data.get("h", "")), submitted_hash):
+        attempts = int(data.get("a", 0)) + 1
+        data["a"] = attempts
+        if attempts >= 5:
+            data["l"] = int(now_ts + 900)
+            row.value = json.dumps(data, separators=(",", ":"))  # type: ignore[assignment]
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Has superado 5 intentos fallidos. Espera 15 minutos antes de reintentar.",
+            )
+        row.value = json.dumps(data, separators=(",", ":"))  # type: ignore[assignment]
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Código de verificación incorrecto.",
+        )
+
+    try:
+        db.delete(row)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+
+    ver_token = create_access_token(
+        data={"sub": clean_email, "purpose": "email_verified"},
+        secret_key=settings.jwt_secret,
+        expires_delta=timedelta(minutes=25),
+        algorithm=settings.JWT_ALGORITHM,
+    )
+    return {
+        "verified": True,
+        "email": clean_email,
+        "verification_token": ver_token,
+        "message": "Correo verificado correctamente.",
+    }
+
+
+@router.get("/telegram-bot-info")
+def get_telegram_bot_info(
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Retorna el @username público y enlace directo https://t.me/<bot>?start=id sin exponer secretos."""
+    import json
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from src.data.models import SystemState
+
+    # 1. Prioridad máxima: variable explícita en .env / Render
+    env_username = str(getattr(settings, "TELEGRAM_BOT_USERNAME", "") or "").strip().lstrip("@")
+    if env_username:
+        return {
+            "available": True,
+            "bot_username": env_username,
+            "bot_mention": f"@{env_username}",
+            "bot_name": "P2P Merchant Bot",
+            "bot_url": f"https://t.me/{env_username}?start=id",
+            "command": "/id",
+        }
+
+    # 2. Caché en memoria (TTL 5 min)
+    now_ts = time.monotonic()
+    cached_data = _BOT_PROFILE_CACHE.get("data")
+    if cached_data and now_ts < float(_BOT_PROFILE_CACHE.get("expires_at", 0.0)):
+        return dict(cached_data)
+
+    # 3. Perfil público publicado por el Bot en Render dentro de Neon PostgreSQL (SystemState)
+    try:
+        row = db.query(SystemState).filter(SystemState.key == "telegram_bot_profile").first()
+        if row is not None and row.value:
+            parsed = json.loads(str(row.value))
+            uname = str(parsed.get("username") or "").strip().lstrip("@")
+            fname = str(parsed.get("first_name") or "P2P Merchant Bot").strip()
+            if uname:
+                payload = {
+                    "available": True,
+                    "bot_username": uname,
+                    "bot_mention": f"@{uname}",
+                    "bot_name": fname,
+                    "bot_url": f"https://t.me/{uname}?start=id",
+                    "command": "/id",
+                }
+                _BOT_PROFILE_CACHE["data"] = payload
+                _BOT_PROFILE_CACHE["expires_at"] = now_ts + 300.0
+                return dict(payload)
+    except (SQLAlchemyError, ValueError, TypeError, KeyError):
+        pass
+
+    # 4. Consulta directa puntual getMe si el backend actual tiene conectividad hacia Telegram / Worker
+    if (settings.TELEGRAM_BOT_TOKEN or "").strip():
+        try:
+            from src.integrations.telegram_notifier import TelegramNotifier
+
+            notifier = TelegramNotifier(
+                bot_token=settings.TELEGRAM_BOT_TOKEN,
+                proxy_url=settings.TELEGRAM_PROXY_URL,
+                api_base_url=settings.TELEGRAM_API_BASE_URL,
+            )
+            profile = notifier.sync_bot_profile_to_db(db=db)
+            if profile and profile.get("username"):
+                uname = profile["username"].lstrip("@")
+                payload = {
+                    "available": True,
+                    "bot_username": uname,
+                    "bot_mention": f"@{uname}",
+                    "bot_name": profile.get("first_name") or "P2P Merchant Bot",
+                    "bot_url": f"https://t.me/{uname}?start=id",
+                    "command": "/id",
+                }
+                _BOT_PROFILE_CACHE["data"] = payload
+                _BOT_PROFILE_CACHE["expires_at"] = now_ts + 300.0
+                return dict(payload)
+        except (RuntimeError, ValueError, OSError, TypeError):
+            pass
+
+    return {
+        "available": False,
+        "bot_username": None,
+        "bot_mention": None,
+        "bot_name": "P2P Merchant Bot",
+        "bot_url": None,
+        "command": "/id",
+    }
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -116,6 +547,7 @@ def register(
         )
 
     clean_email = _validate_and_normalize_email(req.email)
+    email_verified = False
     if clean_email:
         existing_email_user = user_repo.get_by_email(clean_email)
         if existing_email_user:
@@ -123,6 +555,18 @@ def register(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Este correo electrónico ya está asociado a otra cuenta.",
             )
+        if req.email_verification_token:
+            ver_payload = decode_access_token(
+                token=req.email_verification_token,
+                secret_key=settings.jwt_secret,
+                algorithm=settings.JWT_ALGORITHM,
+            )
+            if (
+                ver_payload
+                and ver_payload.get("purpose") == "email_verified"
+                and ver_payload.get("sub") == clean_email
+            ):
+                email_verified = True
 
     clean_question = req.security_question.strip() if req.security_question and req.security_question.strip() else None
     clean_answer = req.security_answer.strip() if req.security_answer and req.security_answer.strip() else None
@@ -200,6 +644,11 @@ def register(
             security_answer_hash=sec_answer_hash,
             recovery_key_hash=recovery_key_hash,
         )
+
+    if email_verified and not getattr(new_user, "email_verified", False):
+        new_user.email_verified = True  # type: ignore[assignment]
+        db.commit()
+        db.refresh(new_user)
 
     if req.google_sheet_id and req.google_sheet_id.strip():
         raw_sheet = req.google_sheet_id.strip()
@@ -299,6 +748,7 @@ def get_recovery_options(
     )
 
     return RecoveryOptionsResponse(
+        has_email=bool(user.email),
         has_telegram=bool(user.telegram_id),
         has_security_question=bool(user.security_question and user.security_answer_hash),
         security_question=str(user.security_question) if (user.security_question and user.security_answer_hash) else None,
@@ -311,6 +761,7 @@ def get_recovery_options(
 def recover_password(
     req: PasswordRecoveryRequest,
     db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings | None, Depends(get_settings)] = None,
 ) -> dict[str, Any]:
     """Genera y despacha un código OTP de recuperación al Telegram del usuario."""
     user_repo = UserRepository(db)
@@ -324,11 +775,66 @@ def recover_password(
             "has_telegram": False,
         }
 
+    _ensure_not_recovery_locked(user)
+
     otp = "".join([str(secrets.randbelow(10)) for _ in range(6)])
     expires_at = time.time() + 900  # 15 minutos
+    uid_int = int(user.id) if user.id is not None else 0
+
+    if req.channel == "email":
+        if not user.email:
+            return {
+                "success": False,
+                "message": "Esta cuenta no tiene un correo electrónico vinculado.",
+                "has_email": False,
+            }
+        from src.integrations.email_verifier import EmailVerificationService
+
+        effective_settings = settings or get_settings()
+        mailer = EmailVerificationService(effective_settings)
+        if not mailer.is_configured:
+            return {
+                "success": False,
+                "has_email": True,
+                "message": "SMTP no configurado en el servidor para enviar códigos por correo.",
+            }
+        save_shared_recovery_otp(
+            db=db,
+            username=str(user.username),
+            user_id=uid_int,
+            otp=otp,
+            expires_at=expires_at,
+        )
+        sent_ok, err_msg = mailer.send_verification_code(to_email=str(user.email), code=otp)
+        if not sent_ok:
+            return {
+                "success": False,
+                "has_email": True,
+                "message": err_msg or "No se pudo enviar el código de recuperación al correo.",
+            }
+        return {
+            "success": True,
+            "has_email": True,
+            "message": "Código OTP de 6 dígitos enviado a tu correo vinculado.",
+        }
+
+    if not user.telegram_id:
+        return {
+            "success": False,
+            "message": "Esta cuenta no tiene un Chat ID de Telegram vinculado. Usa tu Pregunta Secreta o tu Llave Maestra.",
+            "has_telegram": False,
+        }
+
+    # Persistir inmediatamente en Neon PostgreSQL / SQLite compartido con el Bot en Render
+    save_shared_recovery_otp(
+        db=db,
+        username=str(user.username),
+        user_id=uid_int,
+        otp=otp,
+        expires_at=expires_at,
+    )
 
     sent_to_telegram = False
-    telegram_error: str | None = None
     if user.telegram_id:
         try:
             from src.integrations.telegram_notifier import TelegramNotifier
@@ -342,45 +848,36 @@ def recover_password(
                     "Válido por 15 minutos. Si no solicitaste este código, ignora este mensaje.",
                     chat_id=str(user.telegram_id),
                     max_retries=1,
-                    timeout_override=4.0,
+                    timeout_override=3.5,
                 )
             )
-            telegram_error = notifier.last_error
-        except (RuntimeError, ValueError, OSError, TypeError) as err:
+        except (RuntimeError, ValueError, OSError, TypeError):
             sent_to_telegram = False
-            telegram_error = str(err)
 
     if sent_to_telegram:
-        _RECOVERY_CODES[str(user.username).lower()] = {
-            "code": otp,
-            "expires_at": expires_at,
-            "user_id": user.id,
-            "attempts": 0,
-        }
         return {
             "success": True,
             "message": "Código OTP de 6 dígitos enviado exitosamente a tu Telegram vinculado.",
             "has_telegram": True,
+            "relayed_via_render": False,
         }
 
-    if user.telegram_id:
-        return {
-            "success": False,
-            "has_telegram": False,
-            "telegram_unreachable": True,
-            "message": (
-                "No se pudo entregar el código OTP por Telegram porque api.telegram.org no respondió a tiempo "
-                "(posible bloqueo de ISP o sin conexión a Telegram). "
-                "Usa tu Pregunta Secreta o tu Llave Maestra de Respaldo aquí mismo (no requieren conexión con Telegram), "
-                "o activa VPN / TELEGRAM_PROXY_URL."
-            ),
-            "error_detail": telegram_error,
-        }
-
+    # Si la red local bloquea Telegram (ISP Venezuela), encolar en la BD compartida para que el Bot en Render lo envíe
+    queued_for_render = enqueue_render_otp_outbox(
+        db=db,
+        username=str(user.username),
+        chat_id=str(user.telegram_id),
+        otp=otp,
+        expires_at=expires_at,
+    )
     return {
-        "success": False,
-        "message": "Esta cuenta no tiene un Chat ID de Telegram vinculado. Usa tu Pregunta Secreta o tu Llave Maestra.",
-        "has_telegram": False,
+        "success": True,
+        "has_telegram": True,
+        "relayed_via_render": queued_for_render,
+        "message": (
+            "Código OTP generado y despachado a través de tu Bot en Render (vía base de datos compartida). "
+            "Revisa tu Telegram en unos segundos o envíale /otp directamente a tu bot en Telegram."
+        ),
     }
 
 
@@ -393,9 +890,12 @@ def reset_password(
     user_repo = UserRepository(db)
     target_user = user_repo.get_by_identifier(req.username)
 
-    if req.method == "telegram_otp":
+    if req.method in ("telegram_otp", "email_otp"):
+        if target_user:
+            _ensure_not_recovery_locked(target_user)
+
         lookup_key = str(target_user.username).lower() if target_user else req.username.strip().lower()
-        record = _RECOVERY_CODES.get(lookup_key)
+        record = load_shared_recovery_otp(db, lookup_key)
         if not record:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -403,30 +903,44 @@ def reset_password(
             )
 
         if time.time() > record["expires_at"]:
-            _RECOVERY_CODES.pop(lookup_key, None)
+            delete_shared_recovery_otp(db, lookup_key)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El código de recuperación ha expirado (límite de 15 minutos).",
             )
 
-        if not secrets.compare_digest(str(record["code"]), req.reset_code.strip()):
-            record["attempts"] = int(record.get("attempts", 0)) + 1
-            if record["attempts"] >= 5:
-                _RECOVERY_CODES.pop(lookup_key, None)
+        submitted_hash = _hash_otp(lookup_key, req.reset_code.strip())
+        if not secrets.compare_digest(str(record["code_hash"]), submitted_hash):
+            new_attempts = int(record.get("attempts", 0)) + 1
+            record["attempts"] = new_attempts
+            if new_attempts >= 5:
+                delete_shared_recovery_otp(db, lookup_key)
+            else:
+                save_shared_recovery_otp(
+                    db=db,
+                    username=lookup_key,
+                    user_id=int(record["user_id"]),
+                    expires_at=float(record["expires_at"]),
+                    attempts=new_attempts,
+                    otp_hash=str(record["code_hash"]),
+                )
+            if target_user:
+                _register_failed_recovery(target_user, db)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Código de recuperación inválido.",
             )
 
-        user = user_repo.get_by_id(record["user_id"])
+        user = user_repo.get_by_id(int(record["user_id"]))
         if not user:
+            delete_shared_recovery_otp(db, lookup_key)
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
 
         user.password_hash = AuthService.hash_password(req.new_password)  # type: ignore[assignment]
         user.failed_recovery_attempts = 0  # type: ignore[assignment]
         user.recovery_locked_until = None  # type: ignore[assignment]
         db.commit()
-        _RECOVERY_CODES.pop(lookup_key, None)
+        delete_shared_recovery_otp(db, lookup_key)
 
         return {
             "success": True,

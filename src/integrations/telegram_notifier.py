@@ -63,11 +63,11 @@ class TelegramNotifier:
         allowed_user_ids: list[int] | None = None,
         trader_user_ids: list[int] | None = None,
         proxy_url: str | None = None,
-        api_base_url: str = "https://api.telegram.org",
+        api_base_url: str = "",
         use_sandbox: bool = True,
         session_factory: Any = None,
     ):
-        if not bot_token or not default_chat_id or trader_user_ids is None:
+        if not bot_token or not default_chat_id or trader_user_ids is None or not api_base_url:
             try:
                 from config.settings import Settings
                 settings = Settings()
@@ -82,6 +82,7 @@ class TelegramNotifier:
             except (ValueError, KeyError, OSError, RuntimeError, TypeError) as e:
                 logger.debug(f"Ajuste automático de configuración Telegram omitido: {e}")
 
+        api_base_url = (api_base_url or "https://api.telegram.org").strip()
         self.bot_token = bot_token
         self.default_chat_id = default_chat_id
         self.allowed_user_ids = allowed_user_ids or []
@@ -94,15 +95,13 @@ class TelegramNotifier:
         self.session_factory = session_factory
         self.last_error: str | None = None
 
-        # Configuración del cliente HTTP persistente con soporte para proxy y forzado IPv4 (evita blackhole IPv6 en Windows)
+        # Configuración del cliente HTTP persistente con soporte para proxy y Cloudflare Worker (TELEGRAM_API_BASE_URL)
         client_kwargs: dict[str, Any] = {
-            "timeout": httpx.Timeout(10.0, connect=4.5),
+            "timeout": httpx.Timeout(12.0, connect=6.0),
             "limits": httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0),
         }
         if self.proxy_url:
             client_kwargs["proxy"] = self.proxy_url
-        else:
-            client_kwargs["transport"] = httpx.HTTPTransport(local_address="0.0.0.0")
 
         self._client = httpx.Client(**client_kwargs)
 
@@ -231,6 +230,8 @@ class TelegramNotifier:
     def set_bot_commands(self) -> bool:
         """Registra la lista oficial de comandos en Telegram para el menú nativo."""
         commands = [
+            {"command": "id", "description": "🪪 Ver tu ID de Telegram para registro web"},
+            {"command": "otp", "description": "🔐 Código OTP para recuperar contraseña"},
             {"command": "spread", "description": "📈 Spreads por banco y arbitraje cruzado"},
             {"command": "bcv", "description": "🏛️ Tasa oficial BCV y brecha cambiaria"},
             {"command": "status", "description": "📊 Estado del bot y modo operativo"},
@@ -247,6 +248,63 @@ class TelegramNotifier:
             return res.status_code == 200
         except (httpx.RequestError, OSError):
             return False
+
+    def sync_bot_profile_to_db(self, db: Any = None) -> dict[str, str] | None:
+        """Consulta getMe y persiste el username público del bot en SystemState (sin secretos)."""
+        import json
+
+        if not self.bot_token:
+            return None
+        try:
+            res = self._client.get(f"{self.base_url}/getMe", timeout=httpx.Timeout(4.0, connect=2.5))
+            if res.status_code != 200:
+                return None
+            data = res.json()
+            result = data.get("result") or {}
+            username = str(result.get("username") or "").strip().lstrip("@")
+            first_name = str(result.get("first_name") or "P2P Merchant Bot").strip()
+            if not username:
+                return None
+
+            profile = {"username": username, "first_name": first_name}
+            from src.data.models import SystemState
+
+            own_session = False
+            session = db
+            if session is None:
+                sf = self.session_factory
+                if sf is None:
+                    try:
+                        from src.data.database import SessionLocal
+
+                        sf = SessionLocal
+                    except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                        sf = None
+                if sf is not None:
+                    session = sf()
+                    own_session = True
+
+            if session is not None:
+                try:
+                    row = (
+                        session.query(SystemState)
+                        .filter(SystemState.key == "telegram_bot_profile")
+                        .first()
+                    )
+                    serialized = json.dumps(profile, ensure_ascii=False)
+                    if row is not None:
+                        row.value = serialized  # type: ignore[assignment]
+                    else:
+                        session.add(SystemState(key="telegram_bot_profile", value=serialized))
+                    session.commit()
+                except SQLAlchemyError:
+                    session.rollback()
+                finally:
+                    if own_session:
+                        session.close()
+            return profile
+        except (httpx.RequestError, ValueError, TypeError, OSError):
+            return None
 
     def send_alert(
         self,
@@ -328,6 +386,17 @@ class TelegramNotifier:
                 logger.warning(
                     f"TELEGRAM: Fallo de red temporal (intento {attempt + 1}/{total_attempts}): {e}"
                 )
+                # Si se configuró un proxy/Worker externo que no responde, intentar fallback directo a api.telegram.org
+                if self.api_base_url != "https://api.telegram.org":
+                    try:
+                        direct_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+                        res_direct = self._client.post(direct_url, **req_kwargs)
+                        if res_direct.status_code == 200:
+                            logger.info("TELEGRAM: Notificación entregada vía fallback directo api.telegram.org.")
+                            self.last_error = None
+                            return True
+                    except (httpx.RequestError, OSError):
+                        pass
                 if attempt < total_attempts - 1:
                     time.sleep(0.8)
                     continue
@@ -340,6 +409,111 @@ class TelegramNotifier:
                 logger.error(f"TELEGRAM: Excepción inesperada: {err_msg}")
                 self.last_error = err_msg
         return False
+
+    def flush_db_outbox(self, db: Any = None) -> int:
+        """Despacha mensajes OTP pendientes encolados en SystemState (puente Web Local -> Bot en Render)."""
+        import json
+
+        from src.data.models import SystemState
+
+        own_session = False
+        session = db
+        if session is None:
+            sf = self.session_factory
+            if sf is None:
+                try:
+                    from src.data.database import SessionLocal
+
+                    sf = SessionLocal
+                except (ImportError, SQLAlchemyError, RuntimeError, OSError):
+                    return 0
+            try:
+                session = sf()
+                own_session = True
+            except (SQLAlchemyError, RuntimeError, OSError):
+                return 0
+
+        dispatched = 0
+        try:
+            rows = (
+                session.query(SystemState)
+                .filter(SystemState.key.like("tg_outbox:%"))
+                .all()
+            )
+            now_ts = time.time()
+            for row in rows:
+                try:
+                    payload = json.loads(str(row.value or "{}"))
+                    chat_id = str(payload.get("c", "")).strip()
+                    uname = str(payload.get("u", "")).strip()
+                    otp = str(payload.get("o", "")).strip()
+                    exp = float(payload.get("e", 0))
+                    if not chat_id or not otp or (exp > 0 and now_ts > exp):
+                        session.delete(row)
+                        session.commit()
+                        continue
+
+                    sent = self.send_alert(
+                        "🔐 *Recuperación de Contraseña*\n\n"
+                        f"Hola `{uname}`, tu código de seguridad es:\n"
+                        f"👉 `{otp}`\n\n"
+                        "Válido por 15 minutos. Si no solicitaste este código, ignora este mensaje.",
+                        chat_id=chat_id,
+                        max_retries=2,
+                        timeout_override=6.0,
+                    )
+                    if sent:
+                        session.delete(row)
+                        session.commit()
+                        dispatched += 1
+                except (ValueError, TypeError, KeyError, SQLAlchemyError):
+                    session.rollback()
+        except SQLAlchemyError:
+            session.rollback()
+        finally:
+            if own_session and session is not None:
+                session.close()
+        return dispatched
+
+    def _handle_generate_recovery_otp(self, user_id: int | str | None) -> str:
+        """Genera un código OTP de 6 dígitos desde el Bot en Render y lo guarda en la BD compartida."""
+        if not user_id:
+            return "⚠️ No se pudo identificar tu ID de Telegram."
+
+        from src.api.routes.auth import save_shared_recovery_otp
+        from src.data.database import SessionLocal
+        from src.data.repositories import UserRepository
+
+        sf = self.session_factory or SessionLocal
+        db = sf()
+        try:
+            repo = UserRepository(db)
+            user = repo.get_by_telegram_id(str(user_id).strip())
+            if not user or not user.is_active:
+                return (
+                    "⚠️ Tu ID de Telegram no está vinculado a ninguna cuenta web activa.\n"
+                    f"Tu ID es: `{user_id}`."
+                )
+
+            otp = "".join([str(secrets.randbelow(10)) for _ in range(6)])
+            expires_at = time.time() + 900
+            save_shared_recovery_otp(
+                db=db,
+                username=str(user.username),
+                user_id=int(user.id) if user.id is not None else 0,
+                otp=otp,
+                expires_at=expires_at,
+            )
+            return (
+                "🔐 *Código OTP de Recuperación Web*\n\n"
+                f"• Operador: `{user.username}`\n"
+                f"• Código OTP (6 dígitos): 👉 `{otp}`\n\n"
+                "Ingresa este código en la pestaña *OTP Telegram* de la pantalla de recuperación web (válido por 15 minutos)."
+            )
+        except (SQLAlchemyError, RuntimeError, ValueError, OSError) as err:
+            return f"❌ Error al generar código OTP: {err}"
+        finally:
+            db.close()
 
     def send_message(
         self,
@@ -536,6 +710,17 @@ class TelegramNotifier:
             clean_cmd_str = command.strip()
 
         cmd = clean_cmd_str.split()[0].lower() if clean_cmd_str else ""
+
+        if cmd in ("/id", "/mi_id", "/myid") or clean_cmd_str.lower().startswith("/start id"):
+            uid_text = str(user_id).strip() if user_id is not None else "-"
+            return (
+                "🪪 *Tu ID de Telegram para Registro Web*\n\n"
+                f"• Tu ID numérico es:\n👉 `{uid_text}`\n\n"
+                "Toca el número de arriba para copiarlo y pégalo en el campo *ID de Telegram* del registro."
+            )
+
+        if cmd in ("/otp", "/codigo", "/recuperar", "/clave"):
+            return self._handle_generate_recovery_otp(user_id=user_id)
 
         # --- Aislamiento estricto para INVITADO ---
         if role == "INVITADO":
@@ -1922,6 +2107,11 @@ class TelegramCommandPoller:
 
     def poll_once(self) -> int:
         """Consulta actualizaciones pendientes y ejecuta comandos o consultas con IA si son de usuarios autorizados."""
+        try:
+            self.notifier.flush_db_outbox()
+        except (RuntimeError, ValueError, OSError):
+            pass
+
         url = f"{self.notifier.base_url}/getUpdates"
         params: dict[str, str | int] = {
             "offset": self._last_offset + 1,
@@ -2009,7 +2199,16 @@ class TelegramCommandPoller:
                 role = self.notifier.get_user_role(user_id)
 
                 if role == "NONE":
-                    self._notify_unauthorized_user(user_id, from_user, chat_id)
+                    lower_txt = text.lower()
+                    if lower_txt.startswith(("/id", "/mi_id", "/myid", "/start id")):
+                        self.notifier.send_alert(
+                            "🪪 *Tu ID de Telegram para Registro Web*\n\n"
+                            f"• Tu ID numérico es:\n👉 `{user_id}`\n\n"
+                            "Toca el número para copiarlo y pégalo en el formulario de registro de la web.",
+                            chat_id=chat_id,
+                        )
+                    else:
+                        self._notify_unauthorized_user(user_id, from_user, chat_id)
                     processed += 1
                     continue
 

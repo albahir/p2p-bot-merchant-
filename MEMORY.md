@@ -834,6 +834,33 @@
     - **Algoritmo de Recomendación "Mis Bancos" vs "Todos" en Matriz ([`spread_monitor.py`](file:///c:/p2p-bot-merchant/src/core/spread_monitor.py), [`frontend/src/app/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/page.tsx), [`register/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/register/page.tsx))**:
       - Implementado `SpreadMonitor.recommend_for_user_profile` y el selector reactivo **`[★ Mis bancos (N) | Todos]`** en Matriz (`/`). En modo **`★ Mis bancos`**, prioriza y filtra las tasas y el Top 3 de rutas de arbitraje ejecutables dentro de los bancos del usuario (indicando si el saldo disponible en ese banco cubre el capital requerido), manteniendo siempre el botón de 1 clic para alternar a **`Todos los bancos`**.
 
+64. **Puente OTP Compartido (Local ↔ Render), Hasheo HMAC + Anti-Fuerza Bruta y Registro Guiado en 3 Pasos (ADR 064)**:
+    - **Recuperación OTP Segura con Render ([`src/api/routes/auth.py`](file:///c:/p2p-bot-merchant/src/api/routes/auth.py), [`src/integrations/telegram_notifier.py`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py), [`src/main.py`](file:///c:/p2p-bot-merchant/src/main.py))**:
+      - Hasheo HMAC-SHA256 (`_hash_otp`) para almacenamiento seguro de OTPs en `SystemState` (`recovery_otp:<user>`), sin guardar códigos en texto plano.
+      - Unificación de bloqueo anti-fuerza bruta (`_ensure_not_recovery_locked` + `_register_failed_recovery`): 5 fallos de OTP bloquean nuevos códigos y restablecimientos por 15 minutos (`HTTP 429`).
+      - Cola outbox (`tg_outbox:<user>`) despachada automáticamente por el Bot en Render (`flush_db_outbox`) + comando directo `/otp` y `/id` / `/start id` disponible para cualquier usuario en Telegram.
+    - **Descubrimiento Público del Bot (`GET /api/auth/telegram-bot-info`) ([`config/settings.py`](file:///c:/p2p-bot-merchant/config/settings.py), [`src/integrations/telegram_notifier.py`](file:///c:/p2p-bot-merchant/src/integrations/telegram_notifier.py))**:
+      - Sincronización automática del `@username` oficial del bot (`sync_bot_profile_to_db` vía `getMe` o `TELEGRAM_BOT_USERNAME`) en `SystemState`, generando enlace directo `https://t.me/<bot>?start=id` sin exponer secretos.
+    - **Registro Guiado en 3 Pasos con Paletas Desplegables ([`frontend/src/app/register/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/register/page.tsx), [`frontend/src/app/login/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/login/page.tsx))**:
+      - Wizard accesible de 3 pasos (**Identidad** → **Telegram y Seguridad** → **Bancos y Sheets**) con `<progress>`, `aria-current="step"`, gestión de foco entre pasos y preservación de estado.
+      - Paletas desplegables `<select>` pegadas a los inputs de **Correo** (`@gmail.com`, `@hotmail.com`, etc.) y **Cédula/RIF** (`V-`, `E-`, `J-`, `G-`, `P-`, `Sin RIF`) con cambio dinámico de formato y validación contextual `onBlur`.
+      - **ID de Telegram obligatorio** en el registro web con botón directo al bot y copia rápida de `@username`.
+    - **Verificación de Correo vía SMTP en Registro ([`src/integrations/email_verifier.py`](file:///c:/p2p-bot-merchant/src/integrations/email_verifier.py), [`config/settings.py`](file:///c:/p2p-bot-merchant/config/settings.py), [`src/api/routes/auth.py`](file:///c:/p2p-bot-merchant/src/api/routes/auth.py), [`frontend/src/app/register/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/register/page.tsx))**:
+      - Servicio `EmailVerificationService` (`SMTP` / `SMTP_SSL` + `STARTTLS` con timeout de 8s, configurable vía `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS`).
+      - Endpoints `POST /api/auth/email/send-code` y `POST /api/auth/email/verify-code` con código OTP de 6 dígitos hasheado con HMAC-SHA256 en `SystemState`, cooldown de 30s, bloqueo de 15 min ante 5 intentos fallidos (`HTTP 429`) y emisión de token JWT `email_verification_token` para marcar `User.email_verified = True` en `/register`.
+
+65. **Terminal de Velas P2P Independiente (`/market`), Profundidad Top 20, VWAP por Ticket y Predictor Estadístico Fail-Closed (SPEC-025 / ADR 065)**:
+    - **Aislamiento en Botón Aparte ([`app-shell.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/app-shell.tsx), [`frontend/src/app/market/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/market/page.tsx), [`trading-candles-chart.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/trading-candles-chart.tsx))**:
+      - Botón independiente **`Velas P2P`** (`/market`) en navegación lateral y prefetch automático en [`frontend/src/lib/api.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/api.ts), sin modificar ni recargar Matriz (`/`), Calculadora (`/calculator`), Órdenes ni Contabilidad.
+      - Gráficos interactivos con TradingView `lightweight-charts@^4.2.1` en modo `Velas`, `Línea` y `Área`, temporalidades (`1m`, `5m`, `15m`, `1h`, `4h`, `1D`), overlays `EMA 9 / EMA 21`, histograma de volumen USDT y panel sincronizado `RSI 14 Wilder` (zonas `70/30`).
+      - 5 vistas de terminal: `USDT · Venta`, `USDT · Compra`, `Por Banco & Monto`, `Evolución P2P vs BCV` (mismo eje de bolívares) y `Brecha (%)`.
+    - **Motor Cuantitativo, Hampel MAD y Recolector Local ([`src/core/market_analytics.py`](file:///c:/p2p-bot-merchant/src/core/market_analytics.py), [`src/data/models.py`](file:///c:/p2p-bot-merchant/src/data/models.py), [`src/data/repositories.py`](file:///c:/p2p-bot-merchant/src/data/repositories.py))**:
+      - Nuevas tablas `market_snapshots` y `market_hourly_rollups` con consolidación OHLC horaria y cálculo de máximo sostenido por banco (`pc = min(prev_p, curr_p)`).
+      - Filtro estadístico **Hampel MAD** anti-outliers, cálculo **VWAP real por monto de ticket en VES** (`compute_vwap_for_ticket`) con deslizamiento `%` respecto a Punta #1, profundidad `Top 5 / Top 10 / Top 20` con desequilibrio neto y detección de liquidez flaca (`< 60%` de mediana reciente).
+      - **Banda Probabilística 90%** por percentiles ponderados exponencialmente + backtest walk-forward sin look-ahead bias, bloqueada en modo **Fail-Closed** mientras `days_count < 20`.
+    - **API y Recolector Background ([`src/api/routes/market.py`](file:///c:/p2p-bot-merchant/src/api/routes/market.py), [`src/api/main.py`](file:///c:/p2p-bot-merchant/src/api/main.py))**:
+      - Rutas `GET /api/market/candles`, `GET /api/market/analytics` y `POST /api/market/collect` (protegida con cooldown anti-spam de 15s) + bucle periódico cada 120s en `lifespan` (desactivable vía `DISABLE_MARKET_COLLECTOR=1`).
+
 ---
 
 ## 🎯 Guía Operativa Actual

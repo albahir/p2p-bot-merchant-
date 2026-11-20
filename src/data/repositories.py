@@ -12,6 +12,8 @@ from src.data.models import (
     FiscalPeriodSnapshot,
     IdentityCache,
     JournalEntry,
+    MarketHourlyRollup,
+    MarketSnapshot,
     Order,
     SecurityEvent,
     User,
@@ -595,6 +597,85 @@ class JournalEntryRepository:
         q = self.db.query(JournalEntry).filter(JournalEntry.reference == reference)
         q = _apply_user_scope(self.db, q, JournalEntry, uid)
         return q.all()
+
+
+class MarketDataRepository:
+    """Acceso histórico para instantáneas P2P minuto/ciclo y rollups horarios OHLC (SPEC-025)."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def add_snapshot(self, snapshot: MarketSnapshot) -> MarketSnapshot:
+        self.db.add(snapshot)
+        self.db.commit()
+        self.db.refresh(snapshot)
+        return snapshot
+
+    def list_snapshots(
+        self,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
+        limit: int = 1000,
+    ) -> list[MarketSnapshot]:
+        q = self.db.query(MarketSnapshot)
+        if start_dt is not None:
+            q = q.filter(MarketSnapshot.timestamp >= start_dt)  # type: ignore[arg-type]
+        if end_dt is not None:
+            q = q.filter(MarketSnapshot.timestamp <= end_dt)  # type: ignore[arg-type]
+        rows = q.order_by(MarketSnapshot.timestamp.desc()).limit(limit).all()
+        rows.reverse()
+        return rows
+
+    def get_latest_snapshot(self) -> MarketSnapshot | None:
+        return self.db.query(MarketSnapshot).order_by(MarketSnapshot.timestamp.desc()).first()
+
+    def get_rollup_by_hour(self, hora_utc: datetime) -> MarketHourlyRollup | None:
+        return (
+            self.db.query(MarketHourlyRollup)
+            .filter(MarketHourlyRollup.hora_utc == hora_utc)
+            .first()
+        )
+
+    def upsert_hourly_rollup(self, rollup: MarketHourlyRollup) -> MarketHourlyRollup:
+        existing = self.get_rollup_by_hour(cast(datetime, rollup.hora_utc))
+        if not existing:
+            self.db.add(rollup)
+            self.db.commit()
+            self.db.refresh(rollup)
+            return rollup
+
+        ex = cast(Any, existing)
+        rl = cast(Any, rollup)
+        ex.buy_high = max(float(ex.buy_high), float(rl.buy_high))
+        ex.buy_low = min(float(ex.buy_low), float(rl.buy_low))
+        ex.buy_close = float(rl.buy_close)
+        ex.sell_high = max(float(ex.sell_high), float(rl.sell_high))
+        ex.sell_low = min(float(ex.sell_low), float(rl.sell_low))
+        ex.sell_close = float(rl.sell_close)
+        ex.bcv_close = float(rl.bcv_close)
+        ex.brecha_close = float(rl.brecha_close)
+        ex.vol_buy_sum = float(rl.vol_buy_sum)
+        ex.vol_sell_sum = float(rl.vol_sell_sum)
+        ex.samples_count = int(ex.samples_count) + int(rl.samples_count)
+        ex.bank_matrix_json = rl.bank_matrix_json
+        self.db.commit()
+        self.db.refresh(existing)
+        return existing
+
+    def list_hourly_rollups(
+        self,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
+        limit: int = 1000,
+    ) -> list[MarketHourlyRollup]:
+        q = self.db.query(MarketHourlyRollup)
+        if start_dt is not None:
+            q = q.filter(MarketHourlyRollup.hora_utc >= start_dt)  # type: ignore[arg-type]
+        if end_dt is not None:
+            q = q.filter(MarketHourlyRollup.hora_utc <= end_dt)  # type: ignore[arg-type]
+        rows = q.order_by(MarketHourlyRollup.hora_utc.desc()).limit(limit).all()
+        rows.reverse()
+        return rows
 
 
 

@@ -211,16 +211,109 @@ def test_login_immediately_hydrates_existing_google_sheets_connection():
         db.close()
 
 
-def test_recover_password_reports_telegram_timeout_honestly_and_fast() -> None:
+def test_recover_password_relays_otp_via_shared_db_to_render_bot_and_resets() -> None:
     """
-    Si api.telegram.org sufre timeout (bloqueo de ISP o caída de red), recover_password
-    debe fallar rápido (1 solo intento sin bloquear 26s) y retornar success=False con
-    diagnóstico claro en lugar de un falso positivo.
+    Si la red local en Venezuela sufre timeout hacia Telegram, recover_password persiste
+    el OTP en SystemState (BD compartida con Render), lo encola en tg_outbox:<user>,
+    el Bot en Render lo despacha vía flush_db_outbox() y reset_password valida desde la BD.
     """
     from typing import Any
 
-    from src.api.routes.auth import recover_password
-    from src.api.schemas.auth import PasswordRecoveryRequest
+    from src.api.routes.auth import (
+        _RECOVERY_CODES,
+        load_shared_recovery_otp,
+        recover_password,
+        reset_password,
+    )
+    from src.api.schemas.auth import PasswordRecoveryRequest, PasswordResetRequest
+    from src.integrations.telegram_notifier import TelegramNotifier
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = session_factory()
+    try:
+        auth_svc = AuthService(db_session=db)
+        user = auth_svc.ensure_default_admin(
+            default_username="tg_render_user", default_password="OldPassword123!"
+        )
+        user.telegram_id = "123456789"  # type: ignore[assignment]
+        db.commit()
+
+        # 1. En la PC local (Venezuela), send_alert directo da timeout
+        def local_blocked_send_alert(self: Any, text: str, chat_id: str | None = None, **kwargs: Any) -> bool:
+            self.last_error = "Error de conectividad con Telegram (timed out)"
+            return False
+
+        with patch("src.integrations.telegram_notifier.TelegramNotifier.send_alert", local_blocked_send_alert):
+            res = recover_password(
+                req=PasswordRecoveryRequest(username="tg_render_user"),
+                db=db,
+            )
+
+        assert res["success"] is True
+        assert res["has_telegram"] is True
+        assert res.get("relayed_via_render") is True
+
+        # 2. El Bot en Render lee tg_outbox desde la misma BD y lo envía a Telegram sin bloqueo
+        dispatched_messages: list[tuple[str, str | None]] = []
+
+        def render_cloud_send_alert(self: Any, text: str, chat_id: str | None = None, **kwargs: Any) -> bool:
+            dispatched_messages.append((text, chat_id))
+            return True
+
+        render_notifier = TelegramNotifier(
+            bot_token="123456:ABCDEF",
+            default_chat_id="123456789",
+            session_factory=session_factory,
+        )
+        with patch.object(TelegramNotifier, "send_alert", render_cloud_send_alert):
+            sent_count = render_notifier.flush_db_outbox(db)
+
+        assert sent_count == 1
+        assert len(dispatched_messages) == 1
+        assert dispatched_messages[0][1] == "123456789"
+
+        # 3. Incluso si la memoria local _RECOVERY_CODES se vacía, reset_password valida el hash desde la BD compartida
+        import re
+
+        _RECOVERY_CODES.clear()
+        shared_record = load_shared_recovery_otp(db, "tg_render_user")
+        assert shared_record is not None
+        assert "code_hash" in shared_record
+        otp_match = re.search(r"(\d{6})", dispatched_messages[0][0])
+        assert otp_match is not None
+        otp_code = otp_match.group(1)
+
+        reset_res = reset_password(
+            req=PasswordResetRequest(
+                username="tg_render_user",
+                reset_code=otp_code,
+                new_password="NewPassword456!",
+                method="telegram_otp",
+            ),
+            db=db,
+        )
+        assert reset_res["success"] is True
+        assert auth_svc.authenticate("tg_render_user", "NewPassword456!") is not None
+    finally:
+        db.close()
+
+
+def test_otp_is_stored_hashed_and_brute_force_locks_account_after_5_attempts() -> None:
+    """
+    El OTP debe almacenarse hasheado (nunca en texto plano) en SystemState y
+    5 intentos fallidos de OTP deben incrementar failed_recovery_attempts y bloquear
+    la cuenta por 15 minutos (HTTP 429) impidiendo pedir nuevos OTPs.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    from src.api.routes.auth import recover_password, reset_password
+    from src.api.schemas.auth import PasswordRecoveryRequest, PasswordResetRequest
+    from src.data.models import SystemState
 
     engine = create_engine(
         "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
@@ -230,32 +323,128 @@ def test_recover_password_reports_telegram_timeout_honestly_and_fast() -> None:
     try:
         auth_svc = AuthService(db_session=db)
         user = auth_svc.ensure_default_admin(
-            default_username="tg_timeout_user", default_password="Password123!"
+            default_username="brute_user", default_password="Password123!"
         )
-        user.telegram_id = "123456789"  # type: ignore[assignment]
+        user.telegram_id = "987654321"  # type: ignore[assignment]
         db.commit()
 
-        attempts_made = 0
+        with patch("src.integrations.telegram_notifier.TelegramNotifier.send_alert", return_value=True):
+            recover_password(req=PasswordRecoveryRequest(username="brute_user"), db=db)
 
-        def fake_send_alert(self: Any, text: str, chat_id: str | None = None, **kwargs: Any) -> bool:
-            nonlocal attempts_made
-            attempts_made += 1
-            assert kwargs.get("max_retries") == 1
-            self.last_error = "Error de conectividad con Telegram (timed out)"
-            return False
+        # Verificar que en SystemState no existe el OTP en claro, sino su hash SHA-256/HMAC
+        row = db.query(SystemState).filter(SystemState.key == "recovery_otp:brute_user").first()
+        assert row is not None
+        assert '"h":' in str(row.value)
+        assert '"c":' not in str(row.value)
 
-        with patch("src.integrations.telegram_notifier.TelegramNotifier.send_alert", fake_send_alert):
-            res = recover_password(
-                req=PasswordRecoveryRequest(username="tg_timeout_user"),
+        # Simular 4 intentos fallidos -> HTTP 400 y contador incrementa
+        for _ in range(4):
+            with pytest.raises(HTTPException) as exc_info:
+                reset_password(
+                    req=PasswordResetRequest(
+                        username="brute_user",
+                        reset_code="000000",
+                        new_password="NewPassword123!",
+                        method="telegram_otp",
+                    ),
+                    db=db,
+                )
+            assert exc_info.value.status_code == 400
+
+        # 5to intento fallido -> HTTP 429 y bloqueo de 15 minutos
+        with pytest.raises(HTTPException) as lock_exc:
+            reset_password(
+                req=PasswordResetRequest(
+                    username="brute_user",
+                    reset_code="000000",
+                    new_password="NewPassword123!",
+                    method="telegram_otp",
+                ),
                 db=db,
             )
+        assert lock_exc.value.status_code == 429
 
-        assert attempts_made == 1
-        assert res["success"] is False
-        assert res["has_telegram"] is False
-        assert res.get("telegram_unreachable") is True
-        assert "Pregunta Secreta" in res["message"] or "Llave Maestra" in res["message"]
+        # Mientras esté bloqueado, no debe permitir solicitar un nuevo OTP
+        with pytest.raises(HTTPException) as req_lock_exc:
+            recover_password(req=PasswordRecoveryRequest(username="brute_user"), db=db)
+        assert req_lock_exc.value.status_code == 429
     finally:
         db.close()
+
+
+def test_telegram_bot_info_endpoint_and_id_command() -> None:
+    """
+    Verifica que GET /api/auth/telegram-bot-info devuelva el @username y enlace https://t.me/<bot>?start=id
+    sin filtrar el token, y que /id en el bot devuelva el ID numérico para cualquier usuario.
+    """
+    import json
+
+    from src.api.routes.auth import get_telegram_bot_info
+    from src.data.models import SystemState
+    from src.integrations.telegram_notifier import TelegramNotifier
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(bind=engine)
+    db = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+    try:
+        # Simular perfil de bot publicado en SystemState por el bot de Render
+        db.add(
+            SystemState(
+                key="telegram_bot_profile",
+                value=json.dumps({"username": "P2P_Merchant_VE_bot", "first_name": "P2P Merchant Bot"}),
+            )
+        )
+        db.commit()
+
+        settings = Settings(MASTER_ENCRYPTION_KEY=TEST_SECRET, JWT_SECRET_KEY=TEST_SECRET)
+        info = get_telegram_bot_info(db=db, settings=settings)
+
+        assert info["available"] is True
+        assert info["bot_username"] == "P2P_Merchant_VE_bot"
+        assert info["bot_mention"] == "@P2P_Merchant_VE_bot"
+        assert info["bot_url"] == "https://t.me/P2P_Merchant_VE_bot?start=id"
+        assert "123456" not in str(info)
+
+        # Verificar que el comando /id funcione incluso para un Invitado recién registrado
+        notifier = TelegramNotifier(
+            bot_token="123456:fake",
+            default_chat_id="999",
+            session_factory=sessionmaker(autocommit=False, autoflush=False, bind=engine),
+        )
+        auth_svc = AuthService(db_session=db)
+        guest = auth_svc.ensure_default_admin(default_username="guest_id", default_password="Password123!")
+        guest.role = "INVITADO"  # type: ignore[assignment]
+        guest.telegram_id = "771122334"  # type: ignore[assignment]
+        db.commit()
+
+        reply = notifier.handle_command(user_id="771122334", command="/id")
+        assert "771122334" in reply
+    finally:
+        db.close()
+
+
+def test_telegram_notifier_respects_custom_api_base_url_from_settings() -> None:
+    """
+    TelegramNotifier() sin argumentos debe cargar TELEGRAM_API_BASE_URL desde Settings
+    (ej. el Cloudflare Worker proxy https://p2p-telegram-proxy.*.workers.dev) en lugar de
+    pisarlo con el default truthy 'https://api.telegram.org'.
+    """
+    from src.integrations.telegram_notifier import TelegramNotifier
+
+    fake_settings = Settings(
+        MASTER_ENCRYPTION_KEY=TEST_SECRET,
+        JWT_SECRET_KEY=TEST_SECRET,
+        TELEGRAM_BOT_TOKEN="123456:ABCDEF",
+        TELEGRAM_ALERT_CHAT_ID="999999",
+        TELEGRAM_API_BASE_URL="https://p2p-telegram-proxy.m17m5franc.workers.dev/",
+    )
+    with patch("config.settings.Settings", return_value=fake_settings):
+        notifier = TelegramNotifier()
+        assert notifier.api_base_url == "https://p2p-telegram-proxy.m17m5franc.workers.dev"
+        assert notifier.base_url.startswith(
+            "https://p2p-telegram-proxy.m17m5franc.workers.dev/bot"
+        )
 
 

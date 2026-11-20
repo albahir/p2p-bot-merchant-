@@ -70,6 +70,7 @@ def init_db() -> None:
             ("full_name", "VARCHAR(120)"),
             ("tax_id", "VARCHAR(30)"),
             ("email", "VARCHAR(150)"),
+            ("email_verified", "BOOLEAN DEFAULT FALSE"),
             ("google_sheet_id", "VARCHAR(100)"),
             ("google_refresh_token_enc", "TEXT"),
             ("google_auth_type", "VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'"),

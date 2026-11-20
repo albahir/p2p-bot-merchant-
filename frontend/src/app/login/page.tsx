@@ -28,7 +28,8 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
 
   // Recuperación Multi-Método (Telegram OTP / Pregunta Secreta / Llave Maestra)
-  const [recoveryMethod, setRecoveryMethod] = useState<RecoveryMethod>("telegram_otp");
+  const [recoveryMethod, setRecoveryMethod] = useState<RecoveryMethod>("email_otp");
+  const [showOtherMethods, setShowOtherMethods] = useState(false);
   const [recoveryOptions, setRecoveryOptions] = useState<RecoveryOptions | null>(null);
   const [rotatedRecoveryKey, setRotatedRecoveryKey] = useState<string | null>(null);
   const [resetCode, setResetCode] = useState("");
@@ -38,6 +39,58 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  function clearLoginFieldError(field: string) {
+    setFieldErrors((prev) => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function validateLoginField(field: string): string {
+    let msg = "";
+    if (field === "username") {
+      const val = username.trim();
+      if (val.length < 3) {
+        msg = "Ingresa tu alias, correo electrónico o Telegram ID (mínimo 3 caracteres).";
+      } else if (/\s/.test(val)) {
+        msg = "El identificador no debe contener espacios.";
+      }
+    } else if (field === "password") {
+      if (!password || password.length < 6) {
+        msg = "La contraseña debe tener al menos 6 caracteres.";
+      }
+    } else if (field === "resetCode") {
+      const val = resetCode.trim();
+      if (recoveryMethod === "telegram_otp" && !/^\d{6}$/.test(val)) {
+        msg = "El código OTP debe tener exactamente 6 dígitos numéricos.";
+      } else if (recoveryMethod === "security_question" && val.length < 3) {
+        msg = "La respuesta secreta debe tener al menos 3 caracteres.";
+      } else if (recoveryMethod === "recovery_key" && val.length < 8) {
+        msg = "Ingresa la Llave Maestra completa (P2P-XXXX-XXXX-XXXX).";
+      }
+    } else if (field === "newPassword") {
+      if (newPassword.length < 8) {
+        msg = "La nueva contraseña debe tener mínimo 8 caracteres.";
+      }
+    } else if (field === "confirmNewPassword") {
+      if (!confirmNewPassword || confirmNewPassword !== newPassword) {
+        msg = "Las nuevas contraseñas no coinciden.";
+      }
+    }
+
+    setFieldErrors((prev) => {
+      if (!msg && !prev[field]) return prev;
+      const next = { ...prev };
+      if (msg) next[field] = msg;
+      else delete next[field];
+      return next;
+    });
+    return msg;
+  }
   const [hasTelegramMiniApp, setHasTelegramMiniApp] = useState(false);
 
   useEffect(() => {
@@ -135,13 +188,20 @@ export default function LoginPage() {
         return;
       }
 
-      if (opts.has_security_question) {
-        setRecoveryMethod("security_question");
-      } else if (opts.has_recovery_key) {
-        setRecoveryMethod("recovery_key");
+      setShowOtherMethods(false);
+      if (opts.has_email) {
+        setRecoveryMethod("email_otp");
+        const res = await recoverPassword(username.trim(), "email");
+        if (res.success) {
+          setInfoMessage(
+            res.message || "Código OTP de 6 dígitos enviado a tu correo vinculado."
+          );
+        } else {
+          setError(res.message || "No se pudo enviar el código por correo.");
+        }
       } else if (opts.has_telegram) {
         setRecoveryMethod("telegram_otp");
-        const res = await recoverPassword(username.trim());
+        const res = await recoverPassword(username.trim(), "telegram");
         if (res.success && res.has_telegram) {
           setInfoMessage(
             res.message ||
@@ -153,8 +213,12 @@ export default function LoginPage() {
               "No se pudo conectar con Telegram (timeout de red). Usa Pregunta Secreta o Llave Maestra."
           );
         }
+      } else if (opts.has_security_question) {
+        setRecoveryMethod("security_question");
+      } else if (opts.has_recovery_key) {
+        setRecoveryMethod("recovery_key");
       } else {
-        setRecoveryMethod("telegram_otp");
+        setRecoveryMethod("email_otp");
         setInfoMessage(
           "Si el perfil existe y dispone de métodos configurados, elige el método de verificación abajo."
         );
@@ -163,6 +227,26 @@ export default function LoginPage() {
       setMode("recover_reset");
     } catch (err: any) {
       setError(err.message || "No fue posible consultar las opciones de recuperación.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSendEmailOtp() {
+    setError(null);
+    setInfoMessage(null);
+    setLoading(true);
+    try {
+      const res = await recoverPassword(username.trim(), "email");
+      if (res.success) {
+        setInfoMessage(
+          res.message || "Código OTP de 6 dígitos enviado a tu correo vinculado."
+        );
+      } else {
+        setError(res.message || "No se pudo enviar el código OTP por correo.");
+      }
+    } catch (err: any) {
+      setError(err.message || "No se pudo enviar el código OTP por correo.");
     } finally {
       setLoading(false);
     }
@@ -241,16 +325,11 @@ export default function LoginPage() {
       <header className="sticky top-0 z-20 h-16 px-5 lg:px-10 flex items-center justify-between border-b border-[#1e2430] bg-surface/85 backdrop-blur-md">
         <Link href="/" className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-primary-container/15 border border-primary-container/30 flex items-center justify-center text-primary-container">
-            <span className="material-symbols-outlined text-[18px]">bolt</span>
+            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">bolt</span>
           </div>
-          <div>
-            <span className="text-sm font-bold text-white tracking-tight">
-              Sistema Comerciante P2P
-            </span>
-            <span className="hidden sm:inline ml-2 text-[10px] font-mono uppercase tracking-widest text-slate-400">
-              Motor Institucional de Arbitraje
-            </span>
-          </div>
+          <span className="text-sm font-bold text-white tracking-tight">
+            Sistema P2P
+          </span>
         </Link>
 
         <div className="flex items-center gap-3">
@@ -346,27 +425,54 @@ export default function LoginPage() {
             <>
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div>
-                  <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                    Alias de Operador
+                  <label
+                    htmlFor="login-username"
+                    className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
+                  >
+                    Usuario o correo
                   </label>
                   <div className="relative">
                     <span className="material-symbols-outlined text-[18px] text-slate-500 absolute left-3 top-1/2 -translate-y-1/2">
                       person
                     </span>
                     <input
+                      id="login-username"
                       type="text"
+                      required
                       autoComplete="username"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      enterKeyHint="next"
+                      aria-invalid={Boolean(fieldErrors.username)}
+                      aria-describedby={fieldErrors.username ? "login-username-err" : undefined}
                       value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      placeholder="ej. admin o trader_p2p"
-                      className="w-full pl-10 pr-3 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white placeholder:text-slate-600 font-mono"
+                      onChange={(e) => {
+                        setUsername(e.target.value.replace(/\s+/g, ""));
+                        clearLoginFieldError("username");
+                      }}
+                      onBlur={() => validateLoginField("username")}
+                      placeholder="ej. admin, correo@gmail.com o ID"
+                      className={`w-full pl-10 pr-3 py-2.5 rounded-lg bg-surface-container-lowest border focus:outline-hidden text-sm text-white placeholder:text-slate-600 font-mono ${
+                        fieldErrors.username
+                          ? "border-error focus:border-error"
+                          : "border-[#1e2430] focus:border-primary-container"
+                      }`}
                     />
                   </div>
+                  {fieldErrors.username && (
+                    <p id="login-username-err" className="text-[10px] text-error mt-1">
+                      {fieldErrors.username}
+                    </p>
+                  )}
                 </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
+                    <label
+                      htmlFor="login-password"
+                      className="text-[11px] font-mono uppercase tracking-wider text-slate-400"
+                    >
                       Contraseña
                     </label>
                     <button
@@ -374,6 +480,7 @@ export default function LoginPage() {
                       onClick={() => {
                         setError(null);
                         setInfoMessage(null);
+                        setFieldErrors({});
                         setMode("recover_request");
                       }}
                       className="text-[11px] text-primary hover:underline"
@@ -386,16 +493,31 @@ export default function LoginPage() {
                       key
                     </span>
                     <input
+                      id="login-password"
                       type={showPassword ? "text" : "password"}
+                      required
+                      minLength={6}
                       autoComplete="current-password"
+                      enterKeyHint="done"
+                      aria-invalid={Boolean(fieldErrors.password)}
+                      aria-describedby={fieldErrors.password ? "login-password-err" : undefined}
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        clearLoginFieldError("password");
+                      }}
+                      onBlur={() => validateLoginField("password")}
                       placeholder="••••••••••••"
-                      className="w-full pl-10 pr-10 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white placeholder:text-slate-600 font-mono"
+                      className={`w-full pl-10 pr-10 py-2.5 rounded-lg bg-surface-container-lowest border focus:outline-hidden text-sm text-white placeholder:text-slate-600 font-mono ${
+                        fieldErrors.password
+                          ? "border-error focus:border-error"
+                          : "border-[#1e2430] focus:border-primary-container"
+                      }`}
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
+                      aria-pressed={showPassword}
                       className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
                       aria-label="Mostrar u ocultar contraseña"
                     >
@@ -404,6 +526,11 @@ export default function LoginPage() {
                       </span>
                     </button>
                   </div>
+                  {fieldErrors.password && (
+                    <p id="login-password-err" className="text-[10px] text-error mt-1">
+                      {fieldErrors.password}
+                    </p>
+                  )}
                 </div>
 
                 <button
@@ -411,8 +538,8 @@ export default function LoginPage() {
                   disabled={loading}
                   className="w-full py-2.5 px-4 rounded-lg bg-primary-container text-on-primary font-bold text-sm hover:brightness-110 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary-container/10"
                 >
-                  <span className="material-symbols-outlined text-[18px]">login</span>
-                  <span>{loading ? "Verificando..." : "Ingresar a la Terminal"}</span>
+                  <span className="material-symbols-outlined text-[18px]" aria-hidden="true">login</span>
+                  <span>{loading ? "Verificando..." : "Iniciar sesión"}</span>
                 </button>
               </form>
 
@@ -426,7 +553,7 @@ export default function LoginPage() {
                     className="w-full py-2.5 px-4 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary font-semibold text-xs hover:bg-secondary/25 transition-all flex items-center justify-center gap-2"
                   >
                     <span className="material-symbols-outlined text-[18px]">send</span>
-                    <span>Acceso Instantáneo vía Mini App de Telegram</span>
+                    <span>Acceso vía Telegram</span>
                   </button>
                 </div>
               )}
@@ -434,13 +561,13 @@ export default function LoginPage() {
               <div ref={telegramWidgetRef} className="mt-4 flex justify-center empty:hidden" />
 
               <div className="mt-6 pt-5 border-t border-[#1e2430] flex items-center justify-between text-xs">
-                <span className="text-slate-400">¿Nuevo operador en la mesa?</span>
+                <span className="text-slate-400">¿No tienes cuenta?</span>
                 <Link
                   href="/register"
                   className="font-semibold text-primary hover:underline flex items-center gap-1"
                 >
-                  <span>Crear Cuenta</span>
-                  <span className="material-symbols-outlined text-[15px]">arrow_forward</span>
+                  <span>Crear cuenta</span>
+                  <span className="material-symbols-outlined text-[15px]" aria-hidden="true">arrow_forward</span>
                 </Link>
               </div>
             </>
@@ -484,54 +611,41 @@ export default function LoginPage() {
 
           {mode === "recover_reset" && (
             <form onSubmit={handleResetPassword} className="space-y-4">
-              {/* Selector de método de verificación */}
-              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-lg bg-surface-container border border-[#1e2430] text-[10px] font-mono">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRecoveryMethod("security_question");
-                    setResetCode("");
-                    setError(null);
-                  }}
-                  className={`py-1.5 px-2 rounded transition-colors ${
-                    recoveryMethod === "security_question"
-                      ? "bg-primary-container text-on-primary font-bold"
-                      : "text-slate-300 hover:text-white"
-                  }`}
-                >
-                  Pregunta Secreta
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRecoveryMethod("recovery_key");
-                    setResetCode("");
-                    setError(null);
-                  }}
-                  className={`py-1.5 px-2 rounded transition-colors ${
-                    recoveryMethod === "recovery_key"
-                      ? "bg-primary-container text-on-primary font-bold"
-                      : "text-slate-300 hover:text-white"
-                  }`}
-                >
-                  Llave Maestra
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRecoveryMethod("telegram_otp");
-                    setResetCode("");
-                    setError(null);
-                  }}
-                  className={`py-1.5 px-2 rounded transition-colors ${
-                    recoveryMethod === "telegram_otp"
-                      ? "bg-primary-container text-on-primary font-bold"
-                      : "text-slate-300 hover:text-white"
-                  }`}
-                >
-                  OTP Telegram
-                </button>
-              </div>
+              {recoveryMethod === "email_otp" && (
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <label
+                      htmlFor="login-email-otp"
+                      className="text-[11px] font-mono uppercase tracking-wider text-slate-400"
+                    >
+                      Código OTP por Correo (6 dígitos)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleSendEmailOtp}
+                      disabled={loading}
+                      className="text-[11px] font-mono text-primary hover:underline disabled:opacity-50"
+                    >
+                      Enviar / Reenviar
+                    </button>
+                  </div>
+                  <input
+                    id="login-email-otp"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    required
+                    value={resetCode}
+                    onChange={(e) => {
+                      setResetCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      clearLoginFieldError("resetCode");
+                    }}
+                    placeholder="000000"
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm font-mono tracking-[0.25em] text-white"
+                  />
+                </div>
+              )}
 
               {recoveryMethod === "security_question" && (
                 <div className="space-y-2">
@@ -595,40 +709,132 @@ export default function LoginPage() {
                     type="text"
                     inputMode="numeric"
                     autoComplete="one-time-code"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
                     enterKeyHint="next"
                     maxLength={6}
+                    aria-invalid={Boolean(fieldErrors.resetCode)}
                     value={resetCode}
-                    onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ""))}
+                    onChange={(e) => {
+                      setResetCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      clearLoginFieldError("resetCode");
+                    }}
+                    onBlur={() => validateLoginField("resetCode")}
                     placeholder="000000"
-                    className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-center tracking-[0.35em] text-base text-primary font-mono font-bold"
+                    className={`w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border focus:outline-hidden text-center tracking-[0.35em] text-base text-primary font-mono font-bold ${
+                      fieldErrors.resetCode
+                        ? "border-error focus:border-error"
+                        : "border-[#1e2430] focus:border-primary-container"
+                    }`}
                   />
+                  {fieldErrors.resetCode && (
+                    <p className="text-[10px] text-error mt-1">{fieldErrors.resetCode}</p>
+                  )}
                 </div>
               )}
 
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                  Nueva Contraseña
-                </label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="Mínimo 8 caracteres"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
-                />
+                <button
+                  type="button"
+                  onClick={() => setShowOtherMethods((prev) => !prev)}
+                  className="text-xs font-mono text-primary hover:underline cursor-pointer"
+                >
+                  {showOtherMethods ? "Ocultar otros métodos" : "Probar otra manera"}
+                </button>
+                {showOtherMethods && (
+                  <div className="mt-2 grid grid-cols-2 gap-1.5 p-1.5 rounded-lg bg-surface-container border border-[#1e2430] text-[10px] font-mono">
+                    {(
+                      [
+                        ["email_otp", "OTP Correo"],
+                        ["telegram_otp", "OTP Telegram"],
+                        ["security_question", "Pregunta Secreta"],
+                        ["recovery_key", "Llave Maestra"],
+                      ] as Array<[RecoveryMethod, string]>
+                    )
+                      .filter(([id]) => id !== recoveryMethod)
+                      .map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => {
+                            setRecoveryMethod(id);
+                            setResetCode("");
+                            setError(null);
+                            setInfoMessage(null);
+                            setShowOtherMethods(false);
+                          }}
+                          className="py-1.5 px-2 rounded text-slate-300 hover:text-white hover:bg-surface-container-low transition-colors text-left"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                  </div>
+                )}
               </div>
 
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                <label
+                  htmlFor="login-new-password"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
+                >
+                  Nueva Contraseña
+                </label>
+                <input
+                  id="login-new-password"
+                  type="password"
+                  minLength={8}
+                  autoComplete="new-password"
+                  enterKeyHint="next"
+                  aria-invalid={Boolean(fieldErrors.newPassword)}
+                  value={newPassword}
+                  onChange={(e) => {
+                    setNewPassword(e.target.value);
+                    clearLoginFieldError("newPassword");
+                  }}
+                  onBlur={() => validateLoginField("newPassword")}
+                  placeholder="Mínimo 8 caracteres"
+                  className={`w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border focus:outline-hidden text-sm text-white font-mono ${
+                    fieldErrors.newPassword
+                      ? "border-error focus:border-error"
+                      : "border-[#1e2430] focus:border-primary-container"
+                  }`}
+                />
+                {fieldErrors.newPassword && (
+                  <p className="text-[10px] text-error mt-1">{fieldErrors.newPassword}</p>
+                )}
+              </div>
+
+              <div>
+                <label
+                  htmlFor="login-confirm-new-password"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
+                >
                   Confirmar Nueva Contraseña
                 </label>
                 <input
+                  id="login-confirm-new-password"
                   type="password"
+                  minLength={8}
+                  autoComplete="new-password"
+                  enterKeyHint="done"
+                  aria-invalid={Boolean(fieldErrors.confirmNewPassword)}
                   value={confirmNewPassword}
-                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  onChange={(e) => {
+                    setConfirmNewPassword(e.target.value);
+                    clearLoginFieldError("confirmNewPassword");
+                  }}
+                  onBlur={() => validateLoginField("confirmNewPassword")}
                   placeholder="Repite la nueva contraseña"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono"
+                  className={`w-full px-3.5 py-2.5 rounded-lg bg-surface-container-lowest border focus:outline-hidden text-sm text-white font-mono ${
+                    fieldErrors.confirmNewPassword
+                      ? "border-error focus:border-error"
+                      : "border-[#1e2430] focus:border-primary-container"
+                  }`}
                 />
+                {fieldErrors.confirmNewPassword && (
+                  <p className="text-[10px] text-error mt-1">{fieldErrors.confirmNewPassword}</p>
+                )}
               </div>
 
               <button
@@ -650,18 +856,6 @@ export default function LoginPage() {
           )}
         </div>
       </main>
-
-      {/* Pie Criptográfico */}
-      <footer className="relative z-10 py-4 px-6 border-t border-[#1e2430] bg-surface/60 flex flex-wrap items-center justify-center gap-4 text-[11px] font-mono text-slate-500">
-        <span className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-tertiary" />
-          Bóveda AES-256-GCM
-        </span>
-        <span>•</span>
-        <span>PBKDF2-HMAC-SHA256 (600.000 iteraciones)</span>
-        <span>•</span>
-        <span>API Oficial Binance P2P</span>
-      </footer>
     </div>
   );
 }
