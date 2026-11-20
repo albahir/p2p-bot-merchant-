@@ -16,10 +16,15 @@ export interface User {
   id: number;
   username: string;
   full_name?: string | null;
+  tax_id?: string | null;
   email?: string | null;
   role: "ADMIN" | "TRADER" | "INVITADO";
   telegram_id?: string | null;
   google_sheet_id?: string | null;
+  email_verified?: boolean;
+  google_auth_type?: "OAUTH2" | "SERVICE_ACCOUNT" | string | null;
+  google_oauth_connected?: boolean;
+  google_account_email?: string | null;
   permission_source?: string;
   telegram_linked?: boolean;
   has_security_question?: boolean;
@@ -27,8 +32,82 @@ export interface User {
   binance_api_configured?: boolean;
   binance_key_type?: "HMAC" | "Ed25519" | string | null;
   google_sheet_configured?: boolean;
+  preferred_banks?: string[];
+  bank_initial_balances?: Record<string, number>;
   is_active: boolean;
   created_at: string;
+}
+
+export const VENEZUELAN_BANK_CATALOG = [
+  "Banco de Venezuela",
+  "Mercantil",
+  "Banesco",
+  "Pago Móvil",
+  "BBVA Provincial",
+  "BNC",
+  "Bancamiga",
+  "Bancaribe",
+  "Banplus",
+  "Banco del Tesoro",
+] as const;
+
+export function canonicalBankName(rawName: string): string {
+  const cleaned = (rawName || "").trim();
+  if (!cleaned) return "";
+  const low = cleaned.toLowerCase();
+  if (
+    low === "venezuela" ||
+    low === "bdv" ||
+    low.includes("banco de venezuela") ||
+    low === "specificbank"
+  ) {
+    return "Banco de Venezuela";
+  }
+  if (low.includes("banesco")) return "Banesco";
+  if (low.includes("mercantil")) return "Mercantil";
+  if (low.includes("pago móvil") || low.includes("pago movil") || low === "pagomovil") {
+    return "Pago Móvil";
+  }
+  if (low.includes("provincial") || low.includes("bbva")) return "BBVA Provincial";
+  if (low === "bnc" || low.includes("banco nacional de crédito") || low.includes("bnc ")) {
+    return "BNC";
+  }
+  if (low.includes("bancamiga")) return "Bancamiga";
+  if (low.includes("bancaribe")) return "Bancaribe";
+  if (low.includes("banplus")) return "Banplus";
+  if (low.includes("tesoro")) return "Banco del Tesoro";
+  if (low.includes("fondo común") || low === "bfc") return "BFC";
+  return cleaned;
+}
+
+export function bankMatchesProfile(candidateBank: string, userBanks: string[]): boolean {
+  if (!candidateBank || !userBanks || userBanks.length === 0) return false;
+  const candCanon = canonicalBankName(candidateBank).toLowerCase();
+  for (const ub of userBanks) {
+    const userCanon = canonicalBankName(ub).toLowerCase();
+    if (!userCanon) continue;
+    if (candCanon === userCanon || candCanon.includes(userCanon) || userCanon.includes(candCanon)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function resolveUserBankBalance(
+  candidateBank: string,
+  balances?: Record<string, number> | null
+): number {
+  if (!candidateBank || !balances) return 0;
+  const candCanon = canonicalBankName(candidateBank);
+  if (typeof balances[candCanon] === "number") {
+    return balances[candCanon];
+  }
+  for (const [k, val] of Object.entries(balances)) {
+    if (bankMatchesProfile(candidateBank, [k])) {
+      return Number(val) || 0;
+    }
+  }
+  return 0;
 }
 
 export interface AuthResponse {
@@ -168,20 +247,95 @@ function formatApiErrorDetail(rawDetail: unknown, fallback: string): string {
   return String(rawDetail);
 }
 
+export interface ApiRequestOptions extends RequestInit {
+  /** Ignorar caché en memoria y forzar petición real a red. */
+  fresh?: boolean;
+  /** Tiempo de vida en caché en memoria para GET (ms). 0 desactiva caché. */
+  cacheTtlMs?: number;
+  /** Prioridad Fetch API nativa ('high' | 'low' | 'auto'). */
+  priority?: "high" | "low" | "auto";
+}
+
+const DEFAULT_GET_CACHE_TTL_MS = 15_000;
+const _inFlightGets = new Map<string, Promise<unknown>>();
+const _responseCache = new Map<string, { data: unknown; expiresAt: number }>();
+
+export function clearApiCache(endpointPrefix?: string): void {
+  if (!endpointPrefix) {
+    _responseCache.clear();
+    return;
+  }
+  for (const key of _responseCache.keys()) {
+    if (key.includes(endpointPrefix)) {
+      _responseCache.delete(key);
+    }
+  }
+}
+
+function resolveCacheKey(endpoint: string): string {
+  const isPublicEndpoint =
+    endpoint.startsWith("/api/spreads/") ||
+    endpoint.startsWith("/api/market/") ||
+    endpoint.startsWith("/api/auth/login") ||
+    endpoint.startsWith("/api/auth/register") ||
+    endpoint.startsWith("/api/auth/email/") ||
+    endpoint.startsWith("/api/auth/telegram-bot-info") ||
+    endpoint.startsWith("/api/auth/recover-") ||
+    endpoint.startsWith("/api/auth/reset-password");
+  const token = getToken();
+  const tokenScope = isPublicEndpoint ? "public" : token ? token.slice(-12) : "anon";
+  return `GET:${tokenScope}:${endpoint}`;
+}
+
+/** Lectura síncrona de caché en memoria para hidratar vistas en 0 ms al cambiar de pestaña. */
+export function getCachedApiResponse<T>(endpoint: string): T | null {
+  const key = resolveCacheKey(endpoint);
+  const cached = _responseCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.data as T;
+  }
+  return null;
+}
+
+/** Planifica tareas no bloqueantes con Prioritized Task Scheduling API (`scheduler.postTask`) y fallback a `setTimeout`. */
+function scheduleBackgroundTask(task: () => void): void {
+  if (typeof window === "undefined") return;
+  const win = window as unknown as {
+    scheduler?: {
+      postTask?: (cb: () => void, opts?: { priority?: string }) => Promise<unknown>;
+    };
+  };
+  if (win.scheduler && typeof win.scheduler.postTask === "function") {
+    void win.scheduler.postTask(task, { priority: "background" }).catch(() => {});
+  } else {
+    setTimeout(task, 0);
+  }
+}
+
 export async function apiRequest<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
+  const { fresh = false, cacheTtlMs, priority, ...fetchInit } = options;
+  const method = (fetchInit.method || "GET").toUpperCase();
   const token = getToken();
-  const headers = new Headers(options.headers || {});
+  const headers = new Headers(fetchInit.headers || {});
 
-  if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
+  if (
+    method !== "GET" &&
+    method !== "HEAD" &&
+    !headers.has("Content-Type") &&
+    !(fetchInit.body instanceof FormData)
+  ) {
     headers.set("Content-Type", "application/json");
   }
   const isPublicEndpoint =
     endpoint.startsWith("/api/spreads/") ||
+    endpoint.startsWith("/api/market/") ||
     endpoint.startsWith("/api/auth/login") ||
     endpoint.startsWith("/api/auth/register") ||
+    endpoint.startsWith("/api/auth/email/") ||
+    endpoint.startsWith("/api/auth/telegram-bot-info") ||
     endpoint.startsWith("/api/auth/recover-") ||
     endpoint.startsWith("/api/auth/reset-password");
 
@@ -189,31 +343,81 @@ export async function apiRequest<T>(
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${getApiBaseUrl()}${endpoint}`, {
-    ...options,
-    headers,
-  });
-
-  if (!response.ok) {
-    if (
-      response.status === 401 &&
-      typeof window !== "undefined" &&
-      !endpoint.startsWith("/api/auth/")
-    ) {
-      localStorage.removeItem("p2p_token");
-      localStorage.removeItem("p2p_user");
-    }
-    let errorDetail = "Error en la petición";
-    try {
-      const errJson = await response.json();
-      errorDetail = formatApiErrorDetail(errJson.detail, errorDetail);
-    } catch {
-      // Ignorar fallo de parseo JSON
-    }
-    throw new Error(errorDetail);
+  // Las mutaciones invalidan la caché en memoria para reflejar los datos nuevos al instante
+  if (method !== "GET") {
+    _responseCache.clear();
   }
 
-  return response.json();
+  const effectiveTtl =
+    method === "GET" ? (cacheTtlMs !== undefined ? cacheTtlMs : DEFAULT_GET_CACHE_TTL_MS) : 0;
+  const tokenScope = isPublicEndpoint ? "public" : token ? token.slice(-12) : "anon";
+  const cacheKey = `${method}:${tokenScope}:${endpoint}`;
+
+  if (method === "GET" && !fresh && effectiveTtl > 0) {
+    const cached = _responseCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.data as T;
+    }
+  }
+
+  if (method === "GET" && !fresh) {
+    const inFlight = _inFlightGets.get(cacheKey);
+    if (inFlight) {
+      return inFlight as Promise<T>;
+    }
+  }
+
+  const requestInit: RequestInit & { priority?: "high" | "low" | "auto" } = {
+    ...fetchInit,
+    method,
+    headers,
+  };
+  if (priority) {
+    requestInit.priority = priority;
+  }
+
+  const executeFetch = async (): Promise<T> => {
+    const response = await fetch(`${getApiBaseUrl()}${endpoint}`, requestInit);
+
+    if (!response.ok) {
+      if (
+        response.status === 401 &&
+        typeof window !== "undefined" &&
+        !endpoint.startsWith("/api/auth/")
+      ) {
+        localStorage.removeItem("p2p_token");
+        localStorage.removeItem("p2p_user");
+        _responseCache.clear();
+      }
+      let errorDetail = "Error en la petición";
+      try {
+        const errJson = await response.json();
+        errorDetail = formatApiErrorDetail(errJson.detail, errorDetail);
+      } catch {
+        // Ignorar fallo de parseo JSON
+      }
+      throw new Error(errorDetail);
+    }
+
+    const payload = (await response.json()) as T;
+    if (method === "GET" && effectiveTtl > 0) {
+      _responseCache.set(cacheKey, {
+        data: payload,
+        expiresAt: Date.now() + effectiveTtl,
+      });
+    }
+    return payload;
+  };
+
+  if (method === "GET" && !fresh) {
+    const promise = executeFetch().finally(() => {
+      _inFlightGets.delete(cacheKey);
+    });
+    _inFlightGets.set(cacheKey, promise);
+    return promise;
+  }
+
+  return executeFetch();
 }
 
 export async function downloadAuthenticatedFile(
@@ -271,6 +475,7 @@ export async function login(username: string, password: string): Promise<AuthRes
   if (typeof window !== "undefined") {
     localStorage.setItem("p2p_token", res.access_token);
     localStorage.setItem("p2p_user", JSON.stringify(res.user));
+    warmAuthenticatedSession();
   }
   return res;
 }
@@ -283,6 +488,7 @@ export async function loginTelegram(data: Record<string, any>): Promise<AuthResp
   if (typeof window !== "undefined") {
     localStorage.setItem("p2p_token", res.access_token);
     localStorage.setItem("p2p_user", JSON.stringify(res.user));
+    warmAuthenticatedSession();
   }
   return res;
 }
@@ -295,6 +501,7 @@ export async function loginTelegramWebApp(initData: string): Promise<AuthRespons
   if (typeof window !== "undefined") {
     localStorage.setItem("p2p_token", res.access_token);
     localStorage.setItem("p2p_user", JSON.stringify(res.user));
+    warmAuthenticatedSession();
   }
   return res;
 }
@@ -313,9 +520,84 @@ export function getCurrentUser(): User | null {
 
 export function logout(): void {
   if (typeof window !== "undefined") {
+    clearApiCache();
     localStorage.removeItem("p2p_token");
     localStorage.removeItem("p2p_user");
+    localStorage.removeItem("p2p_sheets_config");
     window.location.href = "/login";
+  }
+}
+
+/**
+ * Precarga segura y despriorizada (`priority: 'low'` + `scheduler.postTask` background)
+ * de todas las conexiones e indicadores existentes tras iniciar sesión, sin exponer secretos.
+ */
+export function warmAuthenticatedSession(): void {
+  if (typeof window === "undefined") return;
+  const user = getCurrentUser();
+  const hasTrader = Boolean(user && (user.role === "ADMIN" || user.role === "TRADER"));
+
+  scheduleBackgroundTask(() => {
+    void getBCVRates(false).catch(() => {});
+    void apiRequest("/api/spreads/matrix?amount_usdt=100&merchant_only=false", {
+      priority: "low",
+      cacheTtlMs: 30_000,
+    }).catch(() => {});
+
+    if (!hasTrader) return;
+
+    void getSheetsSettings(false).catch(() => {});
+    void apiRequest("/api/settings/binance", { priority: "low", cacheTtlMs: 45_000 }).catch(() => {});
+    void apiRequest("/api/settings/telegram", { priority: "low", cacheTtlMs: 45_000 }).catch(() => {});
+    void apiRequest("/api/orders?page=1&page_size=20", { priority: "low", cacheTtlMs: 30_000 }).catch(() => {});
+    void apiRequest("/api/fiscal/summary?cost_method=FIFO", { priority: "low", cacheTtlMs: 30_000 }).catch(() => {});
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    void apiRequest(
+      `/api/accounting/balances/live?year=${year}&month=${month}&initial_usdt=0&initial_ves=0`,
+      { priority: "low", cacheTtlMs: 30_000 }
+    ).catch(() => {});
+    void apiRequest("/api/accounting/journal?", { priority: "low", cacheTtlMs: 30_000 }).catch(() => {});
+  });
+}
+
+/** Pre-calienta los GET iniciales de una ruta con prioridad baja al hacer hover en la barra. */
+export function prefetchRouteData(href: string): void {
+  if (typeof window === "undefined") return;
+  const user = getCurrentUser();
+  const hasTrader = Boolean(user && (user.role === "ADMIN" || user.role === "TRADER"));
+
+  if (href === "/" || href === "/calculator") {
+    void apiRequest("/api/spreads/matrix?amount_usdt=100&merchant_only=false", { priority: "low" }).catch(() => {});
+    return;
+  }
+  if (href === "/market") {
+    void apiRequest("/api/market/candles?side=sell&timeframe=5m&bank=*&ticket_ves=1000000&limit=240", {
+      priority: "low",
+    }).catch(() => {});
+    void apiRequest("/api/market/analytics?bank=*&ticket_ves=1000000", {
+      priority: "low",
+    }).catch(() => {});
+    return;
+  }
+  if (!hasTrader) return;
+  if (href === "/orders") {
+    void apiRequest("/api/orders?page=1&page_size=20", { priority: "low" }).catch(() => {});
+    void apiRequest("/api/fiscal/summary?cost_method=FIFO", { priority: "low" }).catch(() => {});
+  } else if (href === "/sheets") {
+    void getSheetsSettings(false).catch(() => {});
+  } else if (href === "/settings") {
+    void apiRequest("/api/settings/binance", { priority: "low" }).catch(() => {});
+    void apiRequest("/api/settings/telegram", { priority: "low" }).catch(() => {});
+  } else if (href === "/accounting") {
+    const now = new Date();
+    void apiRequest(
+      `/api/accounting/balances/live?year=${now.getFullYear()}&month=${now.getMonth() + 1}&initial_usdt=0&initial_ves=0`,
+      { priority: "low" }
+    ).catch(() => {});
+    void apiRequest("/api/accounting/journal?", { priority: "low" }).catch(() => {});
   }
 }
 
@@ -446,14 +728,18 @@ export interface RegisterData {
   username: string;
   password: string;
   full_name?: string;
+  tax_id?: string;
   email?: string;
+  email_verification_token?: string;
   telegram_id?: string;
   google_sheet_id?: string;
+  preferred_banks?: string[];
   security_question?: string;
   security_answer?: string;
 }
 
 export interface RecoveryOptions {
+  has_email?: boolean;
   has_telegram: boolean;
   has_security_question: boolean;
   security_question?: string | null;
@@ -461,14 +747,61 @@ export interface RecoveryOptions {
   is_locked: boolean;
 }
 
-export type RecoveryMethod = "telegram_otp" | "security_question" | "recovery_key";
+export type RecoveryMethod =
+  | "email_otp"
+  | "telegram_otp"
+  | "security_question"
+  | "recovery_key";
 
 export interface RecoveryProfileUpdateData {
   full_name?: string;
+  tax_id?: string;
   email?: string;
   security_question?: string;
   security_answer?: string;
   regenerate_recovery_key?: boolean;
+}
+
+export interface TelegramBotInfo {
+  available: boolean;
+  bot_username: string | null;
+  bot_mention: string | null;
+  bot_name: string;
+  bot_url: string | null;
+  command: string;
+}
+
+export async function getTelegramBotInfo(): Promise<TelegramBotInfo> {
+  return apiRequest<TelegramBotInfo>("/api/auth/telegram-bot-info", {
+    cacheTtlMs: 300_000,
+  });
+}
+
+export async function sendEmailVerificationCode(email: string): Promise<{
+  sent: boolean;
+  smtp_configured: boolean;
+  cooldown_seconds?: number;
+  message: string;
+}> {
+  return apiRequest("/api/auth/email/send-code", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function verifyEmailCode(
+  email: string,
+  code: string
+): Promise<{
+  verified: boolean;
+  email: string;
+  verification_token: string;
+  message: string;
+}> {
+  return apiRequest("/api/auth/email/verify-code", {
+    method: "POST",
+    body: JSON.stringify({ email, code }),
+  });
 }
 
 export async function registerUser(data: RegisterData): Promise<AuthResponse> {
@@ -490,15 +823,19 @@ export async function getRecoveryOptions(usernameOrEmail: string): Promise<Recov
   });
 }
 
-export async function recoverPassword(username: string): Promise<{
+export async function recoverPassword(
+  username: string,
+  channel: "telegram" | "email" = "telegram"
+): Promise<{
   success: boolean;
   message: string;
-  has_telegram: boolean;
+  has_telegram?: boolean;
+  has_email?: boolean;
   debug_code?: string;
 }> {
   return apiRequest("/api/auth/recover-password", {
     method: "POST",
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ username, channel }),
   });
 }
 
@@ -672,21 +1009,81 @@ export interface TelegramStatusResponse {
   message: string;
 }
 
-export async function getSheetsSettings(): Promise<GoogleSheetsConfigResponse> {
-  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets");
+const SHEETS_CONFIG_STORAGE_KEY = "p2p_sheets_config";
+
+function persistSheetsConfigCache(cfg: GoogleSheetsConfigResponse): GoogleSheetsConfigResponse {
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(SHEETS_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
+      const current = getCurrentUser();
+      if (current) {
+        const updatedUser: User = {
+          ...current,
+          google_sheet_id: cfg.google_sheet_id ?? null,
+          google_auth_type: cfg.google_auth_type,
+          google_oauth_connected: Boolean(cfg.oauth_connected),
+          google_account_email: cfg.google_account_email ?? null,
+          google_sheet_configured: Boolean(cfg.google_sheet_id || cfg.oauth_connected),
+        };
+        localStorage.setItem("p2p_user", JSON.stringify(updatedUser));
+      }
+    } catch {
+      // Ignorar fallo de cuota en localStorage
+    }
+  }
+  return cfg;
+}
+
+export function getCachedSheetsSettings(): GoogleSheetsConfigResponse | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(SHEETS_CONFIG_STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw) as GoogleSheetsConfigResponse;
+    }
+  } catch {
+    // Fallback a datos derivados del usuario en sesión
+  }
+
+  const user = getCurrentUser();
+  if (!user) return null;
+  const hasSheet = Boolean(user.google_sheet_id);
+  const oauthConnected = Boolean(user.google_oauth_connected);
+  if (!hasSheet && !oauthConnected) return null;
+
+  return {
+    google_sheet_id: user.google_sheet_id ?? null,
+    google_sheet_url: user.google_sheet_id
+      ? `https://docs.google.com/spreadsheets/d/${user.google_sheet_id}`
+      : null,
+    google_auth_type: user.google_auth_type || (oauthConnected ? "OAUTH2" : "SERVICE_ACCOUNT"),
+    oauth_connected: oauthConnected,
+    google_account_email: user.google_account_email ?? null,
+    is_connected: hasSheet || oauthConnected,
+    message: "Google Sheets listo para sincronizar.",
+  };
+}
+
+export async function getSheetsSettings(fresh = false): Promise<GoogleSheetsConfigResponse> {
+  const res = await apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets", {
+    fresh,
+    cacheTtlMs: 45_000,
+  });
+  return persistSheetsConfigCache(res);
 }
 
 export async function saveSheetsSettings(data: {
   google_sheet_id: string | null;
   google_auth_type?: "SERVICE_ACCOUNT" | "OAUTH2";
 }): Promise<GoogleSheetsConfigResponse> {
-  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets", {
+  const res = await apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets", {
     method: "POST",
     body: JSON.stringify({
       google_sheet_id: data.google_sheet_id,
       google_auth_type: data.google_auth_type || "SERVICE_ACCOUNT",
     }),
   });
+  return persistSheetsConfigCache(res);
 }
 
 export async function startGoogleOAuth(redirectUri?: string): Promise<{ authorization_url: string }> {
@@ -699,10 +1096,11 @@ export async function completeGoogleOAuth(data: {
   state: string;
   redirect_uri?: string;
 }): Promise<GoogleSheetsConfigResponse> {
-  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/callback", {
+  const res = await apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/callback", {
     method: "POST",
     body: JSON.stringify(data),
   });
+  return persistSheetsConfigCache(res);
 }
 
 export async function saveGoogleOAuthClientConfig(data: {
@@ -710,16 +1108,18 @@ export async function saveGoogleOAuthClientConfig(data: {
   client_secret: string;
   redirect_uri?: string;
 }): Promise<GoogleSheetsConfigResponse> {
-  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/credentials", {
+  const res = await apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/credentials", {
     method: "POST",
     body: JSON.stringify(data),
   });
+  return persistSheetsConfigCache(res);
 }
 
 export async function disconnectGoogleOAuth(): Promise<GoogleSheetsConfigResponse> {
-  return apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/disconnect", {
+  const res = await apiRequest<GoogleSheetsConfigResponse>("/api/settings/sheets/oauth/disconnect", {
     method: "POST",
   });
+  return persistSheetsConfigCache(res);
 }
 
 export async function syncSheetsNow(): Promise<GoogleSheetsSyncResponse> {
@@ -736,6 +1136,123 @@ export async function sendTelegramTestAlert(): Promise<{ success: boolean; messa
   return apiRequest<{ success: boolean; message: string }>("/api/settings/telegram/test", {
     method: "POST",
   });
+}
+
+// Perfil Bancario del Operador (Bancos con los que trabaja y Saldos Iniciales por Banco)
+export interface UserBanksConfigResponse {
+  preferred_banks: string[];
+  bank_initial_balances: Record<string, number>;
+  total_initial_ves: number;
+  message: string;
+}
+
+const USER_BANKS_STORAGE_KEY = "p2p_user_banks_config";
+
+function persistUserBanksCache(cfg: UserBanksConfigResponse): UserBanksConfigResponse {
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(USER_BANKS_STORAGE_KEY, JSON.stringify(cfg));
+      const current = getCurrentUser();
+      if (current) {
+        const updatedUser: User = {
+          ...current,
+          preferred_banks: cfg.preferred_banks,
+          bank_initial_balances: cfg.bank_initial_balances,
+        };
+        localStorage.setItem("p2p_user", JSON.stringify(updatedUser));
+      }
+    } catch {
+      // Ignorar fallo de cuota en localStorage
+    }
+  }
+  return cfg;
+}
+
+export function getCachedUserBanks(): UserBanksConfigResponse {
+  if (typeof window !== "undefined") {
+    const user = getCurrentUser();
+    if (
+      user &&
+      ((user.preferred_banks && user.preferred_banks.length > 0) ||
+        (user.bank_initial_balances && Object.keys(user.bank_initial_balances).length > 0))
+    ) {
+      const prefs = (user.preferred_banks || []).map(canonicalBankName).filter(Boolean);
+      const bals: Record<string, number> = {};
+      for (const [k, v] of Object.entries(user.bank_initial_balances || {})) {
+        const c = canonicalBankName(k);
+        if (c) bals[c] = Number(v) || 0;
+      }
+      for (const b of prefs) {
+        if (!(b in bals)) bals[b] = 0;
+      }
+      const total = Object.values(bals).reduce((acc, n) => acc + (Number(n) || 0), 0);
+      return {
+        preferred_banks: prefs,
+        bank_initial_balances: bals,
+        total_initial_ves: total,
+        message: "Perfil bancario hidratado de sesión.",
+      };
+    }
+
+    try {
+      const raw = localStorage.getItem(USER_BANKS_STORAGE_KEY);
+      if (raw) {
+        return JSON.parse(raw) as UserBanksConfigResponse;
+      }
+    } catch {
+      // Ignorar errores de parseo
+    }
+  }
+  return {
+    preferred_banks: [],
+    bank_initial_balances: {},
+    total_initial_ves: 0,
+    message: "",
+  };
+}
+
+export async function getUserBanksSettings(): Promise<UserBanksConfigResponse> {
+  const res = await apiRequest<UserBanksConfigResponse>("/api/settings/banks");
+  return persistUserBanksCache(res);
+}
+
+export async function saveUserBanksSettings(data: {
+  preferred_banks: string[];
+  bank_initial_balances: Record<string, number>;
+}): Promise<UserBanksConfigResponse> {
+  const cleanPrefs = Array.from(
+    new Set((data.preferred_banks || []).map(canonicalBankName).filter(Boolean))
+  );
+  const cleanBals: Record<string, number> = {};
+  for (const b of cleanPrefs) {
+    cleanBals[b] = Math.max(0, Number(data.bank_initial_balances?.[b] ?? 0));
+  }
+  // Persistir localmente de inmediato (0 ms) incluso para usuarios sin sesión o mientras responde el servidor
+  const optimistic: UserBanksConfigResponse = {
+    preferred_banks: cleanPrefs,
+    bank_initial_balances: cleanBals,
+    total_initial_ves: Object.values(cleanBals).reduce((acc, v) => acc + v, 0),
+    message: "Guardado localmente.",
+  };
+  persistUserBanksCache(optimistic);
+
+  const token = getToken();
+  if (!token) {
+    return optimistic;
+  }
+
+  try {
+    const res = await apiRequest<UserBanksConfigResponse>("/api/settings/banks", {
+      method: "POST",
+      body: JSON.stringify({
+        preferred_banks: cleanPrefs,
+        bank_initial_balances: cleanBals,
+      }),
+    });
+    return persistUserBanksCache(res);
+  } catch {
+    return optimistic;
+  }
 }
 
 // Métodos de Reconciliación Fiscal P2P (6 Piezas)
@@ -898,13 +1415,17 @@ export async function getLiveBalance(
   year: number,
   month: number,
   initialUsdt: number = 0,
-  initialVes: number = 0
+  initialVes: number = 0,
+  bankBalances?: Record<string, number>
 ): Promise<any> {
   const query = new URLSearchParams();
   query.set("year", year.toString());
   query.set("month", month.toString());
   query.set("initial_usdt", initialUsdt.toString());
   query.set("initial_ves", initialVes.toString());
+  if (bankBalances && Object.keys(bankBalances).length > 0) {
+    query.set("bank_balances_json", JSON.stringify(bankBalances));
+  }
   return apiRequest(`/api/accounting/balances/live?${query.toString()}`);
 }
 
@@ -959,4 +1480,300 @@ export async function uploadVoucherFile(file: File): Promise<UploadVoucherRespon
     throw new Error(detail);
   }
   return res.json();
+}
+
+export type StatementAction =
+  | "P2P_MATCH"
+  | "P2P_UNMATCHED"
+  | "BANK_FEE"
+  | "DUPLICATE_EXISTING"
+  | "INTERNAL_TRANSFER"
+  | "IGNORE";
+
+export interface StatementPreviewRow {
+  row_index: number;
+  date_vet: string;
+  reference_number: string;
+  concept: string;
+  movement_type: "DEBIT" | "CREDIT";
+  amount_ves: number;
+  bank_fee_ves: number;
+  balance_ves?: number | null;
+  balance_ok?: boolean | null;
+  balance_discrepancy: number;
+  payment_method: string;
+  suggested_action: StatementAction;
+  matched_order_number?: string | null;
+  matched_order_type?: string | null;
+  matched_order_crypto?: number | null;
+  matched_order_fiat?: number | null;
+  match_confidence: number;
+  notes: string;
+}
+
+export interface StatementAvailableOrder {
+  order_number: string;
+  trade_type: "BUY" | "SELL" | string;
+  fiat_amount: number;
+  crypto_amount: number;
+  date_vet: string;
+}
+
+export interface StatementPreviewResponse {
+  bank_name: string;
+  file_type: string;
+  extraction_method: string;
+  detected_columns: string[];
+  needs_column_mapping: boolean;
+  detected_order: string;
+  opening_balance?: number | null;
+  closing_balance?: number | null;
+  balance_verified: boolean;
+  balance_mismatch_count: number;
+  total_rows: number;
+  p2p_matched_count: number;
+  bank_fee_count: number;
+  duplicate_count: number;
+  unmatched_count: number;
+  rows: StatementPreviewRow[];
+  warnings: string[];
+  available_orders: StatementAvailableOrder[];
+}
+
+export interface StatementCommitRowPayload {
+  row_index: number;
+  date_vet: string;
+  reference_number: string;
+  concept: string;
+  movement_type: "DEBIT" | "CREDIT";
+  amount_ves: number;
+  payment_method: string;
+  action: StatementAction;
+  order_number?: string | null;
+  bank_fee_ves?: number;
+}
+
+export interface StatementCommitResponse {
+  status: string;
+  bank_name: string;
+  created_vouchers: number;
+  matched_orders: number;
+  bank_fees_recorded: number;
+  internal_transfers_recorded: number;
+  unmatched_recorded: number;
+  ignored_rows: number;
+  journal_entries_created: number;
+  periods_affected: string[];
+}
+
+export async function previewBankStatement(
+  file: File,
+  options?: {
+    bank_name?: string;
+    column_mapping?: Record<string, string>;
+    year_hint?: number;
+  }
+): Promise<StatementPreviewResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (options?.bank_name?.trim()) {
+    formData.append("bank_name", options.bank_name.trim());
+  }
+  if (options?.column_mapping && Object.keys(options.column_mapping).length > 0) {
+    formData.append("column_mapping_json", JSON.stringify(options.column_mapping));
+  }
+  if (options?.year_hint) {
+    formData.append("year_hint", String(options.year_hint));
+  }
+  return apiRequest<StatementPreviewResponse>("/api/accounting/statements/preview", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function commitBankStatement(data: {
+  bank_name: string;
+  rows: StatementCommitRowPayload[];
+}): Promise<StatementCommitResponse> {
+  return apiRequest<StatementCommitResponse>("/api/accounting/statements/commit", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+// ---------- Terminal de Velas P2P y Predictor Estadístico (SPEC-025) ----------
+
+export type MarketSideMode = "sell" | "buy" | "bank" | "evolucion" | "brecha";
+export type MarketTimeframe = "1m" | "5m" | "15m" | "1h" | "4h" | "1D";
+
+export interface MarketCandlePoint {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number | null;
+}
+
+export interface MarketLinePoint {
+  time: number;
+  value: number | null;
+}
+
+export interface MarketPercentileBand {
+  floor: number;
+  ceiling: number;
+  coverage: number;
+  r_low_pct: number;
+  r_high_pct: number;
+}
+
+export interface MarketBandBacktest {
+  hits: number;
+  evaluated: number;
+  hit_rate_pct: number;
+}
+
+export interface MarketCandlesResponse {
+  side: MarketSideMode;
+  timeframe: MarketTimeframe;
+  bank: string;
+  ticket_ves: number;
+  candles: MarketCandlePoint[];
+  ema9: MarketLinePoint[];
+  ema21: MarketLinePoint[];
+  rsi14: MarketLinePoint[];
+  bcv_series: MarketLinePoint[];
+  band: MarketPercentileBand | null;
+  mature_days: number;
+  samples_total: number;
+  bank_options: string[];
+  warnings: string[];
+}
+
+export interface MarketDepthBucket {
+  buy_usdt: number;
+  sell_usdt: number;
+  top1_share_pct: number;
+  imbalance: number;
+}
+
+export interface MarketDepthSummary {
+  top5: MarketDepthBucket;
+  top10: MarketDepthBucket;
+  top20: MarketDepthBucket;
+  imbalance: number;
+}
+
+export interface MarketTicketVwap {
+  fillable: boolean;
+  vwap_price: number;
+  best_price: number;
+  slippage_pct: number;
+  top_price_covers_ticket: boolean;
+  covered_ves: number;
+  ads_needed: number;
+}
+
+export interface MarketLiquidityAlert {
+  detected: boolean;
+  ratio_pct: number | null;
+  baseline_median_usdt: number | null;
+  status: string;
+}
+
+export interface MarketBankCell {
+  bank: string;
+  sell_best: number;
+  sell_avg: number;
+  buy_best: number;
+  buy_avg: number;
+  sustained_high_pc: number | null;
+  vol_buy: number;
+  vol_sell: number;
+}
+
+export interface MarketAnalyticsResponse {
+  rsi14_current: number | null;
+  ema4_vs_ema12_pct: number | null;
+  ema5_vs_ema20_pct: number | null;
+  brecha_velocity: number | null;
+  depth_summary: MarketDepthSummary;
+  vwap_buy: MarketTicketVwap;
+  vwap_sell: MarketTicketVwap;
+  liquidity_alert: MarketLiquidityAlert;
+  band: MarketPercentileBand | null;
+  band_backtest: MarketBandBacktest | null;
+  samples_total: number;
+  days_count: number;
+  min_prediction_days: number;
+  live_bcv: number;
+  live_p2p_buy: number;
+  live_p2p_sell: number;
+  brecha_pct: number;
+  banks_snapshot: MarketBankCell[];
+  verdict_label: string;
+  warnings: string[];
+}
+
+export interface MarketCollectResponse {
+  captured: boolean;
+  cooldown_remaining_s: number;
+  message: string;
+  snapshot_timestamp?: string | null;
+}
+
+export async function getMarketCandles(params: {
+  side?: MarketSideMode;
+  timeframe?: MarketTimeframe;
+  bank?: string;
+  ticketVes?: number;
+  limit?: number;
+  fresh?: boolean;
+  signal?: AbortSignal;
+} = {}): Promise<MarketCandlesResponse> {
+  const query = new URLSearchParams();
+  query.set("side", params.side ?? "sell");
+  query.set("timeframe", params.timeframe ?? "5m");
+  query.set("bank", params.bank ?? "*");
+  query.set("ticket_ves", String(params.ticketVes ?? 1_000_000));
+  query.set("limit", String(params.limit ?? 240));
+  return apiRequest<MarketCandlesResponse>(`/api/market/candles?${query.toString()}`, {
+    fresh: params.fresh,
+    signal: params.signal,
+  });
+}
+
+export async function getMarketAnalytics(params: {
+  bank?: string;
+  ticketVes?: number;
+  side?: MarketSideMode;
+  fresh?: boolean;
+  signal?: AbortSignal;
+} = {}): Promise<MarketAnalyticsResponse> {
+  const query = new URLSearchParams();
+  query.set("bank", params.bank ?? "*");
+  query.set("ticket_ves", String(params.ticketVes ?? 1_000_000));
+  if (params.side) {
+    query.set("side", params.side);
+  }
+  return apiRequest<MarketAnalyticsResponse>(`/api/market/analytics?${query.toString()}`, {
+    fresh: params.fresh,
+    signal: params.signal,
+  });
+}
+
+export async function triggerMarketCollect(params: {
+  bank?: string;
+  ticketVes?: number;
+} = {}): Promise<MarketCollectResponse> {
+  const query = new URLSearchParams();
+  if (params.bank) query.set("bank", params.bank);
+  if (params.ticketVes && params.ticketVes > 0) {
+    query.set("ticket_ves", String(params.ticketVes));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<MarketCollectResponse>(`/api/market/collect${suffix}`, {
+    method: "POST",
+  });
 }

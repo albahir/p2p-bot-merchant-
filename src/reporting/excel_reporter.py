@@ -7,7 +7,8 @@ completos de Reconstrucción Fiscal de 4 pestañas:
 4. 'Conciliación Bancaria': Comprobantes en bolívares conciliados con órdenes.
 """
 
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 
@@ -274,96 +275,210 @@ class ExcelReporter:
         return output_path
 
     @staticmethod
+    def _to_vet_str(dt: datetime | None) -> str:
+        """Convierte fecha a Hora Legal de Venezuela (VET = UTC-4)."""
+        if not dt:
+            return "-"
+        vet_tz = timezone(timedelta(hours=-4))
+        aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+        return aware.astimezone(vet_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
     def generate_accounting_report(
         journal_entries: list[JournalEntry],
         ledger_summaries: list[LedgerSummary],
         vouchers: list[BankVoucher],
         output_path: str = "reporte_contable_p2p.xlsx",
         tax_results: list[TradeResult] | None = None,
+        orders: list[Order] | None = None,
+        account_holder: str | None = None,
+        rif: str | None = None,
+        period: str | None = None,
+        bcv_rate: float | None = None,
+        initial_usdt: float = 0.0,
     ) -> str:
-        """Crea el informe contable formal de 4 pestañas:
-        1. 'Libro Diario': Partida doble cronológica con hash SHA-256 encadenado.
-        2. 'Libro Mayor': Consolidación mensual con Saldo Inicial y Final.
-        3. 'Conciliación Bancaria': Comprobantes procesados y su trazabilidad.
-        4. 'Liquidación Fiscal SENIAT': Resumen tributario gravable.
+        """Crea el informe contable venezolano de 6 pestañas conformes con LISLR / BA VEN-NIF N° 12:
+        1. 'Libro Diario': Partida doble cronológica en VET con fila de SUMAS IGUALES.
+        2. 'Libro Mayor': Consolidación mensual con Saldo Inicial, Debe, Haber y Saldo Final.
+        3. 'Estado de Resultados': Base imponible real (Ventas - Costo PEPS - Comisiones).
+        4. 'Kardex Inventario USDT': Control de existencias cripto (Reglamento LISLR Art. 177).
+        5. 'Conciliación Bancaria': Comprobantes procesados y trazabilidad bancaria.
+        6. 'Liquidación Fiscal SENIAT': Resumen tributario ISLR / IGTF y datos del contribuyente.
         """
-        # 1. Libro Diario
-        diario_rows = [
+        results = tax_results or []
+        order_list = orders or []
+
+        # 1. Libro Diario (VET + Sumas Iguales)
+        diario_rows: list[dict[str, object]] = [
             {
-                "Asiento #": e.entry_number,
-                "Fecha y Hora": e.date_time.strftime("%Y-%m-%d %H:%M:%S") if e.date_time else "-",
-                "Código Cuenta": e.account_code,
-                "Nombre de Cuenta": e.account_name,
+                "Asiento #": int(e.entry_number),
+                "Fecha y Hora (VET)": ExcelReporter._to_vet_str(cast(datetime | None, e.date_time)),
+                "Código Cuenta": str(e.account_code),
+                "Nombre de Cuenta": str(e.account_name),
                 "Debe (VES)": float(e.debit),
                 "Haber (VES)": float(e.credit),
-                "Referencia": e.reference,
-                "Descripción / Glosa": e.description,
-                "Orden P2P": e.order_number or "-",
-                "Hash Asiento (SHA-256)": e.entry_hash,
+                "Referencia": str(e.reference or "-"),
+                "Descripción / Glosa": str(e.description),
+                "Orden P2P": str(e.order_number or "-"),
             }
             for e in journal_entries
         ]
+        total_debe = round(sum(float(e.debit) for e in journal_entries), 2)
+        total_haber = round(sum(float(e.credit) for e in journal_entries), 2)
+        diario_rows.append(
+            {
+                "Asiento #": "",
+                "Fecha y Hora (VET)": "",
+                "Código Cuenta": "",
+                "Nombre de Cuenta": "SUMAS IGUALES",
+                "Debe (VES)": total_debe,
+                "Haber (VES)": total_haber,
+                "Referencia": "",
+                "Descripción / Glosa": "Cuadre de Partida Doble" if abs(total_debe - total_haber) < 0.02 else "REVISAR DESCUADRE",
+                "Orden P2P": "",
+            }
+        )
         df_diario = pd.DataFrame(diario_rows)
 
         # 2. Libro Mayor
-        mayor_rows = [
+        mayor_rows: list[dict[str, object]] = [
             {
-                "Código Cuenta": s.account_code,
-                "Nombre de Cuenta": s.account_name,
+                "Código Cuenta": str(s.account_code),
+                "Nombre de Cuenta": str(s.account_name),
                 "Período": f"{s.year}-{s.month:02d}",
-                "Saldo Inicial (VES)": s.initial_balance,
-                "Total Debe (VES)": s.total_debit,
-                "Total Haber (VES)": s.total_credit,
-                "Saldo Final (VES)": s.final_balance,
-                "N° Asientos": s.entries_count,
+                "Saldo Inicial (VES)": float(s.initial_balance),
+                "Total Debe (VES)": float(s.total_debit),
+                "Total Haber (VES)": float(s.total_credit),
+                "Saldo Final (VES)": float(s.final_balance),
+                "N° Asientos": int(s.entries_count),
             }
             for s in ledger_summaries
         ]
+        if ledger_summaries:
+            mayor_rows.append(
+                {
+                    "Código Cuenta": "",
+                    "Nombre de Cuenta": "TOTALES DEL PERÍODO",
+                    "Período": period or "",
+                    "Saldo Inicial (VES)": round(sum(float(s.initial_balance) for s in ledger_summaries), 2),
+                    "Total Debe (VES)": round(sum(float(s.total_debit) for s in ledger_summaries), 2),
+                    "Total Haber (VES)": round(sum(float(s.total_credit) for s in ledger_summaries), 2),
+                    "Saldo Final (VES)": round(sum(float(s.final_balance) for s in ledger_summaries), 2),
+                    "N° Asientos": sum(int(s.entries_count) for s in ledger_summaries),
+                }
+            )
         df_mayor = pd.DataFrame(mayor_rows)
 
-        # 3. Conciliación Bancaria
+        # 3. Estado de Resultados Real (PEPS + Gastos Deducibles, nunca flujo 1.1.01)
+        ingresos_ventas = round(sum(float(r.total_revenue_fiat) for r in results), 2)
+        costo_ventas_peps = round(sum(float(r.acquisition_cost_fiat) for r in results), 2)
+        utilidad_bruta = round(ingresos_ventas - costo_ventas_peps, 2)
+        comisiones_binance = round(sum(float(r.fee_fiat) for r in results), 2)
+        if comisiones_binance == 0.0:
+            comisiones_binance = round(
+                sum(float(e.debit) for e in journal_entries if e.account_code == "5.1.02"), 2
+            )
+        comisiones_banco = round(
+            sum(float(e.debit) for e in journal_entries if e.account_code == "5.2.01"), 2
+        )
+        total_gastos_deducibles = round(comisiones_binance + comisiones_banco, 2)
+        enriquecimiento_neto = round(utilidad_bruta - total_gastos_deducibles, 2)
+
+        ref_bcv = float(bcv_rate or 0.0)
+        if ref_bcv <= 0 and results:
+            valid_bcv = [float(r.bcv_rate) for r in results if float(r.bcv_rate) > 0]
+            ref_bcv = valid_bcv[-1] if valid_bcv else 0.0
+        enriquecimiento_usd_bcv = round(enriquecimiento_neto / ref_bcv, 2) if ref_bcv > 0 else 0.0
+
+        estado_resultados_rows = [
+            {"Partida Contable (VEN-NIF / LISLR)": "Contribuyente / Titular", "Monto (VES)": account_holder or "No especificado", "Equivalente USD (BCV)": rif or "C.I. / RIF no registrado"},
+            {"Partida Contable (VEN-NIF / LISLR)": "Período Fiscal", "Monto (VES)": period or "-", "Equivalente USD (BCV)": f"BCV Ref: {ref_bcv:.4f}" if ref_bcv > 0 else "-"},
+            {"Partida Contable (VEN-NIF / LISLR)": "Ingresos Brutos por Enajenación P2P", "Monto (VES)": ingresos_ventas, "Equivalente USD (BCV)": round(ingresos_ventas / ref_bcv, 2) if ref_bcv > 0 else 0.0},
+            {"Partida Contable (VEN-NIF / LISLR)": "(-) Costo de Adquisición PEPS (FIFO)", "Monto (VES)": costo_ventas_peps, "Equivalente USD (BCV)": round(costo_ventas_peps / ref_bcv, 2) if ref_bcv > 0 else 0.0},
+            {"Partida Contable (VEN-NIF / LISLR)": "(=) Utilidad Bruta Realizada", "Monto (VES)": utilidad_bruta, "Equivalente USD (BCV)": round(utilidad_bruta / ref_bcv, 2) if ref_bcv > 0 else 0.0},
+            {"Partida Contable (VEN-NIF / LISLR)": "(-) Comisiones Plataforma Exchange", "Monto (VES)": comisiones_binance, "Equivalente USD (BCV)": round(comisiones_binance / ref_bcv, 2) if ref_bcv > 0 else 0.0},
+            {"Partida Contable (VEN-NIF / LISLR)": "(-) Comisiones Bancarias Deducibles", "Monto (VES)": comisiones_banco, "Equivalente USD (BCV)": round(comisiones_banco / ref_bcv, 2) if ref_bcv > 0 else 0.0},
+            {"Partida Contable (VEN-NIF / LISLR)": "(=) Enriquecimiento Neto Gravable ISLR", "Monto (VES)": enriquecimiento_neto, "Equivalente USD (BCV)": enriquecimiento_usd_bcv},
+        ]
+        df_resultados = pd.DataFrame(estado_resultados_rows)
+
+        # 4. Kardex Inventario USDT (Reglamento LISLR Art. 177)
+        completed_orders = [o for o in order_list if str(getattr(o, "order_status", "COMPLETED")) == "COMPLETED"]
+        compras_usdt = round(sum(float(o.crypto_amount) for o in completed_orders if o.trade_type == "BUY"), 4)
+        compras_ves = round(sum(float(o.fiat_amount) for o in completed_orders if o.trade_type == "BUY"), 2)
+        ventas_usdt = round(
+            sum(float(o.crypto_amount) for o in completed_orders if o.trade_type == "SELL")
+            if completed_orders
+            else sum(float(r.crypto_amount) for r in results),
+            4,
+        )
+        inventario_final_usdt = round(float(initial_usdt) + compras_usdt - ventas_usdt, 4)
+
+        kardex_rows = [
+            {"Concepto": "Saldo Inicial USDT", "Cantidad (USDT)": round(float(initial_usdt), 4), "Valor Referencial (VES)": 0.0},
+            {"Concepto": "(+) Compras P2P USDT", "Cantidad (USDT)": compras_usdt, "Valor Referencial (VES)": compras_ves},
+            {"Concepto": "(-) Ventas P2P USDT", "Cantidad (USDT)": ventas_usdt, "Valor Referencial (VES)": costo_ventas_peps},
+            {"Concepto": "(=) Inventario Final USDT", "Cantidad (USDT)": inventario_final_usdt, "Valor Referencial (VES)": round(max(0.0, compras_ves - costo_ventas_peps), 2)},
+        ]
+        df_kardex = pd.DataFrame(kardex_rows)
+
+        # 5. Conciliación Bancaria
         vouchers_rows = [
             {
-                "ID": v.id or "-",
-                "Fecha": v.voucher_date.strftime("%Y-%m-%d %H:%M:%S") if v.voucher_date else "-",
+                "Fecha (VET)": ExcelReporter._to_vet_str(cast(datetime | None, v.voucher_date)),
                 "Banco Origen": v.bank_name,
                 "Banco Destino": v.destination_bank or "-",
-                "Referencia": v.reference_number,
+                "Referencia": str(v.reference_number or "-"),
                 "Monto Neto (VES)": float(v.amount_ves),
                 "Comisión Bancaria (VES)": float(v.bank_fee_ves or 0.0),
                 "Total Debitado (VES)": float(v.total_debited_ves or v.amount_ves),
-                "Cédula/RIF Emisor": v.sender_id or "S/C",
-                "Teléfono": v.sender_phone or "N/A",
+                "Cédula/RIF Emisor": str(v.sender_id or "S/C"),
+                "Teléfono": str(v.sender_phone or "N/A"),
                 "Concepto / Motivo": v.concept or "-",
                 "Método": v.payment_method,
                 "Tipo Flujo": v.movement_type,
-                "Orden Asociada": v.associated_order_number or "-",
+                "Orden Asociada": str(v.associated_order_number or "-"),
                 "Estado Conciliación": v.verification_status,
-                "Score (%)": float(v.reconciliation_score or 0.0),
             }
             for v in vouchers
         ]
         df_vouchers = pd.DataFrame(vouchers_rows)
 
-        # 4. Liquidación Fiscal SENIAT
-        total_ingresos = sum(e.debit for e in journal_entries if e.account_code == "1.1.01")
-        total_egresos = sum(e.credit for e in journal_entries if e.account_code == "1.1.01")
-        total_comisiones_banco = sum(e.debit for e in journal_entries if e.account_code == "5.2.01")
-
+        # 6. Liquidación Fiscal SENIAT (LISLR + IGTF + Providencia SNAT/2026/00099)
         seniat_rows = [
-            {"Concepto Fiscal": "Base Imponible Estimada (VES)", "Monto (VES)": total_ingresos},
-            {"Concepto Fiscal": "Egresos y Compras P2P (VES)", "Monto (VES)": total_egresos},
-            {"Concepto Fiscal": "Gastos Financieros Deducibles - Comisiones Bancarias (VES)", "Monto (VES)": total_comisiones_banco},
-            {"Concepto Fiscal": "Utilidad Neta en Operaciones (VES)", "Monto (VES)": round(total_ingresos - total_egresos, 2)},
-            {"Concepto Fiscal": "Normativa Aplicable", "Monto (VES)": "Ley de ISLR / Providencia SNAT Criptoactivos"},
+            {"Concepto Fiscal": "Contribuyente / Titular", "Monto (VES)": account_holder or "No especificado"},
+            {"Concepto Fiscal": "Cédula / RIF", "Monto (VES)": rif or "No registrado"},
+            {"Concepto Fiscal": "Período Fiscal (Hora VET UTC-4)", "Monto (VES)": period or "-"},
+            {"Concepto Fiscal": "Ingresos Brutos por Ventas (VES)", "Monto (VES)": ingresos_ventas},
+            {"Concepto Fiscal": "Costo de Ventas PEPS (VES)", "Monto (VES)": costo_ventas_peps},
+            {"Concepto Fiscal": "Utilidad Bruta Realizada (VES)", "Monto (VES)": utilidad_bruta},
+            {"Concepto Fiscal": "Gastos Deducibles - Comisiones Exchange (VES)", "Monto (VES)": comisiones_binance},
+            {"Concepto Fiscal": "Gastos Financieros Deducibles - Comisiones Bancarias (VES)", "Monto (VES)": comisiones_banco},
+            {"Concepto Fiscal": "Enriquecimiento Neto Gravable ISLR (VES)", "Monto (VES)": enriquecimiento_neto},
+            {"Concepto Fiscal": "Equivalente ISLR Referencial BCV (USD)", "Monto (VES)": enriquecimiento_usd_bcv},
+            {"Concepto Fiscal": "IGTF Liquidación Banca Nacional VES", "Monto (VES)": "0% (No aplica 3% cuando se liquida en Bs por banca nacional)"},
+            {"Concepto Fiscal": "Normativa Aplicable", "Monto (VES)": "LISLR Art. 1/4/27 y Art. 177 Rgto / BA VEN-NIF 12 / Prov. SNAT/2026/00099"},
         ]
         df_seniat = pd.DataFrame(seniat_rows)
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             df_diario.to_excel(writer, sheet_name="Libro Diario", index=False)
             df_mayor.to_excel(writer, sheet_name="Libro Mayor", index=False)
+            df_resultados.to_excel(writer, sheet_name="Estado de Resultados", index=False)
+            df_kardex.to_excel(writer, sheet_name="Kardex Inventario USDT", index=False)
             df_vouchers.to_excel(writer, sheet_name="Conciliación Bancaria", index=False)
             df_seniat.to_excel(writer, sheet_name="Liquidación Fiscal SENIAT", index=False)
+
+            text_cols = {"Referencia", "Orden P2P", "Orden Asociada", "Cédula/RIF Emisor", "Teléfono"}
+            for sheet_name in writer.sheets:
+                ws = writer.sheets[sheet_name]
+                for col in ws.columns:
+                    header_val = str(col[0].value or "")
+                    max_len = max(len(str(c.value or "")) for c in col)
+                    ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 3, 14), 48)
+                    if header_val in text_cols:
+                        for cell in col[1:]:
+                            cell.number_format = "@"
 
         return output_path
 

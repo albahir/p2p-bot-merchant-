@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { ThemeProvider } from "@/lib/theme-context";
+import { TelemetryProvider } from "@/lib/telemetry-context";
 
 export const metadata: Metadata = {
-  title: "Sistema Comerciante P2P — Mesa de Liquidez y Arbitraje Institucional",
-  description:
-    "Terminal institucional de arbitraje P2P en Binance, contabilidad SENIAT en partida doble y control de parada segura.",
+  title: "Comerciante P2P — Binance & Contabilidad",
+  description: "Arbitraje P2P en vivo, órdenes, conciliación bancaria y Google Sheets.",
 };
 
 export default function RootLayout({
@@ -18,21 +18,24 @@ export default function RootLayout({
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link rel="preconnect" href="http://localhost:8000" />
         <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
           rel="stylesheet"
         />
         <link
           href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
           rel="stylesheet"
         />
-        <script src="https://telegram.org/js/telegram-web-app.js" async />
+        <script src="https://telegram.org/js/telegram-web-app.js" defer />
       </head>
       <body
         suppressHydrationWarning
         className="bg-background text-on-surface antialiased selection:bg-[#f59e0b] selection:text-black min-h-screen flex flex-col"
       >
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          <TelemetryProvider>{children}</TelemetryProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

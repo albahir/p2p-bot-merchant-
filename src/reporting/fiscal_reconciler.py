@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from src.data.models import BankVoucher, FiscalPeriodSnapshot
@@ -145,8 +146,29 @@ class FiscalReconciler:
 
         total_inflows = inflows_deposits + inflows_p2p_buys
         total_outflows = outflows_withdrawals + outflows_p2p_sells
+
+        # Comprobantes bancarios (filtrados por fecha real VET/UTC del movimiento o creación, aislados por usuario)
+        vouchers_q = self.db.query(BankVoucher).filter(
+            or_(
+                and_(
+                    cast(Any, BankVoucher.voucher_date).is_not(None),
+                    cast(Any, BankVoucher.voucher_date >= start_dt),
+                    cast(Any, BankVoucher.voucher_date <= end_dt),
+                ),
+                and_(
+                    cast(Any, BankVoucher.voucher_date).is_(None),
+                    cast(Any, BankVoucher.created_at >= start_dt),
+                    cast(Any, BankVoucher.created_at <= end_dt),
+                ),
+            )
+        )
+        vouchers = _apply_user_scope(self.db, vouchers_q, BankVoucher, self.user_id).all()
+        vouchers_count = len(vouchers)
+        matched_vouchers_count = sum(1 for v in vouchers if v.verification_status == "MATCHED")
+        bank_vouchers_fees = sum(float(v.bank_fee_ves or 0.0) for v in vouchers)
+
         total_fees = withdrawal_fees + p2p_crypto_fees
-        total_fees_ves = p2p_fiat_fees + (withdrawal_fees * float(initial_bcv_rate or 0.0))
+        total_fees_ves = p2p_fiat_fees + (withdrawal_fees * float(initial_bcv_rate or 0.0)) + bank_vouchers_fees
 
         # Ecuación de consistencia: Saldo Final Teórico
         calculated_final = round(initial_balance + total_inflows - total_outflows - total_fees, 6)
@@ -186,15 +208,6 @@ class FiscalReconciler:
         acquisition_cost_ves = sum(r.acquisition_cost_fiat for r in trade_results)
         net_profit_ves = sum(r.net_profit_fiat for r in trade_results)
         net_profit_usd = sum(r.net_profit_usd for r in trade_results)
-
-        # Comprobantes bancarios (estadísticas de conciliación aisladas por usuario)
-        vouchers_q = self.db.query(BankVoucher).filter(
-            cast(Any, BankVoucher.created_at >= start_dt),
-            cast(Any, BankVoucher.created_at <= end_dt),
-        )
-        vouchers = _apply_user_scope(self.db, vouchers_q, BankVoucher, self.user_id).all()
-        vouchers_count = len(vouchers)
-        matched_vouchers_count = sum(1 for v in vouchers if v.verification_status == "MATCHED")
 
         return FiscalReconciliationResult(
             period=period,

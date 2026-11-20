@@ -16,6 +16,8 @@ export function formatPagoMovilAmount(value: number): string {
 interface BankAmountInputProps {
   value: number;
   onChange: (nextValue: number) => void;
+  /** Se dispara únicamente cuando el usuario termina de escribir (Enter o Blur). */
+  onCommit?: (finalValue: number) => void;
   className?: string;
   placeholder?: string;
   disabled?: boolean;
@@ -32,6 +34,7 @@ interface BankAmountInputProps {
 export function BankAmountInput({
   value,
   onChange,
+  onCommit,
   className = "",
   placeholder = "0,00",
   disabled = false,
@@ -62,12 +65,23 @@ export function BankAmountInput({
     moveCaretToEnd(e.currentTarget);
   }
 
+  function handleBlur() {
+    justFocusedRef.current = false;
+    onCommit?.(Number.isFinite(value) ? value : 0);
+  }
+
   function handleClick(e: React.MouseEvent<HTMLInputElement>) {
     moveCaretToEnd(e.currentTarget);
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (disabled) return;
+
+    if (e.key === "Enter") {
+      onCommit?.(Number.isFinite(value) ? value : 0);
+      e.currentTarget.blur();
+      return;
+    }
 
     // Permitir atajos del sistema (Ctrl+C, Ctrl+V, Ctrl+A, Alt+N, Tab, Enter, Escape)
     if (e.ctrlKey || e.metaKey || e.altKey) {
@@ -161,6 +175,7 @@ export function BankAmountInput({
       placeholder={placeholder}
       value={formattedValue}
       onFocus={handleFocus}
+      onBlur={handleBlur}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
       onChange={handleChange}

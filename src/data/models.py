@@ -154,12 +154,16 @@ class User(Base):
     username = Column(String(50), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(120), nullable=True)  # Nombre completo o razón comercial del operador
+    tax_id = Column(String(30), nullable=True)  # Cédula de Identidad o RIF venezolano (V-/E-/J-/G-/P-)
     email = Column(String(150), unique=True, index=True, nullable=True)  # Correo de recuperación y contacto
+    email_verified = Column(Boolean, default=False, nullable=False)  # Correo verificado mediante OTP SMTP
     telegram_id = Column(String(50), unique=True, index=True, nullable=True)
     role = Column(String(20), default="INVITADO", nullable=False)  # ADMIN, TRADER, INVITADO
     google_sheet_id = Column(String(100), nullable=True)  # ID de la hoja personal en Google Sheets
     google_refresh_token_enc = Column(Text, nullable=True)  # Refresh Token OAuth2 cifrado con AES-256-GCM
     google_auth_type = Column(String(30), default="SERVICE_ACCOUNT", nullable=False)  # SERVICE_ACCOUNT | OAUTH2
+    preferred_banks_json = Column(Text, nullable=True)  # Lista JSON de bancos con los que opera el usuario
+    bank_balances_json = Column(Text, nullable=True)  # Mapa JSON {banco: saldo_inicial_ves} del operador
     security_question = Column(String(200), nullable=True)  # Pregunta secreta de recuperación de perfil
     security_answer_hash = Column(String(255), nullable=True)  # Hash PBKDF2-HMAC-SHA256 de la respuesta secreta
     recovery_key_hash = Column(String(255), nullable=True)  # Hash PBKDF2 de Llave Maestra de respaldo (single-use)
@@ -175,6 +179,45 @@ class User(Base):
     @property
     def has_recovery_key(self) -> bool:
         return bool(self.recovery_key_hash)
+
+    @property
+    def preferred_banks(self) -> list[str]:
+        import json
+
+        raw = str(self.preferred_banks_json or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(b).strip() for b in parsed if str(b).strip()]
+        except (ValueError, TypeError):
+            pass
+        return []
+
+    @property
+    def bank_initial_balances(self) -> dict[str, float]:
+        import json
+
+        raw = str(self.bank_balances_json or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                out: dict[str, float] = {}
+                for k, v in parsed.items():
+                    key_str = str(k).strip()
+                    if not key_str:
+                        continue
+                    try:
+                        out[key_str] = round(float(v), 2)
+                    except (ValueError, TypeError):
+                        continue
+                return out
+        except (ValueError, TypeError):
+            pass
+        return {}
 
 
 class BCVRateHistory(Base):
@@ -220,6 +263,46 @@ class SystemState(Base):
         onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )
+
+
+class MarketSnapshot(Base):
+    """Instantánea periódica de microestructura Binance P2P y brecha BCV (SPEC-025)."""
+    __tablename__ = "market_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(UTC), index=True, nullable=False)
+    bcv_rate = Column(Float, default=0.0, nullable=False)
+    p2p_buy_best = Column(Float, default=0.0, nullable=False)
+    p2p_buy_avg20 = Column(Float, default=0.0, nullable=False)
+    p2p_sell_best = Column(Float, default=0.0, nullable=False)
+    p2p_sell_avg20 = Column(Float, default=0.0, nullable=False)
+    p2p_mid = Column(Float, default=0.0, nullable=False)
+    brecha_pct = Column(Float, default=0.0, nullable=False)
+    spread_ves = Column(Float, default=0.0, nullable=False)
+    vol_buy_usdt = Column(Float, default=0.0, nullable=False)
+    vol_sell_usdt = Column(Float, default=0.0, nullable=False)
+    depth_json = Column(Text, nullable=True)  # Tramos Top 5/10/20 + top1 + matriz por banco/ticket
+
+
+class MarketHourlyRollup(Base):
+    """Consolidado OHLC horario jerárquico para velas de 1h, 4h, 1D y banda probabilística (SPEC-025)."""
+    __tablename__ = "market_hourly_rollups"
+
+    hora_utc = Column(DateTime, primary_key=True, index=True, nullable=False)
+    buy_open = Column(Float, nullable=False)
+    buy_high = Column(Float, nullable=False)
+    buy_low = Column(Float, nullable=False)
+    buy_close = Column(Float, nullable=False)
+    sell_open = Column(Float, nullable=False)
+    sell_high = Column(Float, nullable=False)
+    sell_low = Column(Float, nullable=False)
+    sell_close = Column(Float, nullable=False)
+    bcv_close = Column(Float, default=0.0, nullable=False)
+    brecha_close = Column(Float, default=0.0, nullable=False)
+    vol_buy_sum = Column(Float, default=0.0, nullable=False)
+    vol_sell_sum = Column(Float, default=0.0, nullable=False)
+    samples_count = Column(Integer, default=1, nullable=False)
+    bank_matrix_json = Column(Text, nullable=True)  # Por banco: o, p, pc (sostenido), x, u, d
 
 
 

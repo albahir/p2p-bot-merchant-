@@ -1,6 +1,7 @@
 """Tests unitarios (TDD) para la capa de normalización y sanitización contable (SPEC-017)."""
 
 from src.reporting.normalizers import (
+    detect_bank_from_text,
     normalize_bank_name,
     normalize_cedula,
     normalize_phone,
@@ -32,6 +33,27 @@ def test_normalize_bank_name():
     assert normalize_bank_name("Banco Nacional de Crédito") == "BNC"
     assert normalize_bank_name("Bancaribe C.A.") == "BANCARIBE"
     assert normalize_bank_name("Banco Plaza") == "BANCO PLAZA"
+    # Catálogo completo SUDEBAN + códigos bancarios
+    assert normalize_bank_name("0102") == "BANCO DE VENEZUELA"
+    assert normalize_bank_name("0134 Banesco") == "BANESCO"
+    assert normalize_bank_name("Banco Exterior C.A.") == "BANCO EXTERIOR"
+    assert normalize_bank_name("0163 Banco del Tesoro") == "BANCO DEL TESORO"
+    assert normalize_bank_name("BFC Banco Fondo Común") == "BFC BANCO FONDO COMUN"
+    assert normalize_bank_name("100% Banco Comercial") == "100% BANCO"
+    assert normalize_bank_name("Banplus Banco Universal") == "BANPLUS"
+    assert normalize_bank_name("Banco Caroní") == "BANCO CARONI"
+    assert normalize_bank_name("Banco Sofitasa") == "SOFITASA"
+    assert normalize_bank_name("Banco Venezolano de Crédito") == "VENEZOLANO DE CREDITO"
+    assert normalize_bank_name("Banco Mercantil Panama") == "MERCANTIL"
+    assert normalize_bank_name("Facebank International") == "FACEBANK INTERNATIONAL"
+
+
+def test_detect_bank_from_text():
+    assert detect_bank_from_text("BANCO DE VENEZUELA S.A. BANCO UNIVERSAL RIF J-00002950-4") == "BANCO DE VENEZUELA"
+    assert detect_bank_from_text("ESTADO DE CUENTA ELECTRONICO BANESCO RIF J-07013380-5") == "BANESCO"
+    assert detect_bank_from_text("BANCAMIGA BANCO UNIVERSAL ESTADO DE CUENTA") == "BANCAMIGA"
+    assert detect_bank_from_text("PAGO MOVIL DESDE 0105-0021-...") == "MERCANTIL"
+    assert detect_bank_from_text("Sin referencia bancaria clara") is None
 
 
 def test_normalize_cedula():

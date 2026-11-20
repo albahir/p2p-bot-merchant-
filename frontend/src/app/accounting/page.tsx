@@ -4,24 +4,35 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { BankAmountInput } from "@/components/bank-amount-input";
+import { StatementImportModal } from "@/components/statement-import-modal";
 import {
   FiscalSummary,
   JournalEntryItem,
   LedgerSummaryItem,
+  StatementCommitResponse,
+  StatementPreviewResponse,
   UploadVoucherResponse,
   User,
+  VENEZUELAN_BANK_CATALOG,
+  bankMatchesProfile,
+  canonicalBankName,
   closeFiscalPeriod,
   createManualVoucher,
   downloadAccountingExcel,
   downloadAccountingPdf,
+  getCachedApiResponse,
+  getCachedUserBanks,
   getCurrentUser,
   getFiscalSnapshot,
   getFiscalSummary,
   getJournalEntries,
   getLedgerSummaries,
   getLiveBalance,
+  getUserBanksSettings,
   matchVoucherWithOrder,
+  previewBankStatement,
   reconcileOrphanVouchers,
+  saveUserBanksSettings,
   uploadVoucherFile,
 } from "@/lib/api";
 
@@ -66,25 +77,71 @@ const MONTHS = [
 
 export default function AccountingPage() {
   const voucherInputRef = useRef<HTMLInputElement>(null);
+  const statementInputRef = useRef<HTMLInputElement>(null);
   const now = new Date();
+  const initY = now.getFullYear();
+  const initM = now.getMonth() + 1;
 
-  const [user, setUser] = useState<User | null>(null);
-  const [year, setYear] = useState<number>(now.getFullYear());
-  const [month, setMonth] = useState<number>(now.getMonth() + 1);
-  const [initialVes, setInitialVes] = useState<number>(0);
+  const initialUser = typeof window !== "undefined" ? getCurrentUser() : null;
+  const cachedUserBanks = typeof window !== "undefined" ? getCachedUserBanks() : null;
+  const defaultBanksList =
+    cachedUserBanks && cachedUserBanks.preferred_banks.length > 0
+      ? cachedUserBanks.preferred_banks
+      : ["Banco de Venezuela", "Mercantil"];
+  const defaultBankBalances: Record<string, number> = (() => {
+    const map: Record<string, number> = {};
+    for (const b of defaultBanksList) {
+      map[b] = Number(cachedUserBanks?.bank_initial_balances?.[b] ?? 0);
+    }
+    return map;
+  })();
+
+  const initialBalance =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<LiveBalanceState>(
+          `/api/accounting/balances/live?year=${initY}&month=${initM}&initial_usdt=0&initial_ves=0`
+        )
+      : null;
+  const initialJournal =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<JournalEntryItem[]>("/api/accounting/journal?")
+      : null;
+
+  const [user, setUser] = useState<User | null>(initialUser);
+  const [year, setYear] = useState<number>(initY);
+  const [month, setMonth] = useState<number>(initM);
+  const [userBanks, setUserBanks] = useState<string[]>(defaultBanksList);
+  const [bankInitialMap, setBankInitialMap] = useState<Record<string, number>>(defaultBankBalances);
+  const [committedBankMap, setCommittedBankMap] = useState<Record<string, number>>(defaultBankBalances);
+  const [showBankSelector, setShowBankSelector] = useState<boolean>(false);
   const [initialUsdt, setInitialUsdt] = useState<number>(0);
+  const [committedUsdt, setCommittedUsdt] = useState<number>(0);
+  const reqSeqRef = useRef<number>(0);
+  const banksSyncedRef = useRef<boolean>(false);
   const [activeTab, setActiveTab] = useState<AccountingTab>("JOURNAL");
 
-  const [liveBalance, setLiveBalance] = useState<LiveBalanceState | null>(null);
-  const [journalEntries, setJournalEntries] = useState<JournalEntryItem[]>([]);
+  const initialVes = userBanks.reduce(
+    (sum, b) => sum + (Number(bankInitialMap[b]) || 0),
+    0
+  );
+  const committedVes = userBanks.reduce(
+    (sum, b) => sum + (Number(committedBankMap[b]) || 0),
+    0
+  );
+
+  const [liveBalance, setLiveBalance] = useState<LiveBalanceState | null>(initialBalance);
+  const [journalEntries, setJournalEntries] = useState<JournalEntryItem[]>(initialJournal || []);
   const [ledgerSummaries, setLedgerSummaries] = useState<LedgerSummaryItem[]>([]);
   const [fiscalSummary, setFiscalSummary] = useState<FiscalSummary | null>(null);
 
   const [lastVoucher, setLastVoucher] = useState<UploadVoucherResponse | null>(null);
   const [manualOrderNumber, setManualOrderNumber] = useState<string>("");
 
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(!initialJournal && !initialBalance);
   const [uploadingOcr, setUploadingOcr] = useState<boolean>(false);
+  const [uploadingStatement, setUploadingStatement] = useState<boolean>(false);
+  const [statementPreview, setStatementPreview] = useState<StatementPreviewResponse | null>(null);
+  const [statementSourceFile, setStatementSourceFile] = useState<File | null>(null);
   const [reconciling, setReconciling] = useState<boolean>(false);
   const [showCloseModal, setShowCloseModal] = useState<boolean>(false);
   const [closeConfirmText, setCloseConfirmText] = useState<string>("");
@@ -107,6 +164,96 @@ export default function AccountingPage() {
     text: string;
   } | null>(null);
 
+  // Sincronizar bancos registrados del usuario desde el servidor al montar
+  useEffect(() => {
+    if (banksSyncedRef.current) return;
+    banksSyncedRef.current = true;
+    getUserBanksSettings()
+      .then((res) => {
+        if (res && res.preferred_banks && res.preferred_banks.length > 0) {
+          setUserBanks(res.preferred_banks);
+          setBankInitialMap(res.bank_initial_balances || {});
+          setCommittedBankMap(res.bank_initial_balances || {});
+          setManualBank(res.preferred_banks[0]);
+        }
+      })
+      .catch(() => null);
+  }, []);
+
+  // Debounce de 750ms para saldos iniciales por banco: evita disparar peticiones por cada dígito/cero tecleado
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setCommittedBankMap((prev) => {
+        const prevJson = JSON.stringify(prev);
+        const nextJson = JSON.stringify(bankInitialMap);
+        if (prevJson === nextJson) return prev;
+        void saveUserBanksSettings({
+          preferred_banks: userBanks,
+          bank_initial_balances: bankInitialMap,
+        });
+        return { ...bankInitialMap };
+      });
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [bankInitialMap, userBanks]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setCommittedUsdt(initialUsdt);
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [initialUsdt]);
+
+  function handleUpdateBankInitial(bankName: string, amount: number) {
+    setBankInitialMap((prev) => ({
+      ...prev,
+      [bankName]: amount,
+    }));
+  }
+
+  function handleCommitBankInitial(bankName: string, amount: number) {
+    const nextMap = {
+      ...bankInitialMap,
+      [bankName]: amount,
+    };
+    setBankInitialMap(nextMap);
+    setCommittedBankMap((prev) => {
+      if (JSON.stringify(prev) === JSON.stringify(nextMap)) return prev;
+      void saveUserBanksSettings({
+        preferred_banks: userBanks,
+        bank_initial_balances: nextMap,
+      });
+      return nextMap;
+    });
+  }
+
+  function handleToggleUserBank(rawBank: string) {
+    const canon = canonicalBankName(rawBank);
+    if (!canon) return;
+    const exists = userBanks.includes(canon);
+    if (exists && userBanks.length <= 1) {
+      setFeedback({
+        type: "error",
+        text: "Debes mantener al menos 1 banco activo en tu perfil contable.",
+      });
+      return;
+    }
+    const nextBanks = exists
+      ? userBanks.filter((b) => b !== canon)
+      : [...userBanks, canon];
+    const nextBals: Record<string, number> = {};
+    for (const b of nextBanks) {
+      nextBals[b] = Number(bankInitialMap[b] ?? 0);
+    }
+    setUserBanks(nextBanks);
+    setBankInitialMap(nextBals);
+    setCommittedBankMap(nextBals);
+    void saveUserBanksSettings({
+      preferred_banks: nextBanks,
+      bank_initial_balances: nextBals,
+    });
+  }
+
   const loadAccountingData = useCallback(async () => {
     const current = getCurrentUser();
     setUser(current);
@@ -115,6 +262,7 @@ export default function AccountingPage() {
       return;
     }
 
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     const periodStr = `${year}-${String(month).padStart(2, "0")}`;
     const startDate = `${periodStr}-01`;
@@ -123,12 +271,17 @@ export default function AccountingPage() {
 
     try {
       const [liveRes, journalRes, ledgerRes, fiscalRes, snapshotRes] = await Promise.all([
-        getLiveBalance(year, month, initialUsdt, initialVes).catch(() => null),
+        getLiveBalance(year, month, committedUsdt, committedVes, committedBankMap).catch(
+          () => null
+        ),
         getJournalEntries(startDate, endDate).catch(() => []),
-        getLedgerSummaries(year, month, undefined, initialVes).catch(() => []),
-        getFiscalSummary(periodStr, initialUsdt).catch(() => null),
+        getLedgerSummaries(year, month, undefined, committedVes).catch(() => []),
+        getFiscalSummary(periodStr, committedUsdt).catch(() => null),
         getFiscalSnapshot(periodStr).catch(() => null),
       ]);
+
+      // Descartar respuestas antiguas fuera de orden (evita que un dígito previo sobrescriba la tarjeta)
+      if (seq !== reqSeqRef.current) return;
 
       if (liveRes) setLiveBalance(liveRes);
       setJournalEntries(journalRes || []);
@@ -136,14 +289,17 @@ export default function AccountingPage() {
       if (fiscalRes) setFiscalSummary(fiscalRes);
       setPeriodClosed(Boolean(snapshotRes?.is_closed));
     } catch (err: any) {
+      if (seq !== reqSeqRef.current) return;
       setFeedback({
         type: "error",
         text: err.message || "Error al consultar el motor contable SENIAT.",
       });
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [year, month, initialUsdt, initialVes]);
+  }, [year, month, committedUsdt, committedVes, committedBankMap]);
 
   useEffect(() => {
     loadAccountingData();
@@ -234,6 +390,26 @@ export default function AccountingPage() {
     }
   }
 
+  async function handleUploadStatement(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFeedback(null);
+    setUploadingStatement(true);
+    try {
+      const previewRes = await previewBankStatement(file);
+      setStatementSourceFile(file);
+      setStatementPreview(previewRes);
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo leer el estado de cuenta bancario.",
+      });
+    } finally {
+      setUploadingStatement(false);
+      if (statementInputRef.current) statementInputRef.current.value = "";
+    }
+  }
+
   async function handleAutoReconcile() {
     setFeedback(null);
     setReconciling(true);
@@ -304,33 +480,30 @@ export default function AccountingPage() {
     );
   }
 
-  // Subcajas reales de bancos (corrige el bug de Stitch que repetía "SALDO INICIAL DEL MES" 3 veces)
-  const bankBoxes: BankBreakdownItem[] =
-    liveBalance?.bank_breakdown && liveBalance.bank_breakdown.length > 0
-      ? liveBalance.bank_breakdown.slice(0, 3)
-      : [
-          {
-            bank_name: "Banesco",
-            initial_ves: 0,
-            inflows_ves: 0,
-            outflows_ves: 0,
-            theoretical_ves: 0,
-          },
-          {
-            bank_name: "BDV / Pago Móvil",
-            initial_ves: 0,
-            inflows_ves: 0,
-            outflows_ves: 0,
-            theoretical_ves: 0,
-          },
-          {
-            bank_name: "Mercantil",
-            initial_ves: 0,
-            inflows_ves: 0,
-            outflows_ves: 0,
-            theoretical_ves: 0,
-          },
-        ];
+  const netFlowVes =
+    (liveBalance?.total_inflows_ves ?? 0) - (liveBalance?.total_outflows_ves ?? 0);
+  const displayedTheoreticalVes = initialVes + netFlowVes;
+
+  const netFlowUsdt =
+    (liveBalance?.inflow_usdt ?? 0) - (liveBalance?.outflow_usdt ?? 0);
+  const displayedTheoreticalUsdt = initialUsdt + netFlowUsdt;
+
+  // Subcajas dinámicas por cada banco registrado del usuario con su saldo inicial + entradas - salidas
+  const bankBoxes: BankBreakdownItem[] = userBanks.map((bName) => {
+    const matched = (liveBalance?.bank_breakdown || []).find((item) =>
+      bankMatchesProfile(item.bank_name, [bName])
+    );
+    const initVal = Number(bankInitialMap[bName]) || 0;
+    const inflows = matched?.inflows_ves ?? 0;
+    const outflows = matched?.outflows_ves ?? 0;
+    return {
+      bank_name: bName,
+      initial_ves: initVal,
+      inflows_ves: inflows,
+      outflows_ves: outflows,
+      theoretical_ves: initVal + inflows - outflows,
+    };
+  });
 
   return (
     <AppShell
@@ -444,91 +617,163 @@ export default function AccountingPage() {
           </div>
         )}
 
-        {/* 3 Tarjetas Bento de Saldos y Conciliación OCR (Corregidas sin IGTF ni desbordes) */}
-        <section className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-          {/* Card 1: Saldo Bancario */}
-          <div className="lg:col-span-5 p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                  Saldo en bancos (VES)
+        {/* 3 Tarjetas Bento de Saldos y Conciliación OCR (En móvil: Saldos VES y USDT lado a lado en una línea) */}
+        <section className="grid grid-cols-2 lg:grid-cols-12 gap-2.5 sm:gap-4">
+          {/* Card 1: Saldo Bancario Desglosado por los Bancos del Usuario */}
+          <div className="col-span-2 lg:col-span-5 p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0 flex flex-col justify-between gap-2.5 sm:gap-3.5">
+            <div className="flex items-start justify-between gap-2 min-w-0">
+              <div className="min-w-0">
+                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
+                  Saldo total en mis bancos (VES)
                 </div>
-                <div className="mt-1 text-2xl font-mono font-bold text-white tabular-nums">
+                <div className="mt-0.5 sm:mt-1 text-base sm:text-2xl font-mono font-bold text-white tabular-nums truncate">
                   Bs.{" "}
-                  {(liveBalance?.total_theoretical_ves ?? 0).toLocaleString("es-VE", {
+                  {displayedTheoreticalVes.toLocaleString("es-VE", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </div>
+                <div className="text-[10px] font-mono text-slate-400 tabular-nums truncate">
+                  Inicial sumado: Bs.{" "}
+                  {initialVes.toLocaleString("es-VE", {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}
                 </div>
               </div>
-              <div className="text-right">
-                <label className="block text-[9px] font-mono uppercase text-slate-400">
-                  Inicial VES
-                </label>
-                <BankAmountInput
-                  value={initialVes}
-                  onChange={setInitialVes}
-                  ariaLabel="Saldo Inicial VES"
-                  className="w-32 mt-0.5 px-2.5 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-primary tabular-nums"
-                />
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowBankSelector((prev) => !prev)}
+                aria-expanded={showBankSelector}
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-semibold flex items-center gap-1.5 border transition-colors shrink-0 cursor-pointer ${
+                  showBankSelector
+                    ? "bg-primary-container text-on-primary border-primary-container"
+                    : "bg-surface-container border-[#1e2430] text-primary hover:border-primary-container/50"
+                }`}
+              >
+                <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                  account_balance
+                </span>
+                <span>Mis bancos ({userBanks.length})</span>
+              </button>
             </div>
 
-            {/* Subcajas con Nombres Reales de Bancos (Banesco, BDV, Mercantil...) */}
-            <div className="grid grid-cols-3 gap-2">
-              {bankBoxes.map((b) => (
-                <div
-                  key={b.bank_name}
-                  className="p-2.5 rounded-lg bg-surface-container border border-[#1e2430]"
-                >
-                  <div className="text-[10px] font-mono uppercase text-primary truncate font-semibold">
-                    {b.bank_name}
-                  </div>
-                  <div className="mt-1 text-xs font-mono font-bold text-white tabular-nums truncate">
-                    Bs. {b.theoretical_ves.toFixed(2)}
-                  </div>
-                  <div className="text-[9px] font-mono text-slate-500 tabular-nums truncate">
-                    +{b.inflows_ves.toFixed(0)} / -{b.outflows_ves.toFixed(0)}
-                  </div>
+            {showBankSelector && (
+              <div className="p-2.5 rounded-xl bg-surface-container-lowest border border-primary-container/30 space-y-2">
+                <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-slate-300">
+                  <span>Selecciona los bancos con los que trabajas:</span>
+                  <span className="text-primary">{userBanks.length} activos</span>
                 </div>
-              ))}
+                <div className="flex flex-wrap gap-1.5">
+                  {VENEZUELAN_BANK_CATALOG.map((bankOpt) => {
+                    const active = userBanks.includes(bankOpt);
+                    return (
+                      <button
+                        key={bankOpt}
+                        type="button"
+                        onClick={() => handleToggleUserBank(bankOpt)}
+                        aria-pressed={active}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition-colors flex items-center gap-1 cursor-pointer ${
+                          active
+                            ? "bg-primary-container text-on-primary font-bold"
+                            : "bg-surface-container text-slate-400 hover:text-white border border-[#1e2430]"
+                        }`}
+                      >
+                        <span>{active ? "✓" : "+"}</span>
+                        <span>{bankOpt}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Subcajas por Banco con su propio campo de Saldo Inicial VES */}
+            <div className="grid grid-cols-2 sm:grid-cols-2 gap-2">
+              {bankBoxes.map((b) => {
+                const inputId = `bank-init-${b.bank_name.replace(/\s+/g, "-").toLowerCase()}`;
+                return (
+                  <div
+                    key={b.bank_name}
+                    className="p-2.5 rounded-lg bg-surface-container border border-[#1e2430] min-w-0 flex flex-col justify-between gap-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-1 min-w-0">
+                      <span
+                        className="text-[10px] font-mono uppercase text-primary truncate font-bold"
+                        title={b.bank_name}
+                      >
+                        {b.bank_name}
+                      </span>
+                      <span className="text-[9px] font-mono text-slate-400 tabular-nums shrink-0">
+                        +{b.inflows_ves.toFixed(0)} / -{b.outflows_ves.toFixed(0)}
+                      </span>
+                    </div>
+
+                    <div className="text-xs sm:text-sm font-mono font-bold text-white tabular-nums truncate">
+                      Bs.{" "}
+                      {b.theoretical_ves.toLocaleString("es-VE", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </div>
+
+                    <div className="pt-1 border-t border-[#1e2430]/80 flex items-center justify-between gap-1.5">
+                      <label
+                        htmlFor={inputId}
+                        className="text-[9px] font-mono uppercase text-slate-400 shrink-0"
+                      >
+                        Inicial:
+                      </label>
+                      <BankAmountInput
+                        id={inputId}
+                        value={b.initial_ves}
+                        onChange={(val) => handleUpdateBankInitial(b.bank_name, val)}
+                        onCommit={(val) => handleCommitBankInitial(b.bank_name, val)}
+                        ariaLabel={`Saldo inicial en ${b.bank_name} (VES)`}
+                        className="w-full max-w-[125px] px-2 py-0.5 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-[11px] font-mono text-primary tabular-nums"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
           {/* Card 2: Saldo USDT */}
-          <div className="lg:col-span-3 p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col justify-between gap-4">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+          <div className="col-span-2 lg:col-span-3 p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0 flex flex-col justify-between gap-2.5 sm:gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 min-w-0">
+              <div className="min-w-0">
+                <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
                   Saldo USDT
                 </div>
-                <div className="mt-1 text-2xl font-mono font-bold text-tertiary tabular-nums">
-                  {(liveBalance?.theoretical_usdt ?? 0).toFixed(2)} USDT
+                <div className="mt-0.5 sm:mt-1 text-base sm:text-2xl font-mono font-bold text-tertiary tabular-nums truncate">
+                  {displayedTheoreticalUsdt.toFixed(2)} USDT
                 </div>
               </div>
-              <div className="text-right">
+              <div className="sm:text-right shrink-0">
                 <label className="block text-[9px] font-mono uppercase text-slate-400">
                   Inicial USDT
                 </label>
                 <BankAmountInput
                   value={initialUsdt}
                   onChange={setInitialUsdt}
+                  onCommit={setCommittedUsdt}
                   ariaLabel="Saldo Inicial USDT"
-                  className="w-24 mt-0.5 px-2.5 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-tertiary tabular-nums"
+                  className="w-full sm:w-24 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-tertiary tabular-nums"
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 text-xs font-mono tabular-nums">
-              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430]">
-                <div className="text-[9px] text-slate-400 uppercase">Compras P2P</div>
-                <div className="text-tertiary font-semibold mt-0.5">
+            <div className="grid grid-cols-2 gap-1.5 sm:gap-2 text-[11px] sm:text-xs font-mono tabular-nums">
+              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
+                <div className="text-[9px] text-slate-400 uppercase truncate">Compras</div>
+                <div className="text-tertiary font-semibold mt-0.5 truncate">
                   +{(liveBalance?.inflow_usdt ?? 0).toFixed(2)}
                 </div>
               </div>
-              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430]">
-                <div className="text-[9px] text-slate-400 uppercase">Ventas P2P</div>
-                <div className="text-primary font-semibold mt-0.5">
+              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
+                <div className="text-[9px] text-slate-400 uppercase truncate">Ventas</div>
+                <div className="text-primary font-semibold mt-0.5 truncate">
                   -{(liveBalance?.outflow_usdt ?? 0).toFixed(2)}
                 </div>
               </div>
@@ -536,7 +781,7 @@ export default function AccountingPage() {
           </div>
 
           {/* Card 3: Conciliación */}
-          <div className="lg:col-span-4 p-4 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col justify-between gap-3">
+          <div className="col-span-2 lg:col-span-4 p-3.5 sm:p-4 rounded-xl bg-surface-container border border-[#1e2430] min-w-0 flex flex-col justify-between gap-3">
             <div className="flex items-center gap-2">
               <span className="material-symbols-outlined text-[18px] text-secondary">
                 document_scanner
@@ -547,7 +792,7 @@ export default function AccountingPage() {
             </div>
 
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Sube capturas bancarias o registra pagos manualmente.
+              Sube capturas, estados de cuenta bancarios (.pdf/.xlsx/.csv) o registra pagos manuales.
             </p>
 
             <input
@@ -558,12 +803,20 @@ export default function AccountingPage() {
               className="hidden"
             />
 
-            <div className="flex items-center gap-2 flex-wrap">
+            <input
+              ref={statementInputRef}
+              type="file"
+              accept=".pdf,.xlsx,.xls,.csv,.txt"
+              onChange={handleUploadStatement}
+              className="hidden"
+            />
+
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => voucherInputRef.current?.click()}
                 disabled={uploadingOcr || periodClosed}
-                className="flex-1 px-3 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px]">
                   add_photo_alternate
@@ -573,10 +826,22 @@ export default function AccountingPage() {
 
               <button
                 type="button"
+                onClick={() => statementInputRef.current?.click()}
+                disabled={uploadingStatement || periodClosed}
+                className="px-3 py-2 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary text-xs font-bold hover:bg-secondary/25 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  account_balance
+                </span>
+                <span>{uploadingStatement ? "Analizando..." : "Estado bancario"}</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setShowManualModal(true)}
                 disabled={periodClosed}
                 title="Atajo: Alt+N"
-                className="px-3 py-2 rounded-lg bg-surface-container-high border border-slate-700 hover:border-primary-container/60 text-xs font-mono text-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-surface-container-high border border-slate-700 hover:border-primary-container/60 text-xs font-mono text-white flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px] text-primary">
                   keyboard
@@ -588,7 +853,7 @@ export default function AccountingPage() {
                 type="button"
                 onClick={handleAutoReconcile}
                 disabled={reconciling || periodClosed}
-                className="px-3 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px] text-secondary">
                   auto_fix_high
@@ -690,7 +955,11 @@ export default function AccountingPage() {
             </div>
           </div>
 
-          {activeTab === "JOURNAL" && (
+          <div
+            role="tabpanel"
+            aria-hidden={activeTab !== "JOURNAL"}
+            className={`spa-tab-panel ${activeTab === "JOURNAL" ? "" : "inactive"}`}
+          >
             <div className="overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 z-10 bg-surface-container">
@@ -755,9 +1024,13 @@ export default function AccountingPage() {
                 </tbody>
               </table>
             </div>
-          )}
+          </div>
 
-          {activeTab === "LEDGER" && (
+          <div
+            role="tabpanel"
+            aria-hidden={activeTab !== "LEDGER"}
+            className={`spa-tab-panel ${activeTab === "LEDGER" ? "" : "inactive"}`}
+          >
             <div className="overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 z-10 bg-surface-container">
@@ -811,10 +1084,14 @@ export default function AccountingPage() {
                 </tbody>
               </table>
             </div>
-          )}
+          </div>
 
-          {activeTab === "FISCAL_6" && (
-            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+          <div
+            role="tabpanel"
+            aria-hidden={activeTab !== "FISCAL_6"}
+            className={`spa-tab-panel ${activeTab === "FISCAL_6" ? "" : "inactive"}`}
+          >
+            <div className="p-3.5 sm:p-5 grid grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-3.5">
               {[
                 {
                   title: "1. Saldo Inicial Declarado (USDT)",
@@ -855,13 +1132,13 @@ export default function AccountingPage() {
               ].map((piece) => (
                 <div
                   key={piece.title}
-                  className="p-4 rounded-xl bg-surface-container border border-[#1e2430]"
+                  className="p-3 sm:p-4 rounded-xl bg-surface-container border border-[#1e2430] min-w-0"
                 >
-                  <div className="text-[10px] font-mono uppercase text-slate-400">
+                  <div className="text-[10px] font-mono uppercase text-slate-400 truncate">
                     {piece.title}
                   </div>
                   <div
-                    className={`mt-2 text-lg font-mono font-bold tabular-nums ${piece.tone}`}
+                    className={`mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold tabular-nums truncate ${piece.tone}`}
                   >
                     {piece.unit === "VES"
                       ? `Bs. ${piece.val.toLocaleString("es-VE", {
@@ -876,7 +1153,7 @@ export default function AccountingPage() {
                 </div>
               ))}
             </div>
-          )}
+          </div>
         </section>
 
         {/* Modal de Conciliación Manual Ultrarrápida (<5s sin mouse • Atajo Alt+N) */}
@@ -957,11 +1234,22 @@ export default function AccountingPage() {
                     onChange={(e) => setManualBank(e.target.value)}
                     className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
                   >
-                    <option value="Banesco">Banesco</option>
-                    <option value="Banco de Venezuela">BDV</option>
-                    <option value="Mercantil">Mercantil</option>
-                    <option value="Provincial">Provincial</option>
-                    <option value="BNC">BNC</option>
+                    <optgroup label="★ Mis bancos">
+                      {userBanks.map((b) => (
+                        <option key={`my-${b}`} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Otros bancos">
+                      {VENEZUELAN_BANK_CATALOG.filter((b) => !userBanks.includes(b)).map(
+                        (b) => (
+                          <option key={`other-${b}`} value={b}>
+                            {b}
+                          </option>
+                        )
+                      )}
+                    </optgroup>
                   </select>
                 </div>
                 <div>
@@ -1122,6 +1410,32 @@ export default function AccountingPage() {
             </div>
           </div>
         )}
+
+        <StatementImportModal
+          isOpen={Boolean(statementPreview)}
+          preview={statementPreview}
+          sourceFile={statementSourceFile}
+          onClose={() => {
+            setStatementPreview(null);
+            setStatementSourceFile(null);
+          }}
+          onPreviewUpdated={(updated) => setStatementPreview(updated)}
+          onCommitted={async (res: StatementCommitResponse) => {
+            setStatementPreview(null);
+            setStatementSourceFile(null);
+            setFeedback({
+              type: "success",
+              text: `Estado de cuenta (${res.bank_name}) importado: ${res.created_vouchers} comprobante(s), ${res.matched_orders} conciliado(s) con Binance, ${res.bank_fees_recorded} comisión(es) y ${res.journal_entries_created} asiento(s) en Libro Diario.`,
+            });
+            await loadAccountingData();
+          }}
+          onError={(msg: string) =>
+            setFeedback({
+              type: "error",
+              text: msg,
+            })
+          }
+        />
       </div>
     </AppShell>
   );

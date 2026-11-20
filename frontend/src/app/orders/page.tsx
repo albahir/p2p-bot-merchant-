@@ -6,8 +6,10 @@ import { AppShell } from "@/components/app-shell";
 import {
   FiscalSummary,
   OrderItem,
+  OrderListResponse,
   User,
   downloadOrdersExport,
+  getCachedApiResponse,
   getCurrentUser,
   getFiscalSummary,
   getOrders,
@@ -28,10 +30,19 @@ const SYNC_WINDOWS = [
 
 export default function OrdersPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const initialUser = typeof window !== "undefined" ? getCurrentUser() : null;
+  const initialOrdersRes =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<OrderListResponse>("/api/orders?page=1&page_size=20")
+      : null;
+  const initialSummary =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<FiscalSummary>("/api/fiscal/summary?cost_method=FIFO")
+      : null;
 
-  const [user, setUser] = useState<User | null>(null);
-  const [orders, setOrders] = useState<OrderItem[]>([]);
-  const [totalOrders, setTotalOrders] = useState<number>(0);
+  const [user, setUser] = useState<User | null>(initialUser);
+  const [orders, setOrders] = useState<OrderItem[]>(initialOrdersRes?.items || []);
+  const [totalOrders, setTotalOrders] = useState<number>(initialOrdersRes?.total || 0);
   const [page, setPage] = useState<number>(1);
   const pageSize = 20;
 
@@ -40,8 +51,8 @@ export default function OrdersPage() {
   const [costMethod, setCostMethod] = useState<CostMethod>("FIFO");
   const [syncDays, setSyncDays] = useState<number>(30);
 
-  const [fiscalSummary, setFiscalSummary] = useState<FiscalSummary | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [fiscalSummary, setFiscalSummary] = useState<FiscalSummary | null>(initialSummary);
+  const [loading, setLoading] = useState<boolean>(!initialOrdersRes);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{
@@ -276,17 +287,17 @@ export default function OrdersPage() {
           </div>
         )}
 
-        {/* 4 KPIs */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Ganancia neta ({costMethod === "AVERAGE" ? "Promedio" : "PEPS"})</span>
-              <span className="material-symbols-outlined text-[16px] text-tertiary">
+        {/* 4 KPIs (2 por fila en móvil) */}
+        <section className="grid grid-cols-2 xl:grid-cols-4 gap-2.5 sm:gap-3">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Ganancia neta ({costMethod === "AVERAGE" ? "Promedio" : "PEPS"})</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-tertiary shrink-0">
                 trending_up
               </span>
             </div>
             <div
-              className={`mt-2 text-xl font-mono font-bold tabular-nums ${
+              className={`mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold tabular-nums truncate ${
                 (fiscalSummary?.net_profit_ves ?? 0) >= 0
                   ? "text-tertiary"
                   : "text-error"
@@ -299,26 +310,26 @@ export default function OrdersPage() {
                   })}`
                 : "Bs. 0,00"}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
               ≈ ${(fiscalSummary?.net_profit_usd ?? 0).toFixed(2)} USD BCV
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Volumen</span>
-              <span className="material-symbols-outlined text-[16px] text-secondary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Volumen</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-secondary shrink-0">
                 swap_horiz
               </span>
             </div>
-            <div className="mt-2 text-xl font-mono font-bold text-white tabular-nums">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-white tabular-nums truncate">
               {(fiscalSummary?.volume_operated ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
               })}{" "}
               USDT
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
               Bs.{" "}
               {(fiscalSummary?.volume_operated_ves ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
@@ -328,21 +339,21 @@ export default function OrdersPage() {
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Comisiones</span>
-              <span className="material-symbols-outlined text-[16px] text-primary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Comisiones</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
                 percent
               </span>
             </div>
-            <div className="mt-2 text-xl font-mono font-bold text-primary tabular-nums">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-primary tabular-nums truncate">
               {(fiscalSummary?.total_fees ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 4,
               })}{" "}
               USDT
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
               Bs.{" "}
               {(fiscalSummary?.total_fees_ves ?? 0).toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
@@ -351,14 +362,14 @@ export default function OrdersPage() {
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Precio promedio</span>
-              <span className="material-symbols-outlined text-[16px] text-slate-300">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Precio promedio</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-slate-300 shrink-0">
                 analytics
               </span>
             </div>
-            <div className="mt-2 text-xl font-mono font-bold text-white tabular-nums">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-white tabular-nums truncate">
               {avgUnitPrice > 0 ? `Bs. ${avgUnitPrice.toFixed(2)}` : "Bs. --"}
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">

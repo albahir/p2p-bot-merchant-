@@ -37,6 +37,10 @@ class Settings(BaseSettings):
 
     # Telegram
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Token de bot Telegram")
+    TELEGRAM_BOT_USERNAME: str = Field(
+        default="",
+        description="Nombre de usuario público (@) del bot en Telegram para enlaces t.me/",
+    )
     TELEGRAM_ALERT_CHAT_ID: str = Field(default="", description="Chat ID para alertas")
     TELEGRAM_ALLOWED_USER_IDS: str = Field(
         default="",
@@ -56,6 +60,14 @@ class Settings(BaseSettings):
         default="https://api.telegram.org",
         description="URL base de la API de Telegram o reverse proxy"
     )
+
+    # Correo Electrónico (SMTP para verificación de registro)
+    SMTP_HOST: str = Field(default="smtp.gmail.com", description="Servidor SMTP saliente")
+    SMTP_PORT: int = Field(default=587, description="Puerto SMTP (587 STARTTLS o 465 SSL)")
+    SMTP_USER: str = Field(default="", description="Usuario o correo remitente SMTP")
+    SMTP_PASSWORD: str = Field(default="", description="Contraseña o App Password SMTP")
+    SMTP_FROM_EMAIL: str = Field(default="", description="Remitente visible (si está vacío usa SMTP_USER)")
+    SMTP_USE_TLS: bool = Field(default=True, description="Activar cifrado STARTTLS")
 
     # Asistente de IA (LLM) para consultas en lenguaje natural
     AI_PROVIDER: str = Field(default="gemini", description="Proveedor de IA: gemini o openai")

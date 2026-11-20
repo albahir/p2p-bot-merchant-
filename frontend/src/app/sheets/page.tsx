@@ -9,6 +9,7 @@ import {
   User,
   completeGoogleOAuth,
   disconnectGoogleOAuth,
+  getCachedSheetsSettings,
   getCurrentUser,
   getSheetsSettings,
   saveGoogleOAuthClientConfig,
@@ -18,17 +19,22 @@ import {
 } from "@/lib/api";
 
 export default function SheetsSyncPage() {
-  const [user, setUser] = useState<User | null>(null);
-  const [config, setConfig] = useState<GoogleSheetsConfigResponse | null>(null);
-  const [sheetInput, setSheetInput] = useState<string>("");
-  const [authMode, setAuthMode] = useState<"OAUTH2" | "SERVICE_ACCOUNT">("OAUTH2");
+  const initialUser = typeof window !== "undefined" ? getCurrentUser() : null;
+  const initialConfig = typeof window !== "undefined" ? getCachedSheetsSettings() : null;
+
+  const [user, setUser] = useState<User | null>(initialUser);
+  const [config, setConfig] = useState<GoogleSheetsConfigResponse | null>(initialConfig);
+  const [sheetInput, setSheetInput] = useState<string>(initialConfig?.google_sheet_id || initialUser?.google_sheet_id || "");
+  const [authMode, setAuthMode] = useState<"OAUTH2" | "SERVICE_ACCOUNT">(
+    initialConfig?.google_auth_type === "SERVICE_ACCOUNT" ? "SERVICE_ACCOUNT" : "OAUTH2"
+  );
   const [lastSync, setLastSync] = useState<GoogleSheetsSyncResponse | null>(null);
 
   const [showApiForm, setShowApiForm] = useState<boolean>(false);
   const [oauthClientId, setOauthClientId] = useState<string>("");
   const [oauthClientSecret, setOauthClientSecret] = useState<string>("");
 
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(!initialConfig);
   const [saving, setSaving] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [connectingGoogle, setConnectingGoogle] = useState<boolean>(false);
@@ -47,7 +53,14 @@ export default function SheetsSyncPage() {
       return;
     }
 
-    setLoading(true);
+    const cached = getCachedSheetsSettings();
+    if (cached) {
+      setConfig((prev) => prev || cached);
+      setSheetInput((prev) => prev || cached.google_sheet_id || "");
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
       const res = await getSheetsSettings();
       setConfig(res);
@@ -313,52 +326,52 @@ export default function SheetsSyncPage() {
           </div>
         )}
 
-        {/* Resumen compacto */}
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+        {/* Resumen compacto (2 por fila en móvil) */}
+        <section className="grid grid-cols-2 md:grid-cols-3 gap-2.5 sm:gap-3.5">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
               Hoja vinculada
             </div>
             <div
-              className={`mt-1.5 text-base font-mono font-bold flex items-center gap-2 ${
+              className={`mt-1.5 text-sm sm:text-base font-mono font-bold flex items-center gap-2 truncate ${
                 hasSheet ? "text-tertiary" : "text-primary"
               }`}
             >
               <span
-                className={`w-2 h-2 rounded-full ${
+                className={`w-2 h-2 rounded-full shrink-0 ${
                   hasSheet ? "bg-tertiary animate-pulse" : "bg-primary-container"
                 }`}
               />
-              {loading ? "Cargando..." : hasSheet ? "Lista" : "Pendiente"}
+              <span className="truncate">{loading ? "Cargando..." : hasSheet ? "Lista" : "Pendiente"}</span>
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 truncate">
+            <div className="mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
               {config?.google_sheet_id || "Se creará al conectar con Google"}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
               Método de acceso
             </div>
-            <div className="mt-1.5 text-base font-mono font-bold text-white">
+            <div className="mt-1.5 text-sm sm:text-base font-mono font-bold text-white truncate">
               {oauthConnected ? "Cuenta Google" : "Cuenta de servicio"}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 truncate">
+            <div className="mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
               {config?.google_account_email ||
                 (oauthConnected ? "Sesión activa" : config?.service_account_email || "Sin configurar")}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+          <div className="col-span-2 md:col-span-1 p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
               Última sincronización
             </div>
-            <div className="mt-1.5 text-base font-mono font-bold text-secondary tabular-nums">
+            <div className="mt-1.5 text-sm sm:text-base font-mono font-bold text-secondary tabular-nums truncate">
               {lastSync
                 ? `${lastSync.rows_exported} órds / ${lastSync.journal_entries_exported} asientos`
                 : "Sin ejecutar"}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400">
+            <div className="mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
               4 pestañas automáticas
             </div>
           </div>

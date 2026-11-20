@@ -1,5 +1,6 @@
 """Rutas de consulta de Spreads P2P, Matriz de Arbitraje Interbancario y tasas BCV."""
 
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -22,15 +23,33 @@ from src.reporting.bcv_service import BCVService
 
 router = APIRouter(prefix="/api/spreads", tags=["Spreads & Arbitraje"])
 
+_BCV_RATES_CACHE: dict[tuple[int, str], tuple[float, dict[str, object]]] = {}
+_BCV_RATES_CACHE_TTL_SECONDS: float = 60.0
+
 
 def _resolve_bcv_with_db_history(db: Session | None) -> dict[str, object]:
     """Obtiene la tasa BCV desde la tabla histórica `bcv_rate_history` en BD;
     si aún no existe para la Fecha Valor hábil actual, consulta el BCV en vivo y la guarda en BD.
+    Utiliza caché en memoria de 60s aislada por motor de BD y fecha valor VET (UTC-4).
     """
+    vet_today = str(datetime.now(VET_TIMEZONE).date())
+    bind_id = id(db.get_bind()) if (db is not None and isinstance(db, Session)) else 0
+    cache_key = (bind_id, vet_today)
+    now_ts = time.monotonic()
+
+    if bind_id != 0:
+        cached = _BCV_RATES_CACHE.get(cache_key)
+        if cached and (now_ts - cached[0]) < _BCV_RATES_CACHE_TTL_SECONDS:
+            return cached[1]
+
     bcv_service = BCVService()
     if db is not None and isinstance(db, Session):
         history_svc = BCVHistoryService(db_session=db, bcv_live_service=bcv_service)
-        return history_svc.get_or_fetch_current_rates()
+        resolved = history_svc.get_or_fetch_current_rates()
+        usd_check = float(str(resolved.get("usd") or 0.0))
+        if usd_check > 0:
+            _BCV_RATES_CACHE[cache_key] = (now_ts, resolved)
+        return resolved
 
     full_rates = bcv_service.fetch_full_rates()
     usd_val = float(full_rates.get("usd") or bcv_service.get_official_rate() or 0.0)
