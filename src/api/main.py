@@ -106,6 +106,7 @@ def create_app(skip_lifespan: bool = False, settings: Settings | None = None) ->
         allow_credentials=("*" not in origins),
         allow_methods=["*"],
         allow_headers=["*"],
+        max_age=3600,
     )
 
     # Enrutadores

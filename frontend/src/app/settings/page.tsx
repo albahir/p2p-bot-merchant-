@@ -11,6 +11,7 @@ import {
   authorizeTelegramUser,
   getBinanceSettings,
   getBotStatus,
+  getCachedApiResponse,
   getCurrentUser,
   getMyProfile,
   getTelegramSettings,
@@ -27,17 +28,31 @@ import {
 } from "@/lib/api";
 
 export default function SettingsSecurityPage() {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const initialUser = typeof window !== "undefined" ? getCurrentUser() : null;
+  const initialBinance =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<BinanceStatusResponse>("/api/settings/binance")
+      : null;
+  const initialTelegram =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<TelegramStatusResponse>("/api/settings/telegram")
+      : null;
+  const initialBot =
+    typeof window !== "undefined" ? getCachedApiResponse<BotStatus>("/api/bot/status") : null;
+
+  const [currentUser, setCurrentUser] = useState<User | null>(initialUser);
   const [binanceStatus, setBinanceStatus] = useState<BinanceStatusResponse | null>(
-    null
+    initialBinance
   );
   const [telegramStatus, setTelegramStatus] =
-    useState<TelegramStatusResponse | null>(null);
-  const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
+    useState<TelegramStatusResponse | null>(initialTelegram);
+  const [botStatus, setBotStatus] = useState<BotStatus | null>(initialBot);
   const [operators, setOperators] = useState<User[]>([]);
 
   // Formulario Write-Only para llaves Binance (CERO exposición de secretos en DOM)
-  const [keyType, setKeyType] = useState<"Ed25519" | "HMAC">("Ed25519");
+  const [keyType, setKeyType] = useState<"Ed25519" | "HMAC">(
+    initialBinance?.key_type === "HMAC" ? "HMAC" : "Ed25519"
+  );
   const [apiKeyInput, setApiKeyInput] = useState<string>("");
   const [secretKeyInput, setSecretKeyInput] = useState<string>("");
 
@@ -52,6 +67,7 @@ export default function SettingsSecurityPage() {
 
   // Recuperación segura y respaldo de perfil propio
   const [recFullName, setRecFullName] = useState<string>("");
+  const [recTaxId, setRecTaxId] = useState<string>("");
   const [recEmail, setRecEmail] = useState<string>("");
   const [recQuestion, setRecQuestion] = useState<string>("");
   const [recAnswer, setRecAnswer] = useState<string>("");
@@ -90,6 +106,7 @@ export default function SettingsSecurityPage() {
       if (myProfile) {
         setCurrentUser(myProfile);
         setRecFullName(myProfile.full_name || "");
+        setRecTaxId(myProfile.tax_id || "");
         setRecEmail(myProfile.email || "");
       }
 
@@ -214,12 +231,14 @@ export default function SettingsSecurityPage() {
     try {
       const res = await updateRecoveryProfile({
         full_name: recFullName.trim() || undefined,
+        tax_id: recTaxId.trim() || undefined,
         email: recEmail.trim() || undefined,
         security_question: recQuestion.trim() || undefined,
         security_answer: recAnswer.trim() || undefined,
         regenerate_recovery_key: regenerateKey,
       });
       setCurrentUser(res.user);
+      setRecTaxId(res.user.tax_id || recTaxId.trim());
       setRecAnswer("");
       if (res.recovery_key) {
         setNewMasterKey(res.recovery_key);
@@ -436,72 +455,72 @@ export default function SettingsSecurityPage() {
           </div>
         )}
 
-        {/* 4 KPIs */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Firma API</span>
-              <span className="material-symbols-outlined text-[16px] text-tertiary">
+        {/* 4 KPIs (2 por fila en móvil para optimizar espacio entre etiqueta e ícono) */}
+        <section className="grid grid-cols-2 xl:grid-cols-4 gap-2.5 sm:gap-3">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Firma API</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-tertiary shrink-0">
                 enhanced_encryption
               </span>
             </div>
-            <div className="mt-2 text-lg font-mono font-bold text-tertiary">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold text-tertiary truncate">
               {binanceStatus?.key_type || keyType}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
               {binanceStatus?.is_configured ? "Configurada" : "Pendiente"}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Cuota API</span>
-              <span className="material-symbols-outlined text-[16px] text-primary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Cuota API</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
                 speed
               </span>
             </div>
             <div
-              className={`mt-2 text-lg font-mono font-bold tabular-nums ${
+              className={`mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold tabular-nums truncate ${
                 usedWeight >= 5000 ? "text-error" : "text-white"
               }`}
             >
               {usedWeight} / {maxWeight}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400">
-              Límite automático: 5.000
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
+              Límite: 5.000
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Latencia</span>
-              <span className="material-symbols-outlined text-[16px] text-secondary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Latencia</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-secondary shrink-0">
                 schedule
               </span>
             </div>
-            <div className="mt-2 text-lg font-mono font-bold text-secondary tabular-nums">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold text-secondary tabular-nums truncate">
               {binanceStatus ? `${binanceStatus.latency_ms} ms` : "-- ms"}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
               Deriva: {binanceStatus ? `${binanceStatus.clock_drift_ms} ms` : "--"}
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Motor</span>
-              <span className="material-symbols-outlined text-[16px] text-primary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Motor</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
                 security
               </span>
             </div>
             <div
-              className={`mt-2 text-lg font-mono font-bold ${
+              className={`mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold truncate ${
                 isPaused ? "text-error" : "text-tertiary"
               }`}
             >
               {isPaused ? "PAUSADO" : "ACTIVO"}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
               API oficial Binance P2P
             </div>
           </div>
@@ -744,10 +763,19 @@ export default function SettingsSecurityPage() {
                 Recuperación de cuenta
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Correo, pregunta secreta y llave maestra por si olvidas tu contraseña.
+                Cédula o RIF para reportes fiscales, correo, pregunta secreta y llave maestra.
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
+              <span
+                className={`px-2 py-0.5 rounded border ${
+                  currentUser.tax_id
+                    ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
+                    : "bg-surface-container border-[#1e2430] text-slate-400"
+                }`}
+              >
+                {currentUser.tax_id ? `● ${currentUser.tax_id}` : "○ Sin Cédula / RIF"}
+              </span>
               <span
                 className={`px-2 py-0.5 rounded border ${
                   currentUser.email
@@ -804,7 +832,7 @@ export default function SettingsSecurityPage() {
 
           <form
             onSubmit={(e) => handleSaveRecoveryProfile(e, false)}
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"
+            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3"
           >
             <div>
               <label
@@ -822,6 +850,25 @@ export default function SettingsSecurityPage() {
                 onChange={(e) => setRecFullName(e.target.value)}
                 placeholder="Tu nombre u operador"
                 className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="rec-tax-id"
+                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
+              >
+                Cédula o RIF
+              </label>
+              <input
+                id="rec-tax-id"
+                type="text"
+                autoComplete="off"
+                enterKeyHint="next"
+                value={recTaxId}
+                onChange={(e) => setRecTaxId(e.target.value.toUpperCase())}
+                placeholder="V-12345678 o J-12345678-9"
+                className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white placeholder:text-slate-600"
               />
             </div>
 
@@ -883,7 +930,7 @@ export default function SettingsSecurityPage() {
               />
             </div>
 
-            <div className="md:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-2.5 pt-1">
+            <div className="md:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-2.5 pt-1">
               <button
                 type="submit"
                 disabled={savingRecovery}

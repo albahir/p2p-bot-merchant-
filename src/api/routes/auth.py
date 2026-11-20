@@ -83,6 +83,23 @@ def _validate_and_normalize_email(raw_email: str | None) -> str | None:
     return cleaned
 
 
+def _validate_and_normalize_tax_id(raw_tax_id: str | None) -> str | None:
+    """Valida y normaliza una Cédula de Identidad (V-/E-) o RIF venezolano (V-/E-/J-/G-/P-)."""
+    if not raw_tax_id or not raw_tax_id.strip():
+        return None
+    cleaned = raw_tax_id.strip().upper().replace(".", "").replace(" ", "")
+    if re.fullmatch(r"\d{6,9}", cleaned):
+        return f"V-{cleaned}"
+    match = re.fullmatch(r"([VEJGP])-?(\d{6,9})(?:-?(\d))?", cleaned)
+    if not match:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Formato inválido de Cédula o RIF. Usa ej. V-12345678 o J-12345678-9.",
+        )
+    prefix, digits, dv = match.groups()
+    return f"{prefix}-{digits}-{dv}" if dv is not None else f"{prefix}-{digits}"
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(
     req: RegisterRequest,
@@ -124,6 +141,7 @@ def register(
     plain_recovery_key = AuthService.generate_recovery_key()
     recovery_key_hash = AuthService.hash_password(plain_recovery_key)
     clean_full_name = req.full_name.strip() if req.full_name and req.full_name.strip() else None
+    clean_tax_id = _validate_and_normalize_tax_id(req.tax_id)
 
     # Evaluar si el Telegram ID está en la whitelist de administradores o traders
     is_admin = False
@@ -148,6 +166,8 @@ def register(
             existing_tg_user.password_hash = password_hash  # type: ignore[assignment]
             if clean_full_name:
                 existing_tg_user.full_name = clean_full_name  # type: ignore[assignment]
+            if clean_tax_id:
+                existing_tg_user.tax_id = clean_tax_id  # type: ignore[assignment]
             if clean_email:
                 existing_tg_user.email = clean_email  # type: ignore[assignment]
             if clean_question and sec_answer_hash:
@@ -174,6 +194,7 @@ def register(
             telegram_id=tg_id_str,
             is_active=True,
             full_name=clean_full_name,
+            tax_id=clean_tax_id,
             email=clean_email,
             security_question=clean_question,
             security_answer_hash=sec_answer_hash,
@@ -187,11 +208,27 @@ def register(
         db.commit()
         db.refresh(new_user)
 
-    # Notificar al administrador por Telegram si está disponible
+    if req.preferred_banks:
+        import json
+
+        from src.core.spread_monitor import SpreadMonitor
+
+        clean_banks: list[str] = []
+        for raw_b in req.preferred_banks:
+            canon = SpreadMonitor.canonical_user_bank_name(raw_b)
+            if canon and canon not in clean_banks:
+                clean_banks.append(canon)
+        if clean_banks:
+            new_user.preferred_banks_json = json.dumps(clean_banks, ensure_ascii=False)  # type: ignore[assignment]
+            new_user.bank_balances_json = json.dumps({b: 0.0 for b in clean_banks}, ensure_ascii=False)  # type: ignore[assignment]
+            db.commit()
+            db.refresh(new_user)
+
+    # Notificar al administrador por Telegram en segundo plano sin bloquear la respuesta HTTP
     try:
         from src.integrations.telegram_notifier import TelegramNotifier
         notifier = TelegramNotifier()
-        notifier.send_alert(
+        notifier.send_alert_async(
             "👤 *Nuevo Usuario Registrado*\n\n"
             f"• Usuario: `{new_user.username}`\n"
             f"• Rol Asignado: `{new_user.role}`\n"
@@ -587,6 +624,9 @@ def update_recovery_profile(
 
     if req.full_name is not None:
         current_user.full_name = req.full_name.strip() or None  # type: ignore[assignment]
+
+    if req.tax_id is not None:
+        current_user.tax_id = _validate_and_normalize_tax_id(req.tax_id)  # type: ignore[assignment]
 
     if req.email is not None:
         clean_email = _validate_and_normalize_email(req.email)

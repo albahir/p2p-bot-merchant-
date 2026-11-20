@@ -31,3 +31,9 @@
    gestión de secretos, dependencias externas o previo a despliegues en producción (CI/CD / Render),
    es obligatorio ejecutar una auditoría de seguridad preventiva utilizando el skill
    `security-review` (SAST, SCA de dependencias, escaneo de secretos y validación contra código).
+
+10. **Auditoría Contable y Tributaria Venezuela Continua**: Ante cualquier cambio en motores
+    fiscales (FIFO/Promedio), conversión BCV, partida doble, conciliación o exportación de
+    reportes (`Excel`, `PDF`, `CSV`, `Google Sheets`), es obligatorio validar el cumplimiento
+    normativo venezolano (LISLR, BA VEN-NIF N° 12, IGTF, hora VET UTC-4 y formatos SENIAT)
+    utilizando el skill `venezuela-tax-cpa`.

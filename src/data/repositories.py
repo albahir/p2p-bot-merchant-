@@ -351,6 +351,7 @@ class UserRepository:
         telegram_id: str | int | None = None,
         is_active: bool = True,
         full_name: str | None = None,
+        tax_id: str | None = None,
         email: str | None = None,
         security_question: str | None = None,
         security_answer_hash: str | None = None,
@@ -363,6 +364,7 @@ class UserRepository:
             telegram_id=str(telegram_id) if telegram_id is not None else None,
             is_active=is_active,
             full_name=full_name.strip() if full_name else None,
+            tax_id=tax_id.strip().upper() if tax_id else None,
             email=email.strip().lower() if email else None,
             security_question=security_question.strip() if security_question else None,
             security_answer_hash=security_answer_hash,
@@ -379,6 +381,12 @@ class UserRepository:
             user.role = role  # type: ignore[assignment]
             self.db.commit()
             self.db.refresh(user)
+            try:
+                from src.api.deps import invalidate_user_auth_cache
+
+                invalidate_user_auth_cache(user_id)
+            except ImportError:
+                pass
             return user
         return None
 
@@ -388,6 +396,12 @@ class UserRepository:
             user.is_active = is_active  # type: ignore[assignment]
             self.db.commit()
             self.db.refresh(user)
+            try:
+                from src.api.deps import invalidate_user_auth_cache
+
+                invalidate_user_auth_cache(user_id)
+            except ImportError:
+                pass
             return user
         return None
 

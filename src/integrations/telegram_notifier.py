@@ -340,6 +340,27 @@ class TelegramNotifier:
         """Alias para send_alert."""
         return self.send_alert(text=text, chat_id=chat_id, parse_mode=parse_mode, reply_markup=reply_markup)
 
+    def send_alert_async(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        parse_mode: str | None = "Markdown",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        """Despacha send_alert en un hilo daemon en segundo plano para no bloquear peticiones HTTP."""
+        t = threading.Thread(
+            target=self.send_alert,
+            kwargs={
+                "text": text,
+                "chat_id": chat_id,
+                "parse_mode": parse_mode,
+                "reply_markup": reply_markup,
+            },
+            daemon=True,
+        )
+        t.start()
+        return True
+
     def notify_p2p_order_settled(
         self,
         order_number: str,

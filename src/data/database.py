@@ -68,10 +68,13 @@ def init_db() -> None:
         ],
         "app_users": [
             ("full_name", "VARCHAR(120)"),
+            ("tax_id", "VARCHAR(30)"),
             ("email", "VARCHAR(150)"),
             ("google_sheet_id", "VARCHAR(100)"),
             ("google_refresh_token_enc", "TEXT"),
             ("google_auth_type", "VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'"),
+            ("preferred_banks_json", "TEXT"),
+            ("bank_balances_json", "TEXT"),
             ("security_question", "VARCHAR(200)"),
             ("security_answer_hash", "VARCHAR(255)"),
             ("recovery_key_hash", "VARCHAR(255)"),
@@ -125,19 +128,30 @@ def init_db() -> None:
 
 
 _RUNTIME_BOT_PAUSED: bool = False
+_BOT_PAUSED_CACHE: dict[int, tuple[float, bool]] = {}
+_BOT_PAUSED_CACHE_TTL_SECONDS: float = 15.0
 
 
 def get_bot_paused_state(db: Session | None = None) -> bool:
     """Obtiene el estado persistente de pausa operativa compartido entre Telegram, API y Engine."""
     if db is not None:
+        import time
+
         from sqlalchemy.exc import SQLAlchemyError
 
         from src.data.models import SystemState
 
+        bind_id = id(db.get_bind())
+        now_ts = time.monotonic()
+        cached = _BOT_PAUSED_CACHE.get(bind_id)
+        if cached is not None and (now_ts - cached[0]) < _BOT_PAUSED_CACHE_TTL_SECONDS:
+            return cached[1]
+
         try:
             row = db.query(SystemState).filter(SystemState.key == "bot_is_paused").first()
-            if row is not None:
-                return str(row.value).lower() == "true"
+            is_paused = str(row.value).lower() == "true" if row is not None else _RUNTIME_BOT_PAUSED
+            _BOT_PAUSED_CACHE[bind_id] = (now_ts, is_paused)
+            return is_paused
         except SQLAlchemyError:
             pass
     return _RUNTIME_BOT_PAUSED
@@ -145,6 +159,8 @@ def get_bot_paused_state(db: Session | None = None) -> bool:
 
 def set_bot_paused_state(paused: bool, db: Session | None = None) -> None:
     """Persiste el estado de pausa operativa en base de datos y memoria."""
+    import time
+
     global _RUNTIME_BOT_PAUSED
     _RUNTIME_BOT_PAUSED = bool(paused)
     if db is not None:
@@ -152,6 +168,8 @@ def set_bot_paused_state(paused: bool, db: Session | None = None) -> None:
 
         from src.data.models import SystemState
 
+        bind_id = id(db.get_bind())
+        _BOT_PAUSED_CACHE[bind_id] = (time.monotonic(), bool(paused))
         try:
             row = db.query(SystemState).filter(SystemState.key == "bot_is_paused").first()
             val_str = "true" if paused else "false"

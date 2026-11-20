@@ -3,7 +3,7 @@
 import React, { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { registerUser } from "@/lib/api";
+import { VENEZUELAN_BANK_CATALOG, registerUser } from "@/lib/api";
 import { useTheme } from "@/lib/theme-context";
 
 function computePasswordStrength(pw: string): {
@@ -38,9 +38,14 @@ export default function RegisterPage() {
 
   const [username, setUsername] = useState("");
   const [fullName, setFullName] = useState("");
+  const [taxId, setTaxId] = useState("");
   const [email, setEmail] = useState("");
   const [telegramId, setTelegramId] = useState("");
   const [googleSheetId, setGoogleSheetId] = useState("");
+  const [preferredBanks, setPreferredBanks] = useState<string[]>([
+    "Banco de Venezuela",
+    "Mercantil",
+  ]);
   const [selectedQuestionPreset, setSelectedQuestionPreset] = useState(
     PRESET_SECURITY_QUESTIONS[0]
   );
@@ -107,6 +112,16 @@ export default function RegisterPage() {
       setError("El ID de Telegram debe contener únicamente dígitos numéricos.");
       return;
     }
+    const normalizedTaxInput = taxId.trim().toUpperCase();
+    if (
+      normalizedTaxInput &&
+      !/^(?:[VEJGP]-?\d{6,9}(?:-?\d)?|\d{6,9})$/.test(normalizedTaxInput)
+    ) {
+      setError(
+        "Cédula o RIF inválido. Usa formato V-12345678, J-12345678-9 o solo dígitos (ej. 19456789)."
+      );
+      return;
+    }
 
     setLoading(true);
     try {
@@ -114,9 +129,11 @@ export default function RegisterPage() {
         username: username.trim(),
         password,
         full_name: fullName.trim(),
+        tax_id: taxId.trim() || undefined,
         email: email.trim().toLowerCase(),
         telegram_id: telegramId.trim() || undefined,
         google_sheet_id: googleSheetId.trim() || undefined,
+        preferred_banks: preferredBanks,
         security_question: effectiveSecurityQuestion,
         security_answer: securityAnswer.trim(),
       });
@@ -415,6 +432,34 @@ export default function RegisterPage() {
               </div>
             </div>
 
+            {/* Cédula o RIF (Opcional para reportes SENIAT) */}
+            <div>
+              <label
+                htmlFor="reg-tax-id"
+                className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
+              >
+                Cédula o RIF (Opcional — Reportes SENIAT)
+              </label>
+              <div className="relative">
+                <span className="material-symbols-outlined text-[18px] text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" aria-hidden="true">
+                  id_card
+                </span>
+                <input
+                  id="reg-tax-id"
+                  type="text"
+                  autoComplete="off"
+                  enterKeyHint="next"
+                  value={taxId}
+                  onChange={(e) => setTaxId(e.target.value.toUpperCase())}
+                  placeholder="ej. V-19456789, 19456789 o J-40123456-7"
+                  className="w-full pl-10 pr-3 py-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm text-white font-mono placeholder:text-slate-600"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Acepta Cédula de identidad (persona natural) o RIF (firma personal / jurídica).
+              </p>
+            </div>
+
             {/* Bloque 2: Pregunta y Respuesta Secreta */}
             <div className="p-4 rounded-xl bg-surface-container border border-[#1e2430] space-y-3">
               <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold uppercase tracking-wider text-primary">
@@ -566,6 +611,45 @@ export default function RegisterPage() {
                     }`}
                   />
                 ))}
+              </div>
+            </div>
+
+            {/* Bancos con los que opera el usuario */}
+            <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-semibold">
+                  ¿Con qué bancos trabajas? ({preferredBanks.length})
+                </span>
+                <span className="text-[10px] font-mono text-primary">
+                  Adapta tus saldos y spreads recomendados
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {VENEZUELAN_BANK_CATALOG.map((bankOpt) => {
+                  const active = preferredBanks.includes(bankOpt);
+                  return (
+                    <button
+                      key={bankOpt}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() =>
+                        setPreferredBanks((prev) =>
+                          prev.includes(bankOpt)
+                            ? prev.filter((b) => b !== bankOpt)
+                            : [...prev, bankOpt]
+                        )
+                      }
+                      className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-colors flex items-center gap-1 cursor-pointer ${
+                        active
+                          ? "bg-primary-container text-on-primary font-bold"
+                          : "bg-surface-container-low text-slate-400 hover:text-white border border-[#1e2430]"
+                      }`}
+                    >
+                      <span>{active ? "✓" : "+"}</span>
+                      <span>{bankOpt}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 

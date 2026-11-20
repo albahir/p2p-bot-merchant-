@@ -102,3 +102,24 @@ class TelegramStatusResponse(BaseModel):
     message: str
 
 
+class UpdateUserBanksRequest(BaseModel):
+    """Solicitud para registrar o actualizar los bancos y saldos iniciales por banco del operador."""
+    preferred_banks: list[str] = Field(
+        default_factory=list,
+        description="Lista de bancos venezolanos con los que trabaja el usuario",
+    )
+    bank_initial_balances: dict[str, float] = Field(
+        default_factory=dict,
+        description="Saldos iniciales en VES por cada banco del usuario",
+    )
+
+
+class UserBanksConfigResponse(BaseModel):
+    """Configuración persistida de bancos preferidos y saldos iniciales del usuario."""
+    preferred_banks: list[str] = Field(default_factory=list)
+    bank_initial_balances: dict[str, float] = Field(default_factory=dict)
+    total_initial_ves: float = 0.0
+    message: str = ""
+
+
+

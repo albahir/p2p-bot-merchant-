@@ -12,7 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import Settings
-from src.api.deps import get_db, get_settings, require_authenticated, require_trader
+from src.api.deps import (
+    get_db,
+    get_settings,
+    invalidate_user_auth_cache,
+    require_authenticated,
+    require_trader,
+)
 from src.api.schemas.settings import (
     BinanceStatusResponse,
     GoogleOAuthCallbackRequest,
@@ -23,6 +29,8 @@ from src.api.schemas.settings import (
     SaveBinanceKeysRequest,
     TelegramStatusResponse,
     UpdateGoogleSheetsConfigRequest,
+    UpdateUserBanksRequest,
+    UserBanksConfigResponse,
     VerifyBinanceResponse,
 )
 from src.data.models import User
@@ -435,6 +443,7 @@ def update_user_sheets_config(
     current_user.google_auth_type = payload.google_auth_type  # type: ignore[assignment]
     db.commit()
     db.refresh(current_user)
+    invalidate_user_auth_cache(int(current_user.id))
     return _build_sheets_config_response(
         current_user,
         settings,
@@ -721,5 +730,105 @@ def send_telegram_test_alert(
         "success": True,
         "message": f"Alerta de prueba enviada exitosamente al Chat ID {target_chat}.",
     }
+
+
+def _normalize_user_banks_payload(
+    preferred_banks: list[str] | None,
+    bank_initial_balances: dict[str, float] | None,
+) -> tuple[list[str], dict[str, float]]:
+    """Normaliza y deduplica bancos y saldos iniciales por banco del perfil del operador."""
+    from src.core.spread_monitor import SpreadMonitor
+
+    clean_prefs: list[str] = []
+    seen: set[str] = set()
+    for raw_b in preferred_banks or []:
+        canon = SpreadMonitor.canonical_user_bank_name(raw_b)
+        if canon and canon not in seen:
+            seen.add(canon)
+            clean_prefs.append(canon)
+
+    clean_bals: dict[str, float] = {}
+    for raw_b, raw_val in (bank_initial_balances or {}).items():
+        canon = SpreadMonitor.canonical_user_bank_name(raw_b)
+        if not canon:
+            continue
+        try:
+            num_val = max(0.0, round(float(raw_val or 0.0), 2))
+        except (ValueError, TypeError):
+            num_val = 0.0
+        clean_bals[canon] = round(clean_bals.get(canon, 0.0) + num_val, 2)
+        if canon not in seen:
+            seen.add(canon)
+            clean_prefs.append(canon)
+
+    for b_name in clean_prefs:
+        if b_name not in clean_bals:
+            clean_bals[b_name] = 0.0
+
+    return clean_prefs, clean_bals
+
+
+@router.get("/banks", response_model=UserBanksConfigResponse)
+def get_user_banks_settings(
+    current_user: Annotated[User, Depends(require_authenticated)],
+) -> UserBanksConfigResponse:
+    """Obtiene los bancos con los que opera el usuario y sus saldos iniciales registrados."""
+    prefs, bals = _normalize_user_banks_payload(
+        current_user.preferred_banks,
+        current_user.bank_initial_balances,
+    )
+    total_ves = round(sum(bals.get(b, 0.0) for b in prefs), 2)
+    return UserBanksConfigResponse(
+        preferred_banks=prefs,
+        bank_initial_balances=bals,
+        total_initial_ves=total_ves,
+        message=(
+            f"Perfil bancario configurado con {len(prefs)} banco(s)."
+            if prefs
+            else "Aún no has seleccionado los bancos con los que trabajas."
+        ),
+    )
+
+
+@router.post("/banks", response_model=UserBanksConfigResponse)
+def save_user_banks_settings(
+    req: UpdateUserBanksRequest,
+    current_user: Annotated[User, Depends(require_authenticated)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserBanksConfigResponse:
+    """Registra o actualiza los bancos con los que trabaja el operador y el saldo inicial VES por banco."""
+    from src.core.spread_monitor import SpreadMonitor
+
+    prefs, bals = _normalize_user_banks_payload(
+        req.preferred_banks,
+        req.bank_initial_balances,
+    )
+    if req.preferred_banks:
+        explicit_set = {
+            canon
+            for raw in req.preferred_banks
+            if (canon := SpreadMonitor.canonical_user_bank_name(raw))
+        }
+        if explicit_set:
+            prefs = [b for b in prefs if b in explicit_set]
+            bals = {b: bals.get(b, 0.0) for b in prefs}
+
+    current_user.preferred_banks_json = json.dumps(prefs, ensure_ascii=False)  # type: ignore[assignment]
+    current_user.bank_balances_json = json.dumps(bals, ensure_ascii=False)  # type: ignore[assignment]
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    uid = int(current_user.id) if current_user.id is not None else None
+    invalidate_user_auth_cache(uid)
+
+    total_ves = round(sum(bals.values()), 2)
+    return UserBanksConfigResponse(
+        preferred_banks=prefs,
+        bank_initial_balances=bals,
+        total_initial_ves=total_ves,
+        message=f"Bancos y saldos actualizados ({len(prefs)} banco(s) • Total inicial: Bs. {total_ves:,.2f}).",
+    )
+
 
 

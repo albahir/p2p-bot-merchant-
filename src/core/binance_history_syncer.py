@@ -7,8 +7,8 @@ idempotente en la base de datos y generar reportes exportables en CSV.
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any, cast
 
 import httpx
 import pandas as pd
@@ -95,25 +95,41 @@ class BinanceHistorySyncer:
         )
 
     @staticmethod
+    def _to_vet_str(dt: datetime | None) -> str:
+        """Convierte un datetime UTC/naive a Hora Legal de Venezuela (VET, UTC-4)."""
+        if not dt:
+            return ""
+        vet_tz = timezone(timedelta(hours=-4))
+        aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+        return aware.astimezone(vet_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
     def generate_orders_df(orders: list[Order]) -> pd.DataFrame:
-        """Construye un DataFrame normalizado a partir de la lista de órdenes."""
-        rows = [
-            {
-                "Número de Orden": o.order_number,
-                "Tipo": o.trade_type,
-                "Estado": o.order_status,
-                "Criptoactivo": o.asset,
-                "Cantidad Cripto": o.crypto_amount,
-                "Moneda Fiat": o.fiat,
-                "Monto Fiat": o.fiat_amount,
-                "Precio Unitario": o.unit_price,
-                "Comisión Cripto": o.fee_crypto,
-                "Comisión Fiat": o.fee_fiat,
-                "Contraparte": o.counterparty_name,
-                "Fecha y Hora (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "",
-            }
-            for o in orders
-        ]
+        """Construye un DataFrame normalizado en hora VET (UTC-4) y referencia oficial BCV."""
+        rows = []
+        for o in orders:
+            bcv = float(getattr(o, "bcv_rate", 0.0) or 0.0)
+            fiat_amt = float(getattr(o, "fiat_amount", 0.0) or 0.0)
+            usd_bcv = round(fiat_amt / bcv, 2) if bcv > 0 else 0.0
+            rows.append(
+                {
+                    "Número de Orden": str(o.order_number),
+                    "Tipo": o.trade_type,
+                    "Estado": o.order_status,
+                    "Criptoactivo": o.asset,
+                    "Cantidad Cripto": o.crypto_amount,
+                    "Moneda Fiat": o.fiat,
+                    "Monto Fiat": fiat_amt,
+                    "Precio Unitario": o.unit_price,
+                    "Comisión Cripto": o.fee_crypto,
+                    "Comisión Fiat": o.fee_fiat,
+                    "Tasa BCV (VES/USD)": round(bcv, 4) if bcv > 0 else 0.0,
+                    "Equivalente USD (BCV)": usd_bcv,
+                    "Contraparte": o.counterparty_name,
+                    "Fecha y Hora (VET)": BinanceHistorySyncer._to_vet_str(cast(datetime | None, o.created_at)),
+                    "Fecha y Hora (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "",
+                }
+            )
         return pd.DataFrame(rows)
 
     @classmethod
@@ -140,6 +156,9 @@ class BinanceHistorySyncer:
                 max_len = max(len(str(cell.value or "")) for cell in col)
                 col_letter = col[0].column_letter
                 worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+                if col[0].value == "Número de Orden":
+                    for cell in col[1:]:
+                        cell.number_format = "@"
 
         return output.getvalue()
 

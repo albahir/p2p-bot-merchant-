@@ -154,12 +154,15 @@ class User(Base):
     username = Column(String(50), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(120), nullable=True)  # Nombre completo o razón comercial del operador
+    tax_id = Column(String(30), nullable=True)  # Cédula de Identidad o RIF venezolano (V-/E-/J-/G-/P-)
     email = Column(String(150), unique=True, index=True, nullable=True)  # Correo de recuperación y contacto
     telegram_id = Column(String(50), unique=True, index=True, nullable=True)
     role = Column(String(20), default="INVITADO", nullable=False)  # ADMIN, TRADER, INVITADO
     google_sheet_id = Column(String(100), nullable=True)  # ID de la hoja personal en Google Sheets
     google_refresh_token_enc = Column(Text, nullable=True)  # Refresh Token OAuth2 cifrado con AES-256-GCM
     google_auth_type = Column(String(30), default="SERVICE_ACCOUNT", nullable=False)  # SERVICE_ACCOUNT | OAUTH2
+    preferred_banks_json = Column(Text, nullable=True)  # Lista JSON de bancos con los que opera el usuario
+    bank_balances_json = Column(Text, nullable=True)  # Mapa JSON {banco: saldo_inicial_ves} del operador
     security_question = Column(String(200), nullable=True)  # Pregunta secreta de recuperación de perfil
     security_answer_hash = Column(String(255), nullable=True)  # Hash PBKDF2-HMAC-SHA256 de la respuesta secreta
     recovery_key_hash = Column(String(255), nullable=True)  # Hash PBKDF2 de Llave Maestra de respaldo (single-use)
@@ -175,6 +178,45 @@ class User(Base):
     @property
     def has_recovery_key(self) -> bool:
         return bool(self.recovery_key_hash)
+
+    @property
+    def preferred_banks(self) -> list[str]:
+        import json
+
+        raw = str(self.preferred_banks_json or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(b).strip() for b in parsed if str(b).strip()]
+        except (ValueError, TypeError):
+            pass
+        return []
+
+    @property
+    def bank_initial_balances(self) -> dict[str, float]:
+        import json
+
+        raw = str(self.bank_balances_json or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                out: dict[str, float] = {}
+                for k, v in parsed.items():
+                    key_str = str(k).strip()
+                    if not key_str:
+                        continue
+                    try:
+                        out[key_str] = round(float(v), 2)
+                    except (ValueError, TypeError):
+                        continue
+                return out
+        except (ValueError, TypeError):
+            pass
+        return {}
 
 
 class BCVRateHistory(Base):

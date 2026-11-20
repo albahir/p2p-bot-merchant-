@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from config.settings import Settings
-from src.api.deps import get_db, get_settings, require_admin
+from src.api.deps import get_db, get_settings, invalidate_user_auth_cache, require_admin
 from src.api.schemas.auth import (
     AuthorizeTelegramRequest,
     RoleUpdateRequest,
@@ -174,6 +174,7 @@ def update_user_sheet(
     user.google_sheet_id = _extract_sheet_id(req.google_sheet_id)  # type: ignore[assignment]
     db.commit()
     db.refresh(user)
+    invalidate_user_auth_cache(user_id)
     return _to_public_response(user, settings, db=db)
 
 
