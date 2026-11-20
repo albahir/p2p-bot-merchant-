@@ -328,9 +328,11 @@ def recover_password(
     expires_at = time.time() + 900  # 15 minutos
 
     sent_to_telegram = False
+    telegram_error: str | None = None
     if user.telegram_id:
         try:
             from src.integrations.telegram_notifier import TelegramNotifier
+
             notifier = TelegramNotifier()
             sent_to_telegram = bool(
                 notifier.send_alert(
@@ -339,10 +341,14 @@ def recover_password(
                     f"👉 `{otp}`\n\n"
                     "Válido por 15 minutos. Si no solicitaste este código, ignora este mensaje.",
                     chat_id=str(user.telegram_id),
+                    max_retries=1,
+                    timeout_override=4.0,
                 )
             )
-        except (RuntimeError, ValueError, OSError, TypeError):
+            telegram_error = notifier.last_error
+        except (RuntimeError, ValueError, OSError, TypeError) as err:
             sent_to_telegram = False
+            telegram_error = str(err)
 
     if sent_to_telegram:
         _RECOVERY_CODES[str(user.username).lower()] = {
@@ -351,11 +357,30 @@ def recover_password(
             "user_id": user.id,
             "attempts": 0,
         }
+        return {
+            "success": True,
+            "message": "Código OTP de 6 dígitos enviado exitosamente a tu Telegram vinculado.",
+            "has_telegram": True,
+        }
+
+    if user.telegram_id:
+        return {
+            "success": False,
+            "has_telegram": False,
+            "telegram_unreachable": True,
+            "message": (
+                "No se pudo entregar el código OTP por Telegram porque api.telegram.org no respondió a tiempo "
+                "(posible bloqueo de ISP o sin conexión a Telegram). "
+                "Usa tu Pregunta Secreta o tu Llave Maestra de Respaldo aquí mismo (no requieren conexión con Telegram), "
+                "o activa VPN / TELEGRAM_PROXY_URL."
+            ),
+            "error_detail": telegram_error,
+        }
 
     return {
-        "success": True,
-        "message": "Si la cuenta existe y tiene Telegram vinculado, se ha enviado el código de recuperación.",
-        "has_telegram": sent_to_telegram,
+        "success": False,
+        "message": "Esta cuenta no tiene un Chat ID de Telegram vinculado. Usa tu Pregunta Secreta o tu Llave Maestra.",
+        "has_telegram": False,
     }
 
 

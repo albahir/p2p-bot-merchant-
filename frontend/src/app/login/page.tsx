@@ -142,10 +142,17 @@ export default function LoginPage() {
       } else if (opts.has_telegram) {
         setRecoveryMethod("telegram_otp");
         const res = await recoverPassword(username.trim());
-        setInfoMessage(
-          res.message ||
-            "Se envió un código OTP de 6 dígitos a tu Telegram vinculado."
-        );
+        if (res.success && res.has_telegram) {
+          setInfoMessage(
+            res.message ||
+              "Se envió un código OTP de 6 dígitos a tu Telegram vinculado."
+          );
+        } else {
+          setError(
+            res.message ||
+              "No se pudo conectar con Telegram (timeout de red). Usa Pregunta Secreta o Llave Maestra."
+          );
+        }
       } else {
         setRecoveryMethod("telegram_otp");
         setInfoMessage(
@@ -167,10 +174,17 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const res = await recoverPassword(username.trim());
-      setInfoMessage(
-        res.message ||
-          "Si el usuario tiene Telegram vinculado, se envió un código OTP de 6 dígitos."
-      );
+      if (res.success && res.has_telegram) {
+        setInfoMessage(
+          res.message ||
+            "Código OTP de 6 dígitos enviado a tu Telegram vinculado."
+        );
+      } else {
+        setError(
+          res.message ||
+            "No se pudo enviar el código OTP porque api.telegram.org no respondió (timeout / bloqueo de ISP). Usa Pregunta Secreta o Llave Maestra."
+        );
+      }
     } catch (err: any) {
       setError(err.message || "No se pudo enviar el código OTP por Telegram.");
     } finally {

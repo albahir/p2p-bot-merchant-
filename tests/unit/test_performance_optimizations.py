@@ -210,3 +210,52 @@ def test_login_immediately_hydrates_existing_google_sheets_connection():
     finally:
         db.close()
 
+
+def test_recover_password_reports_telegram_timeout_honestly_and_fast() -> None:
+    """
+    Si api.telegram.org sufre timeout (bloqueo de ISP o caída de red), recover_password
+    debe fallar rápido (1 solo intento sin bloquear 26s) y retornar success=False con
+    diagnóstico claro en lugar de un falso positivo.
+    """
+    from typing import Any
+
+    from src.api.routes.auth import recover_password
+    from src.api.schemas.auth import PasswordRecoveryRequest
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(bind=engine)
+    db = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+    try:
+        auth_svc = AuthService(db_session=db)
+        user = auth_svc.ensure_default_admin(
+            default_username="tg_timeout_user", default_password="Password123!"
+        )
+        user.telegram_id = "123456789"  # type: ignore[assignment]
+        db.commit()
+
+        attempts_made = 0
+
+        def fake_send_alert(self: Any, text: str, chat_id: str | None = None, **kwargs: Any) -> bool:
+            nonlocal attempts_made
+            attempts_made += 1
+            assert kwargs.get("max_retries") == 1
+            self.last_error = "Error de conectividad con Telegram (timed out)"
+            return False
+
+        with patch("src.integrations.telegram_notifier.TelegramNotifier.send_alert", fake_send_alert):
+            res = recover_password(
+                req=PasswordRecoveryRequest(username="tg_timeout_user"),
+                db=db,
+            )
+
+        assert attempts_made == 1
+        assert res["success"] is False
+        assert res["has_telegram"] is False
+        assert res.get("telegram_unreachable") is True
+        assert "Pregunta Secreta" in res["message"] or "Llave Maestra" in res["message"]
+    finally:
+        db.close()
+
+

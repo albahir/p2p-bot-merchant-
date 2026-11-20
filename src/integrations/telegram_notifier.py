@@ -94,13 +94,15 @@ class TelegramNotifier:
         self.session_factory = session_factory
         self.last_error: str | None = None
 
-        # Configuración del cliente HTTP persistente con soporte para proxy
+        # Configuración del cliente HTTP persistente con soporte para proxy y forzado IPv4 (evita blackhole IPv6 en Windows)
         client_kwargs: dict[str, Any] = {
-            "timeout": httpx.Timeout(15.0, connect=8.0),
-            "limits": httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0)
+            "timeout": httpx.Timeout(10.0, connect=4.5),
+            "limits": httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30.0),
         }
         if self.proxy_url:
             client_kwargs["proxy"] = self.proxy_url
+        else:
+            client_kwargs["transport"] = httpx.HTTPTransport(local_address="0.0.0.0")
 
         self._client = httpx.Client(**client_kwargs)
 
@@ -252,6 +254,8 @@ class TelegramNotifier:
         chat_id: str | None = None,
         parse_mode: str | None = "Markdown",
         reply_markup: dict[str, Any] | None = None,
+        max_retries: int = 3,
+        timeout_override: float | None = None,
     ) -> bool:
         """Envía una alerta con formato seguro, fallback a texto plano ante error 400 y reintentos ante 429."""
         if not self.bot_token:
@@ -274,10 +278,15 @@ class TelegramNotifier:
         if reply_markup:
             payload["reply_markup"] = reply_markup
 
-        # Intentar hasta 3 veces con intervalos breves si hay problemas en la red
-        for attempt in range(3):
+        total_attempts = max(1, int(max_retries))
+        req_kwargs: dict[str, Any] = {"json": payload}
+        if timeout_override is not None and timeout_override > 0:
+            req_kwargs["timeout"] = httpx.Timeout(timeout_override, connect=min(3.5, timeout_override))
+
+        # Intentar hasta total_attempts veces con intervalos breves si hay problemas en la red
+        for attempt in range(total_attempts):
             try:
-                res = self._client.post(f"{self.base_url}/sendMessage", json=payload)
+                res = self._client.post(f"{self.base_url}/sendMessage", **req_kwargs)
                 if res.status_code == 200:
                     logger.info("TELEGRAM: Notificación enviada con éxito.")
                     self.last_error = None
@@ -287,7 +296,7 @@ class TelegramNotifier:
                 if res.status_code == 400 and payload.get("parse_mode"):
                     logger.warning("TELEGRAM: Error 400 en parseo de entidades. Reintentando como texto plano...")
                     payload.pop("parse_mode", None)
-                    res_fallback = self._client.post(f"{self.base_url}/sendMessage", json=payload)
+                    res_fallback = self._client.post(f"{self.base_url}/sendMessage", **req_kwargs)
                     if res_fallback.status_code == 200:
                         logger.info("TELEGRAM: Notificación entregada con éxito tras fallback a texto plano.")
                         self.last_error = None
@@ -316,11 +325,13 @@ class TelegramNotifier:
                 return False
 
             except (httpx.TimeoutException, httpx.NetworkError) as e:
-                logger.warning(f"TELEGRAM: Fallo de red temporal (intento {attempt + 1}/3): {e}")
-                if attempt < 2:
-                    time.sleep(1.0)
+                logger.warning(
+                    f"TELEGRAM: Fallo de red temporal (intento {attempt + 1}/{total_attempts}): {e}"
+                )
+                if attempt < total_attempts - 1:
+                    time.sleep(0.8)
                     continue
-                err_msg = f"Error de conectividad con Telegram tras 3 intentos ({e})"
+                err_msg = f"Error de conectividad con Telegram tras {total_attempts} intento(s) ({e})"
                 logger.error(f"TELEGRAM: {err_msg}")
                 self.last_error = err_msg
                 return False
