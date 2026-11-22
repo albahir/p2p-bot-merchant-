@@ -3,11 +3,16 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
 function getWsUrl(): string {
-  if (process.env.NEXT_PUBLIC_WS_URL) {
-    return process.env.NEXT_PUBLIC_WS_URL;
+  const configured = process.env.NEXT_PUBLIC_WS_URL?.trim();
+  if (configured) {
+    return configured;
   }
   if (typeof window !== "undefined" && window.location?.hostname) {
     const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const port = window.location.port;
+    if (!port || port === "80" || port === "443") {
+      return `${wsProto}//${window.location.host}/ws/live`;
+    }
     return `${wsProto}//${window.location.hostname}:8000/ws/live`;
   }
   return "ws://127.0.0.1:8000/ws/live";

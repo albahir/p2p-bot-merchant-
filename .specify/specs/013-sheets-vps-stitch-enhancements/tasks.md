@@ -11,9 +11,9 @@
 - [x] **T06**: Ejecutar suite completa de tests (`pytest`), `ruff check .` y `mypy src/` verificando 100% verde.
 
 ### Fase 2: Infraestructura VPS y Whitelist de IP para Binance
-- [ ] **T07**: Crear script de aprovisionamiento en servidor VPS `scripts/deploy_vps.sh` para arranque 24/7 con Docker Compose.
-- [ ] **T08**: Implementar función de detección de IP pública saliente en `src/security/permissions.py` para notificar en Telegram la IP exacta que debe agregarse a la whitelist de Binance.
-- [ ] **T09**: Escribir pruebas unitarias para la detección de IP pública.
+- [x] **T07**: Crear script de aprovisionamiento en servidor VPS `scripts/deploy_vps.sh` para arranque 24/7 con Docker Compose.
+- [x] **T08**: Implementar función de detección de IP pública saliente en `src/security/permissions.py` para notificar en Telegram la IP exacta que debe agregarse a la whitelist de Binance.
+- [x] **T09**: Escribir pruebas unitarias para la detección de IP pública.
 
 ### Fase 3: Integración de Google Stitch (MCP) y Modernización de UI (Terminal P2P)
 - [x] **T10**: Registrar la configuración del servidor MCP de Google Stitch en `C:\Users\jonan\.gemini\config\mcp_config.json`.

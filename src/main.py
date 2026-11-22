@@ -156,11 +156,10 @@ class P2PBotEngine:
         # 3. Auditoría e integridad
         self.audit = AuditLogger(SessionLocal)
 
-        # 4. Verificación de IP en lista blanca
+        # 4. Verificación de IP pública y lista blanca Fail-Closed
         self.validator = StartupPermissionValidator(self.settings, self.audit)
         try:
-            # En entorno local se valida contra 127.0.0.1
-            self.validator.verify_ip_whitelist("127.0.0.1")
+            self.verified_ip, self.public_ip = self.validator.verify_runtime_ip()
         except PermissionError as e:
             logger.critical(str(e))
             sys.exit(1)
@@ -208,16 +207,22 @@ class P2PBotEngine:
         self.audit.log(
             event_type="ENGINE_START",
             key_identifier="SYSTEM",
-            ip_address="127.0.0.1",
+            ip_address=self.verified_ip,
             status="SUCCESS"
         )
         mode_label = "🧪 SANDBOX (Simulación Activa)" if self.use_sandbox else "🔴 PRODUCCIÓN"
         db_label = "🐘 PostgreSQL Persistente" if DATABASE_URL.startswith("postgresql") else "📁 SQLite Local"
+        ip_label = (
+            f"🌐 IP Saliente (Whitelist Binance): `{self.public_ip}`\n"
+            if self.public_ip
+            else f"🌐 IP Host Verificada: `{self.verified_ip}`\n"
+        )
         self.instance_tag = f"[`{socket.gethostname()[:8]}` | pid:{os.getpid()}]"
         self.dispatcher.queue_alert(
             f"🟢 *Bot P2P Merchant iniciado exitosamente* {self.instance_tag}\n"
             f"Modo: {mode_label}\n"
             f"Base de Datos: {db_label}\n"
+            f"{ip_label}"
             f"👥 Operadores blindados activos: `{self.seeded_counts['admins']}` Admin | `{self.seeded_counts['traders']}` Traders\n"
             f"Monitoreo y escucha de comandos activos.",
             reply_markup=self.notifier.get_quick_actions_markup(),
@@ -233,15 +238,16 @@ class P2PBotEngine:
 
     def _start_healthcheck_server(self) -> None:
         """Inicia la API FastAPI embebida en el puerto principal (Render/Koyeb/Docker) y listeners de respaldo."""
+        disable_embedded_api = os.getenv("DISABLE_EMBEDDED_API") == "1"
         ports_to_try: list[int] = []
         env_port = os.getenv("PORT")
         if env_port and env_port.strip().isdigit():
             ports_to_try.append(int(env_port.strip()))
-        for default_port in (8000, 10000):
+        for default_port in ((8001,) if disable_embedded_api else (8000, 10000)):
             if default_port not in ports_to_try:
                 ports_to_try.append(default_port)
 
-        primary_api_started = False
+        primary_api_started = disable_embedded_api
         for port in ports_to_try:
             if not primary_api_started:
                 try:
@@ -380,7 +386,7 @@ class P2PBotEngine:
         self.audit.log(
             event_type="ENGINE_STOP",
             key_identifier="SYSTEM",
-            ip_address="127.0.0.1",
+            ip_address=getattr(self, "verified_ip", "127.0.0.1"),
             status="SUCCESS"
         )
         sys.exit(0)

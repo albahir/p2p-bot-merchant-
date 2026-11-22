@@ -861,6 +861,16 @@
     - **API y Recolector Background ([`src/api/routes/market.py`](file:///c:/p2p-bot-merchant/src/api/routes/market.py), [`src/api/main.py`](file:///c:/p2p-bot-merchant/src/api/main.py))**:
       - Rutas `GET /api/market/candles`, `GET /api/market/analytics` y `POST /api/market/collect` (protegida con cooldown anti-spam de 15s) + bucle periódico cada 120s en `lifespan` (desactivable vía `DISABLE_MARKET_COLLECTOR=1`).
 
+66. **Stack Docker Productivo para Contabo VPS, Proxy Cloudflare y Detección Fail-Closed de IP Pública (SPEC-013 T07–T09 / ADR 066)**:
+    - **Detección de IP Saliente y Hardening Startup ([`src/security/permissions.py`](file:///c:/p2p-bot-merchant/src/security/permissions.py), [`src/main.py`](file:///c:/p2p-bot-merchant/src/main.py), [`tests/unit/test_permissions.py`](file:///c:/p2p-bot-merchant/tests/unit/test_permissions.py))**:
+      - Implementada función `detect_public_ip()` con fallback HTTPS validado por `ipaddress` y `StartupPermissionValidator.verify_runtime_ip()`. En `ENVIRONMENT=production`, exige detectar y validar la IP pública saliente contra `SERVER_IP_WHITELIST` (Fail-Closed); en desarrollo mantiene fallback local reportando la IP saliente en la alerta de inicio de Telegram para whitelist de Binance.
+      - Añadido soporte `DISABLE_EMBEDDED_API=1` en `src/main.py` para desacoplar `engine` y `api` en contenedores separados sin duplicar servidores HTTP.
+    - **Arquitectura Docker Multi-Contenedor con Aislamiento de Red ([`docker/`](file:///c:/p2p-bot-merchant/docker/), [`scripts/deploy_vps.sh`](file:///c:/p2p-bot-merchant/scripts/deploy_vps.sh), [`requirements.txt`](file:///c:/p2p-bot-merchant/requirements.txt))**:
+      - Añadido `pypdf>=5.0.0` faltante en `requirements.txt` (alineado con `pyproject.toml`).
+      - Creados [`docker/Dockerfile.api`](file:///c:/p2p-bot-merchant/docker/Dockerfile.api), [`docker/Dockerfile.frontend`](file:///c:/p2p-bot-merchant/docker/Dockerfile.frontend) y [`docker/Caddyfile`](file:///c:/p2p-bot-merchant/docker/Caddyfile); actualizado [`docker/Dockerfile.engine`](file:///c:/p2p-bot-merchant/docker/Dockerfile.engine) y [`docker/docker-compose.yml`](file:///c:/p2p-bot-merchant/docker/docker-compose.yml) con usuarios no-root, healthchecks reales y aislamiento estricto de `postgres` (`5432`) y `redis` (`6379`) dentro de red privada `p2p_internal` (sin puertos públicos expuestos).
+      - Actualizados [`frontend/src/lib/api.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/api.ts) y [`frontend/src/lib/useWebSocket.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/useWebSocket.ts) para operar por mismo origen (`/api/*` y `/ws/live`) detrás de Caddy + Cloudflare Proxy en puertos `80`/`443` (evitando bloqueos del puerto `8000` en Cloudflare Free).
+      - Creado script automatizado [`scripts/deploy_vps.sh`](file:///c:/p2p-bot-merchant/scripts/deploy_vps.sh) con validación fail-closed de `.env`, verificación de IP pública y configuración firewall `ufw`.
+
 ---
 
 ## 🎯 Guía Operativa Actual
