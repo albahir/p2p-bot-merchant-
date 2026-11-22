@@ -820,8 +820,8 @@ def recover_password(
 
     if not user.telegram_id:
         return {
-            "success": False,
-            "message": "Esta cuenta no tiene un Chat ID de Telegram vinculado. Usa tu Pregunta Secreta o tu Llave Maestra.",
+            "success": True,
+            "message": "Si la cuenta existe y tiene Telegram vinculado, se ha enviado el código de recuperación.",
             "has_telegram": False,
         }
 

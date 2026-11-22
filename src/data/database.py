@@ -1,10 +1,12 @@
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 try:
@@ -28,10 +30,30 @@ def normalize_database_url(raw_url: str) -> str:
 
 DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL", "sqlite:///./p2p_bot.db"))
 
-# Ajuste para SQLite en multithreading y reconexión resiliente para PostgreSQL en la nube
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+# Ajuste para SQLite en multithreading y reconexión resiliente para PostgreSQL (Neon Serverless)
+_IS_SQLITE = DATABASE_URL.startswith("sqlite")
+connect_args: dict[str, Any] = (
+    {"check_same_thread": False}
+    if _IS_SQLITE
+    else {
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+)
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+engine_kwargs: dict[str, Any] = {
+    "connect_args": connect_args,
+    "pool_pre_ping": True,
+}
+if not _IS_SQLITE:
+    engine_kwargs["pool_recycle"] = 240
+    engine_kwargs["pool_size"] = 5
+    engine_kwargs["max_overflow"] = 10
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class Base(DeclarativeBase):
@@ -39,9 +61,20 @@ class Base(DeclarativeBase):
 
 
 def get_db():
-    """Generador de sesión para dependencias o contextos."""
+    """Generador de sesión con reintento breve ante cold-start o cierre transitorio en Neon."""
     db = SessionLocal()
     try:
+        if not _IS_SQLITE:
+            for attempt in range(3):
+                try:
+                    db.connection()
+                    break
+                except OperationalError:
+                    db.close()
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.8 * (attempt + 1))
+                    db = SessionLocal()
         yield db
     finally:
         db.close()

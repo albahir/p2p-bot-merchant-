@@ -78,16 +78,10 @@ export default function SpreadMatrixPage() {
       ? getCachedApiResponse<BCVRates>("/api/spreads/bcv")
       : null;
 
-  const cachedUserBanks = typeof window !== "undefined" ? getCachedUserBanks() : null;
-  const initialUserBanks = cachedUserBanks?.preferred_banks || [];
-  const initialBankBalances = cachedUserBanks?.bank_initial_balances || {};
-
-  const [userBanks, setUserBanks] = useState<string[]>(initialUserBanks);
+  const [userBanks, setUserBanks] = useState<string[]>([]);
   const [userBankBalances, setUserBankBalances] =
-    useState<Record<string, number>>(initialBankBalances);
-  const [profileMode, setProfileMode] = useState<ProfileFilterMode>(
-    initialUserBanks.length > 0 ? "MY_BANKS" : "ALL_BANKS"
-  );
+    useState<Record<string, number>>({});
+  const [profileMode, setProfileMode] = useState<ProfileFilterMode>("ALL_BANKS");
   const [showBankProfilePanel, setShowBankProfilePanel] = useState<boolean>(false);
 
   const [matrix, setMatrix] = useState<ArbitrageMatrix | null>(initialMatrix);
@@ -99,6 +93,12 @@ export default function SpreadMatrixPage() {
   const [pinnedBanks, setPinnedBanks] = useState<string[]>([]);
 
   useEffect(() => {
+    const cached = getCachedUserBanks();
+    if (cached && cached.preferred_banks && cached.preferred_banks.length > 0) {
+      setUserBanks(cached.preferred_banks);
+      setUserBankBalances(cached.bank_initial_balances || {});
+      setProfileMode("MY_BANKS");
+    }
     const current = getCurrentUser();
     if (!current) return;
     getUserBanksSettings()
