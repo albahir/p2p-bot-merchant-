@@ -4,22 +4,55 @@ services:
     container_name: p2p-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
-      POSTGRES_DB: p2p_bot
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword}
+      POSTGRES_DB: ${POSTGRES_DB:-p2p_bot}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-p2p_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - p2p_internal
 
   redis:
     image: redis:7-alpine
     container_name: p2p-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - p2p_internal
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: p2p-api
+    restart: unless-stopped
+    expose:
+      - "8000"
+    volumes:
+      - botdata:/app/data
+    env_file:
+      - ../config/.env
+    environment:
+      DISABLE_MARKET_COLLECTOR: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - p2p_internal
 
   engine:
     build:
@@ -31,26 +64,81 @@ services:
       - botdata:/app/data
     env_file:
       - ../config/.env
+    environment:
+      DISABLE_EMBEDDED_API: "1"
+      PORT: "8001"
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - p2p_internal
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
+        NEXT_PUBLIC_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+    container_name: p2p-frontend
+    restart: unless-stopped
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - p2p_internal
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: p2p-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_SITE_ADDRESS: ${APP_SITE_ADDRESS:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - api
+    networks:
+      - p2p_internal
 
   dashboard:
+    profiles: ["legacy"]
     build:
       context: ..
       dockerfile: docker/Dockerfile.dashboard
     container_name: p2p-dashboard
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     volumes:
       - botdata:/app/data
     env_file:
       - ../config/.env
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    networks:
+      - p2p_internal
 
 volumes:
   pgdata:
   redisdata:
   botdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  p2p_internal:
+    driver: bridge

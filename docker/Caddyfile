@@ -1,0 +1,22 @@
+# Reverse Proxy Caddy para P2P Merchant OS (HTTP/HTTPS + WebSockets + Cloudflare)
+#
+# - Sin dominio aún (acceso directo por IP): dejar APP_SITE_ADDRESS=:80 (por defecto)
+# - Con dominio en Cloudflare (ej. app.tudominio.com): definir APP_SITE_ADDRESS=app.tudominio.com en config/.env
+# - Con Certificado Origin CA de Cloudflare (SSL Full Strict): colocar origin.pem y origin.key en docker/certs/
+#   y descomentar la línea `tls` abajo.
+
+{$APP_SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# Si montas un Certificado Origin CA de Cloudflare en docker/certs/, descomenta:
+	# tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+
+	@backend path /api/* /ws/* /health
+	handle @backend {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

@@ -3,10 +3,16 @@
  */
 
 function getApiBaseUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL;
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (configured) {
+    return configured.replace(/\/+$/, "");
   }
   if (typeof window !== "undefined" && window.location?.hostname) {
+    const port = window.location.port;
+    // Detrás de Caddy / Cloudflare (puertos estándar 80/443), usar mismo origen para /api/*
+    if (!port || port === "80" || port === "443") {
+      return "";
+    }
     return `${window.location.protocol}//${window.location.hostname}:8000`;
   }
   return "http://127.0.0.1:8000";
