@@ -26,28 +26,82 @@ def normalize_text(text: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+_BANK_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("BANESCO", "0134"), "BANESCO"),
+    (("BANCO DE VENEZUELA", "VENEZUELA", "BDV", "0102"), "BANCO DE VENEZUELA"),
+    (("MERCANTIL", "0105"), "MERCANTIL"),
+    (("PROVINCIAL", "BBVA", "0108"), "PROVINCIAL"),
+    (("BANCAMIGA", "0172"), "BANCAMIGA"),
+    (("BNC", "NACIONAL DE CREDITO", "0191"), "BNC"),
+    (("BANCARIBE", "0114"), "BANCARIBE"),
+    (("BANCO EXTERIOR", "EXTERIOR", "0115"), "BANCO EXTERIOR"),
+    (("CARONI", "0128"), "BANCO CARONI"),
+    (("SOFITASA", "0137"), "SOFITASA"),
+    (("BANCO PLAZA", "PLAZA", "0138"), "BANCO PLAZA"),
+    (("BFC", "FONDO COMUN", "0151"), "BFC BANCO FONDO COMUN"),
+    (("100% BANCO", "CIEN POR CIENTO", "100%BANCO", "0156"), "100% BANCO"),
+    (("DELSUR", "DEL SUR", "0157"), "DELSUR"),
+    (("TESORO", "0163"), "BANCO DEL TESORO"),
+    (("AGRICOLA", "0166"), "BANCO AGRICOLA DE VENEZUELA"),
+    (("BANCRECER", "0168"), "BANCRECER"),
+    (("MIBANCO", "MI BANCO", "0169"), "MIBANCO"),
+    (("BANCO ACTIVO", "0171"), "BANCO ACTIVO"),
+    (("BANPLUS", "0174"), "BANPLUS"),
+    (("BICENTENARIO", "TRABAJADORES", "0175"), "BANCO DIGITAL DE LOS TRABAJADORES"),
+    (("BANFANB", "0177"), "BANFANB"),
+    (("VENEZOLANO DE CREDITO", "BVC", "0104"), "VENEZOLANO DE CREDITO"),
+)
+
+
 def normalize_bank_name(raw_name: str | None) -> str:
-    """Estandariza nombres de entidades bancarias venezolanas a su forma oficial."""
+    """Estandariza nombres de entidades bancarias venezolanas (y códigos SUDEBAN) a su forma oficial."""
     t = normalize_text(raw_name)
     if not t:
         return "BANCO DESCONOCIDO"
 
-    if "BANESCO" in t:
-        return "BANESCO"
-    if "VENEZUELA" in t or "BDV" in t:
-        return "BANCO DE VENEZUELA"
-    if "MERCANTIL" in t:
-        return "MERCANTIL"
-    if "PROVINCIAL" in t or "BBVA" in t:
-        return "PROVINCIAL"
-    if "BANCAMIGA" in t:
-        return "BANCAMIGA"
-    if "BNC" in t or "NACIONAL DE CREDITO" in t:
-        return "BNC"
-    if "BANCARIBE" in t:
-        return "BANCARIBE"
+    for tokens, official_name in _BANK_PATTERNS:
+        for tok in tokens:
+            if tok.isdigit():
+                if re.search(rf"(?<!\d){tok}(?!\d)", t):
+                    return official_name
+            elif tok in t:
+                return official_name
 
     return t
+
+
+def detect_bank_from_text(raw_text: str | None) -> str | None:
+    """Detecta la entidad bancaria emisora priorizando la primera coincidencia nominal o de código en cabecera."""
+    t = normalize_text(raw_text)
+    if not t:
+        return None
+
+    best_pos: int | None = None
+    best_bank: str | None = None
+    # Fase 1: priorizar nombres completos de bancos (evita falsos positivos con códigos 0134/0102 en referencias)
+    for tokens, official_name in _BANK_PATTERNS:
+        for tok in tokens:
+            if tok.isdigit():
+                continue
+            m = re.search(rf"(?<![A-Z0-9]){re.escape(tok)}(?![A-Z0-9])", t)
+            if m and (best_pos is None or m.start() < best_pos):
+                best_pos = m.start()
+                best_bank = official_name
+
+    if best_bank is not None:
+        return best_bank
+
+    # Fase 2: código SUDEBAN de 4 dígitos si no apareció el nombre textual
+    for tokens, official_name in _BANK_PATTERNS:
+        for tok in tokens:
+            if not tok.isdigit():
+                continue
+            m = re.search(rf"(?<!\d){tok}(?:[-\s]|$)", t)
+            if m and (best_pos is None or m.start() < best_pos):
+                best_pos = m.start()
+                best_bank = official_name
+
+    return best_bank
 
 
 def normalize_cedula(raw_cedula: str | None) -> str:

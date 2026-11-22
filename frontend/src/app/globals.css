@@ -86,6 +86,26 @@ select:required:user-valid {
   contain-intrinsic-size: auto 420px;
 }
 
+/* Caché de estado renderizado en memoria para cambio instantáneo de pestañas SPA */
+.spa-tab-panel {
+  content-visibility: visible;
+}
+
+.spa-tab-panel.inactive {
+  content-visibility: hidden;
+  height: 0;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+@supports not (content-visibility: hidden) {
+  .spa-tab-panel.inactive {
+    display: none;
+  }
+}
+
 .font-mono,
 .font-mono-val,
 .tabular-nums {

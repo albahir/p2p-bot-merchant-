@@ -1,6 +1,7 @@
 import logging
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -10,7 +11,9 @@ logger = logging.getLogger("spread_monitor")
 
 _ORDERBOOK_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _VOLUME_QUOTES_CACHE: dict[tuple[Any, ...], tuple[float, list["BankRateQuote"]]] = {}
+_REF_RATE_CACHE: dict[str, tuple[float, float]] = {}
 CACHE_TTL_SECONDS: float = 12.0
+REF_RATE_TTL_SECONDS: float = 30.0
 
 
 @dataclass
@@ -301,6 +304,196 @@ class SpreadMonitor:
 
         return []
 
+    @classmethod
+    def canonical_user_bank_name(cls, raw_name: str) -> str:
+        """Normaliza nombres cortos o alias de bancos venezolanos al nombre canónico del perfil de usuario."""
+        cleaned = (raw_name or "").strip()
+        if not cleaned:
+            return ""
+        low = cleaned.lower()
+        aliases: dict[str, str] = {
+            "venezuela": "Banco de Venezuela",
+            "bdv": "Banco de Venezuela",
+            "banco de venezuela": "Banco de Venezuela",
+            "bancodevenezuela": "Banco de Venezuela",
+            "banco de venezuela (transferencias)": "Banco de Venezuela",
+            "specificbank": "Banco de Venezuela",
+            "specific bank": "Banco de Venezuela",
+            "banesco": "Banesco",
+            "mercantil": "Mercantil",
+            "banco mercantil": "Mercantil",
+            "pago móvil": "Pago Móvil",
+            "pago movil": "Pago Móvil",
+            "pagomovil": "Pago Móvil",
+            "provincial": "BBVA Provincial",
+            "bbva provincial": "BBVA Provincial",
+            "bbva banco provincial": "BBVA Provincial",
+            "bbva bank": "BBVA Provincial",
+            "bnc": "BNC",
+            "bnc banco nacional de crédito": "BNC",
+            "bnc banco nacional de credito": "BNC",
+            "banco nacional de crédito": "BNC",
+            "bancamiga": "Bancamiga",
+            "bancaribe": "Bancaribe",
+            "banplus": "Banplus",
+            "banco del tesoro": "Banco del Tesoro",
+            "tesoro": "Banco del Tesoro",
+            "bfc": "BFC",
+            "bfc banco fondo común": "BFC",
+            "banco activo": "Banco Activo",
+            "banco plaza": "Banco Plaza",
+            "venezolano de crédito": "Banco Venezolano de Crédito",
+            "banco venezolano de crédito": "Banco Venezolano de Crédito",
+        }
+        if low in aliases:
+            return aliases[low]
+        normalized = cls._normalize_bank_name(cleaned)
+        return aliases.get(normalized.lower(), normalized)
+
+    @classmethod
+    def bank_matches_user_bank(cls, candidate_bank: str, user_bank: str) -> bool:
+        """Verifica si una cotización o asiento contable corresponde a uno de los bancos registrados del usuario."""
+        c_norm = cls.canonical_user_bank_name(candidate_bank).lower()
+        u_norm = cls.canonical_user_bank_name(user_bank).lower()
+        if not c_norm or not u_norm:
+            return False
+        if c_norm == u_norm:
+            return True
+        return u_norm in c_norm or c_norm in u_norm
+
+    def recommend_for_user_profile(
+        self,
+        quotes: list[BankRateQuote],
+        preferred_banks: list[str] | None = None,
+        bank_balances: dict[str, float] | None = None,
+        amount_usdt: float = 100.0,
+        mode: str = "MY_BANKS",
+    ) -> dict[str, Any]:
+        """Adapta y prioriza cotizaciones y rutas de arbitraje según los bancos y saldos del operador."""
+        raw_pref = list(preferred_banks or [])
+        raw_bals = dict(bank_balances or {})
+
+        normalized_balances: dict[str, float] = {}
+        for b_key, b_val in raw_bals.items():
+            canon = self.canonical_user_bank_name(b_key)
+            if canon:
+                normalized_balances[canon] = round(normalized_balances.get(canon, 0.0) + float(b_val or 0.0), 2)
+
+        canonical_prefs: list[str] = []
+        seen_prefs: set[str] = set()
+        for b_name in [*raw_pref, *normalized_balances.keys()]:
+            canon = self.canonical_user_bank_name(b_name)
+            if canon and canon not in seen_prefs:
+                seen_prefs.add(canon)
+                canonical_prefs.append(canon)
+
+        effective_mode = "MY_BANKS" if (mode.upper() == "MY_BANKS" and canonical_prefs) else "ALL_BANKS"
+
+        def _is_user_bank(bank_label: str) -> bool:
+            return any(self.bank_matches_user_bank(bank_label, ub) for ub in canonical_prefs)
+
+        def _resolve_balance(bank_label: str) -> float:
+            canon = self.canonical_user_bank_name(bank_label)
+            if canon in normalized_balances:
+                return normalized_balances[canon]
+            for ub, bal in normalized_balances.items():
+                if self.bank_matches_user_bank(bank_label, ub):
+                    return bal
+            return 0.0
+
+        enriched_quotes: list[dict[str, Any]] = []
+        for q in quotes:
+            is_mine = _is_user_bank(q.bank_name)
+            if effective_mode == "MY_BANKS" and not is_mine:
+                continue
+            avail_ves = _resolve_balance(q.bank_name)
+            req_ves = round(amount_usdt * q.buy_rate, 2) if q.buy_rate > 0 else 0.0
+            has_cap = avail_ves >= req_ves > 0
+            rec_score = round(
+                q.spread_pct + (2.5 if is_mine else 0.0) + (1.5 if has_cap else 0.0),
+                4,
+            )
+            enriched_quotes.append({
+                "bank_name": q.bank_name,
+                "canonical_bank": self.canonical_user_bank_name(q.bank_name),
+                "buy_rate": q.buy_rate,
+                "sell_rate": q.sell_rate,
+                "spread_ves": q.spread_ves,
+                "spread_pct": q.spread_pct,
+                "total_ads": q.total_ads,
+                "liquidity_pct": q.liquidity_pct,
+                "is_user_bank": is_mine,
+                "available_balance_ves": avail_ves,
+                "has_sufficient_balance": has_cap,
+                "recommendation_score": rec_score,
+            })
+
+        enriched_quotes.sort(
+            key=lambda item: (
+                1 if item["is_user_bank"] else 0,
+                1 if item["has_sufficient_balance"] else 0,
+                item["spread_pct"],
+            ),
+            reverse=True,
+        )
+
+        # Generar rutas recomendadas (Compra -> Venta)
+        candidate_quotes = [
+            q for q in quotes if (effective_mode == "ALL_BANKS" or _is_user_bank(q.bank_name))
+        ]
+        routes: list[dict[str, Any]] = []
+        for buy_q in candidate_quotes:
+            if buy_q.buy_rate <= 0:
+                continue
+            for sell_q in candidate_quotes:
+                if sell_q.sell_rate <= 0:
+                    continue
+                same_bank = buy_q.bank_name == sell_q.bank_name
+                capital_ves = round(amount_usdt * buy_q.buy_rate, 2)
+                gross_out_ves = round(amount_usdt * sell_q.sell_rate, 2)
+                interbank_fee_ves = 0.0 if same_bank else round(capital_ves * 0.003, 2)
+                net_profit_ves = round(gross_out_ves - capital_ves - interbank_fee_ves, 2)
+                net_roi_pct = round((net_profit_ves / capital_ves) * 100, 2) if capital_ves > 0 else 0.0
+                net_profit_usdt = round(net_profit_ves / sell_q.sell_rate, 4) if sell_q.sell_rate > 0 else 0.0
+
+                buy_is_mine = _is_user_bank(buy_q.bank_name)
+                sell_is_mine = _is_user_bank(sell_q.bank_name)
+                avail_buy_ves = _resolve_balance(buy_q.bank_name)
+                has_cap = avail_buy_ves >= capital_ves > 0
+
+                routes.append({
+                    "buy_bank": buy_q.bank_name,
+                    "buy_rate": buy_q.buy_rate,
+                    "sell_bank": sell_q.bank_name,
+                    "sell_rate": sell_q.sell_rate,
+                    "is_same_bank": same_bank,
+                    "bank_fee_pct": 0.0 if same_bank else 0.3,
+                    "capital_required_ves": capital_ves,
+                    "available_balance_ves": avail_buy_ves,
+                    "has_sufficient_balance": has_cap,
+                    "is_user_route": buy_is_mine and sell_is_mine,
+                    "net_roi_pct": net_roi_pct,
+                    "net_profit_ves": net_profit_ves,
+                    "net_profit_usdt": net_profit_usdt,
+                })
+
+        routes.sort(
+            key=lambda r: (
+                1 if r["is_user_route"] else 0,
+                1 if r["has_sufficient_balance"] else 0,
+                r["net_roi_pct"],
+            ),
+            reverse=True,
+        )
+
+        return {
+            "mode": effective_mode,
+            "preferred_banks": canonical_prefs,
+            "bank_balances": normalized_balances,
+            "quotes": enriched_quotes,
+            "recommended_routes": routes[:3],
+        }
+
     def fetch_pitbullchain_quotes(
         self,
         exchange: str = "binance",
@@ -446,28 +639,53 @@ class SpreadMonitor:
             now = datetime.now(UTC)
 
             try:
-                buy_resp = client.search_p2p_ads(
-                    asset=asset,
-                    fiat=fiat,
-                    trade_type="BUY",
-                    rows=20,
-                    trans_amount=trans_amount_ves,
-                    merchant_check=merchant_only,
-                    use_public_bapi=use_public_bapi,
-                )
-                sell_resp = client.search_p2p_ads(
-                    asset=asset,
-                    fiat=fiat,
-                    trade_type="SELL",
-                    rows=20,
-                    trans_amount=trans_amount_ves,
-                    merchant_check=merchant_only,
-                    use_public_bapi=use_public_bapi,
-                )
-
                 from src.core.binance_client import BinanceP2PClient
 
                 is_live_binance = isinstance(client, BinanceP2PClient) and use_public_bapi
+
+                if is_live_binance:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        fut_buy = pool.submit(
+                            client.search_p2p_ads,
+                            asset=asset,
+                            fiat=fiat,
+                            trade_type="BUY",
+                            rows=20,
+                            trans_amount=trans_amount_ves,
+                            merchant_check=merchant_only,
+                            use_public_bapi=use_public_bapi,
+                        )
+                        fut_sell = pool.submit(
+                            client.search_p2p_ads,
+                            asset=asset,
+                            fiat=fiat,
+                            trade_type="SELL",
+                            rows=20,
+                            trans_amount=trans_amount_ves,
+                            merchant_check=merchant_only,
+                            use_public_bapi=use_public_bapi,
+                        )
+                        buy_resp = fut_buy.result()
+                        sell_resp = fut_sell.result()
+                else:
+                    buy_resp = client.search_p2p_ads(
+                        asset=asset,
+                        fiat=fiat,
+                        trade_type="BUY",
+                        rows=20,
+                        trans_amount=trans_amount_ves,
+                        merchant_check=merchant_only,
+                        use_public_bapi=use_public_bapi,
+                    )
+                    sell_resp = client.search_p2p_ads(
+                        asset=asset,
+                        fiat=fiat,
+                        trade_type="SELL",
+                        rows=20,
+                        trans_amount=trans_amount_ves,
+                        merchant_check=merchant_only,
+                        use_public_bapi=use_public_bapi,
+                    )
 
                 for bank in target_banks:
                     pay_code = self.BANK_PAY_TYPE_MAP.get(bank, "").lower()
@@ -552,19 +770,27 @@ class SpreadMonitor:
                 return []
 
         has_volume_filter = bool((trans_amount_ves and trans_amount_ves > 0) or merchant_only)
+        base_cache_key = (exchange, 0.0, False)
         cache_key = (
             exchange,
             round(float(trans_amount_ves or 0.0), -2),
             bool(merchant_only),
         )
         now_ts = time.monotonic()
-        if has_volume_filter:
-            cached_entry = _VOLUME_QUOTES_CACHE.get(cache_key)
-            if cached_entry and (now_ts - cached_entry[0]) < CACHE_TTL_SECONDS:
-                return cached_entry[1]
+        cached_entry = _VOLUME_QUOTES_CACHE.get(cache_key)
+        if cached_entry and (now_ts - cached_entry[0]) < CACHE_TTL_SECONDS:
+            return [replace(q) for q in cached_entry[1]]
 
-        # Nivel 1: PitbullChain Aggregated API
-        pitbull_quotes = self.fetch_pitbullchain_quotes(exchange=exchange)
+        # Nivel 1: PitbullChain Aggregated API (reutilizar caché base si sigue vigente para no duplicar HTTP)
+        base_cached = _VOLUME_QUOTES_CACHE.get(base_cache_key)
+        if base_cached and (now_ts - base_cached[0]) < CACHE_TTL_SECONDS:
+            pitbull_quotes = [replace(q) for q in base_cached[1]]
+        else:
+            pitbull_quotes = self.fetch_pitbullchain_quotes(exchange=exchange)
+            if pitbull_quotes:
+                _VOLUME_QUOTES_CACHE[base_cache_key] = (now_ts, [replace(q) for q in pitbull_quotes])
+                if pitbull_quotes[0].buy_rate > 0:
+                    _REF_RATE_CACHE[fiat] = (now_ts, pitbull_quotes[0].buy_rate)
 
         # Si el usuario filtró por monto específico (trans_amount_ves) o solo verificados,
         # consultar el libro real de Binance P2P con ese filtro exacto para ajustar las puntas de cada banco
@@ -594,14 +820,13 @@ class SpreadMonitor:
                                 pq.total_ads = lq.total_ads
                             pq.source = "binance_filtered"
                 elif live_filtered:
-                    _VOLUME_QUOTES_CACHE[cache_key] = (now_ts, live_filtered)
+                    _VOLUME_QUOTES_CACHE[cache_key] = (now_ts, [replace(q) for q in live_filtered])
                     return live_filtered
             except (ImportError, ValueError, KeyError, OSError, RuntimeError) as e:
                 logger.debug(f"Enriquecimiento BAPI por volumen omitido: {e}")
 
         if pitbull_quotes:
-            if has_volume_filter:
-                _VOLUME_QUOTES_CACHE[cache_key] = (now_ts, pitbull_quotes)
+            _VOLUME_QUOTES_CACHE[cache_key] = (now_ts, [replace(q) for q in pitbull_quotes])
             return pitbull_quotes
 
         # Nivel 2: Binance P2P BAPI / SAPI con credenciales si están disponibles
@@ -634,7 +859,7 @@ class SpreadMonitor:
                 merchant_only=merchant_only,
             )
             if binance_quotes:
-                _VOLUME_QUOTES_CACHE[cache_key] = (now_ts, binance_quotes)
+                _VOLUME_QUOTES_CACHE[cache_key] = (now_ts, [replace(q) for q in binance_quotes])
                 return binance_quotes
         except (ImportError, ValueError, KeyError, OSError, RuntimeError) as e:
             logger.debug(f"Fallo Nivel 2 Binance Client: {e}")
@@ -661,16 +886,34 @@ class SpreadMonitor:
         safe_rows = max(1, min(int(rows), 20))
         pay_types = self.resolve_binance_pay_types(bank)
         clean_bank = bank.strip() if bank and bank.strip() else "Todos"
+        now_ts = time.monotonic()
+
+        # Verificar caché rápida antes de cualquier llamada de red (Yadio / Binance)
+        fast_cache_key = (
+            clean_bank.lower(),
+            round(safe_usdt, 1),
+            round(float(amount_ves or 0.0), -1),
+            bool(merchant_only),
+            safe_rows,
+        )
+        if client is None:
+            fast_cached = _ORDERBOOK_CACHE.get(fast_cache_key)
+            if fast_cached and (now_ts - fast_cached[0]) < CACHE_TTL_SECONDS:
+                return fast_cached[1]
 
         # Determinar tasa de referencia para convertir amount_usdt -> transAmount en Bs (VES)
         ref_rate = 1005.0
         base_quotes = _VOLUME_QUOTES_CACHE.get(("binance", 0.0, False))
+        ref_cached = _REF_RATE_CACHE.get("VES")
         if base_quotes and base_quotes[1]:
             ref_rate = base_quotes[1][0].buy_rate or 1005.0
+        elif ref_cached and (now_ts - ref_cached[0]) < REF_RATE_TTL_SECONDS:
+            ref_rate = ref_cached[1]
         elif client is None:
             yadio = self.fetch_yadio_rate()
             if yadio and yadio > 0:
                 ref_rate = yadio
+                _REF_RATE_CACHE["VES"] = (now_ts, yadio)
 
         trans_amount_ves = (
             round(float(amount_ves), 2)
@@ -684,16 +927,16 @@ class SpreadMonitor:
             bool(merchant_only),
             safe_rows,
         )
-        now_ts = time.monotonic()
         if client is None:
             cached = _ORDERBOOK_CACHE.get(cache_key)
             if cached and (now_ts - cached[0]) < CACHE_TTL_SECONDS:
+                _ORDERBOOK_CACHE[fast_cache_key] = cached
                 return cached[1]
+
+        from src.core.binance_client import BinanceP2PClient
 
         active_client = client
         if active_client is None:
-            from src.core.binance_client import BinanceP2PClient
-
             active_client = BinanceP2PClient()
 
         buy_ads: list[dict[str, Any]] = []
@@ -701,26 +944,53 @@ class SpreadMonitor:
         source_label = "binance_bapi"
 
         try:
-            buy_resp = active_client.search_p2p_ads(
-                asset="USDT",
-                fiat="VES",
-                trade_type="BUY",
-                rows=safe_rows,
-                pay_types=pay_types,
-                trans_amount=trans_amount_ves,
-                merchant_check=merchant_only,
-                use_public_bapi=True,
-            )
-            sell_resp = active_client.search_p2p_ads(
-                asset="USDT",
-                fiat="VES",
-                trade_type="SELL",
-                rows=safe_rows,
-                pay_types=pay_types,
-                trans_amount=trans_amount_ves,
-                merchant_check=merchant_only,
-                use_public_bapi=True,
-            )
+            if isinstance(active_client, BinanceP2PClient):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    fut_buy = pool.submit(
+                        active_client.search_p2p_ads,
+                        asset="USDT",
+                        fiat="VES",
+                        trade_type="BUY",
+                        rows=safe_rows,
+                        pay_types=pay_types,
+                        trans_amount=trans_amount_ves,
+                        merchant_check=merchant_only,
+                        use_public_bapi=True,
+                    )
+                    fut_sell = pool.submit(
+                        active_client.search_p2p_ads,
+                        asset="USDT",
+                        fiat="VES",
+                        trade_type="SELL",
+                        rows=safe_rows,
+                        pay_types=pay_types,
+                        trans_amount=trans_amount_ves,
+                        merchant_check=merchant_only,
+                        use_public_bapi=True,
+                    )
+                    buy_resp = fut_buy.result()
+                    sell_resp = fut_sell.result()
+            else:
+                buy_resp = active_client.search_p2p_ads(
+                    asset="USDT",
+                    fiat="VES",
+                    trade_type="BUY",
+                    rows=safe_rows,
+                    pay_types=pay_types,
+                    trans_amount=trans_amount_ves,
+                    merchant_check=merchant_only,
+                    use_public_bapi=True,
+                )
+                sell_resp = active_client.search_p2p_ads(
+                    asset="USDT",
+                    fiat="VES",
+                    trade_type="SELL",
+                    rows=safe_rows,
+                    pay_types=pay_types,
+                    trans_amount=trans_amount_ves,
+                    merchant_check=merchant_only,
+                    use_public_bapi=True,
+                )
 
             for item in buy_resp.data:
                 price_f = float(item.adv.price or 0.0)
@@ -870,6 +1140,7 @@ class SpreadMonitor:
 
         if client is None and (buy_ads or sell_ads):
             _ORDERBOOK_CACHE[cache_key] = (now_ts, result)
+            _ORDERBOOK_CACHE[fast_cache_key] = (now_ts, result)
 
         return result
 

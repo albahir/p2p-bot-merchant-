@@ -6,10 +6,12 @@ import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { BankAmountInput } from "@/components/bank-amount-input";
 import {
+  ArbitrageMatrix,
   BCVRates,
   RateQuote,
   getArbitrageMatrix,
   getBCVRates,
+  getCachedApiResponse,
 } from "@/lib/api";
 
 type OrderRole = "MAKER" | "TAKER";
@@ -45,8 +47,17 @@ function CalculatorContent() {
   );
   const [cyclesPerDay, setCyclesPerDay] = useState<number>(3);
 
-  const [quotes, setQuotes] = useState<RateQuote[]>([]);
-  const [bcv, setBcv] = useState<BCVRates | null>(null);
+  const initialMatrix =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<ArbitrageMatrix>("/api/spreads/matrix?amount_usdt=100&merchant_only=false")
+      : null;
+  const initialBcv =
+    typeof window !== "undefined"
+      ? getCachedApiResponse<BCVRates>("/api/spreads/bcv")
+      : null;
+
+  const [quotes, setQuotes] = useState<RateQuote[]>(initialMatrix?.quotes || []);
+  const [bcv, setBcv] = useState<BCVRates | null>(initialBcv);
 
   useEffect(() => {
     let mounted = true;
@@ -218,57 +229,57 @@ function CalculatorContent() {
           </div>
         )}
 
-        {/* 4 KPIs Principales Corregidos (Sin duplicar título de Ruta de Venta) */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        {/* 4 KPIs Principales Corregidos (2 por fila en móvil) */}
+        <section className="grid grid-cols-2 xl:grid-cols-4 gap-2.5 sm:gap-3">
           {/* KPI 1 */}
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Capital Total Requerido</span>
-              <span className="material-symbols-outlined text-[16px] text-secondary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Capital Total Requerido</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-secondary shrink-0">
                 account_balance_wallet
               </span>
             </div>
-            <div className="mt-2 text-xl font-mono font-bold text-white tabular-nums">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-white tabular-nums truncate">
               Bs. {simulation.totalVesInvested.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              Base: {capitalUsdt} USDT • Comisión Banco: Bs. {simulation.bankFeeVes.toFixed(2)}
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
+              Base: {capitalUsdt} USDT • Com: Bs. {simulation.bankFeeVes.toFixed(2)}
             </div>
           </div>
 
           {/* KPI 2 */}
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Tasa Mínima de Equilibrio</span>
-              <span className="material-symbols-outlined text-[16px] text-primary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Tasa Equilibrio</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
                 balance
               </span>
             </div>
-            <div className="mt-2 text-xl font-mono font-bold text-primary tabular-nums">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-primary tabular-nums truncate">
               Bs. {simulation.breakEvenSellRate.toFixed(2)}
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
-              Venta actual: Bs. {sellRate.toFixed(2)} / USDT
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
+              Venta: Bs. {sellRate.toFixed(2)} / USDT
             </div>
           </div>
 
           {/* KPI 3 Corregido: GANANCIA NETA POR CICLO */}
-          <div className="p-4 rounded-xl bg-surface-container border border-primary-container/30">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-primary">
-              <span>Ganancia Neta por Ciclo</span>
-              <span className="material-symbols-outlined text-[16px] text-tertiary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container border border-primary-container/30 min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-primary">
+              <span className="truncate">Ganancia por Ciclo</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-tertiary shrink-0">
                 paid
               </span>
             </div>
             <div
-              className={`mt-2 text-xl font-mono font-bold tabular-nums ${
+              className={`mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold tabular-nums truncate ${
                 isProfitable ? "text-tertiary" : "text-error"
               }`}
             >
               {simulation.netProfitUsdt >= 0 ? "+" : ""}
               {simulation.netProfitUsdt.toFixed(2)} USDT
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-300 tabular-nums">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-300 tabular-nums truncate">
               {simulation.netProfitVes >= 0 ? "+" : ""}Bs.{" "}
               {simulation.netProfitVes.toLocaleString("es-VE", {
                 minimumFractionDigits: 2,
@@ -278,22 +289,22 @@ function CalculatorContent() {
           </div>
 
           {/* KPI 4 */}
-          <div className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430]">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span>Retorno Neto Real por Vuelta</span>
-              <span className="material-symbols-outlined text-[16px] text-tertiary">
+          <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
+            <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="truncate">Retorno Neto Real</span>
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-tertiary shrink-0">
                 monitoring
               </span>
             </div>
             <div
-              className={`mt-2 text-xl font-mono font-bold tabular-nums ${
+              className={`mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold tabular-nums truncate ${
                 isProfitable ? "text-tertiary" : "text-error"
               }`}
             >
               {simulation.netRoiPct >= 0 ? "+" : ""}
               {simulation.netRoiPct.toFixed(2)}%
             </div>
-            <div className="mt-1 text-[11px] font-mono text-slate-400 tabular-nums">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
               {simulation.netProfitBcvUsd !== 0
                 ? `≈ $${simulation.netProfitBcvUsd.toFixed(2)} BCV`
                 : `${cyclesPerDay} ciclos / día`}

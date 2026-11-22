@@ -1,10 +1,12 @@
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 try:
@@ -28,10 +30,30 @@ def normalize_database_url(raw_url: str) -> str:
 
 DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL", "sqlite:///./p2p_bot.db"))
 
-# Ajuste para SQLite en multithreading y reconexión resiliente para PostgreSQL en la nube
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+# Ajuste para SQLite en multithreading y reconexión resiliente para PostgreSQL (Neon Serverless)
+_IS_SQLITE = DATABASE_URL.startswith("sqlite")
+connect_args: dict[str, Any] = (
+    {"check_same_thread": False}
+    if _IS_SQLITE
+    else {
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+)
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+engine_kwargs: dict[str, Any] = {
+    "connect_args": connect_args,
+    "pool_pre_ping": True,
+}
+if not _IS_SQLITE:
+    engine_kwargs["pool_recycle"] = 240
+    engine_kwargs["pool_size"] = 5
+    engine_kwargs["max_overflow"] = 10
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class Base(DeclarativeBase):
@@ -39,9 +61,20 @@ class Base(DeclarativeBase):
 
 
 def get_db():
-    """Generador de sesión para dependencias o contextos."""
+    """Generador de sesión con reintento breve ante cold-start o cierre transitorio en Neon."""
     db = SessionLocal()
     try:
+        if not _IS_SQLITE:
+            for attempt in range(3):
+                try:
+                    db.connection()
+                    break
+                except OperationalError:
+                    db.close()
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.8 * (attempt + 1))
+                    db = SessionLocal()
         yield db
     finally:
         db.close()
@@ -68,10 +101,14 @@ def init_db() -> None:
         ],
         "app_users": [
             ("full_name", "VARCHAR(120)"),
+            ("tax_id", "VARCHAR(30)"),
             ("email", "VARCHAR(150)"),
+            ("email_verified", "BOOLEAN DEFAULT FALSE"),
             ("google_sheet_id", "VARCHAR(100)"),
             ("google_refresh_token_enc", "TEXT"),
             ("google_auth_type", "VARCHAR(30) DEFAULT 'SERVICE_ACCOUNT'"),
+            ("preferred_banks_json", "TEXT"),
+            ("bank_balances_json", "TEXT"),
             ("security_question", "VARCHAR(200)"),
             ("security_answer_hash", "VARCHAR(255)"),
             ("recovery_key_hash", "VARCHAR(255)"),
@@ -125,19 +162,30 @@ def init_db() -> None:
 
 
 _RUNTIME_BOT_PAUSED: bool = False
+_BOT_PAUSED_CACHE: dict[int, tuple[float, bool]] = {}
+_BOT_PAUSED_CACHE_TTL_SECONDS: float = 15.0
 
 
 def get_bot_paused_state(db: Session | None = None) -> bool:
     """Obtiene el estado persistente de pausa operativa compartido entre Telegram, API y Engine."""
     if db is not None:
+        import time
+
         from sqlalchemy.exc import SQLAlchemyError
 
         from src.data.models import SystemState
 
+        bind_id = id(db.get_bind())
+        now_ts = time.monotonic()
+        cached = _BOT_PAUSED_CACHE.get(bind_id)
+        if cached is not None and (now_ts - cached[0]) < _BOT_PAUSED_CACHE_TTL_SECONDS:
+            return cached[1]
+
         try:
             row = db.query(SystemState).filter(SystemState.key == "bot_is_paused").first()
-            if row is not None:
-                return str(row.value).lower() == "true"
+            is_paused = str(row.value).lower() == "true" if row is not None else _RUNTIME_BOT_PAUSED
+            _BOT_PAUSED_CACHE[bind_id] = (now_ts, is_paused)
+            return is_paused
         except SQLAlchemyError:
             pass
     return _RUNTIME_BOT_PAUSED
@@ -145,6 +193,8 @@ def get_bot_paused_state(db: Session | None = None) -> bool:
 
 def set_bot_paused_state(paused: bool, db: Session | None = None) -> None:
     """Persiste el estado de pausa operativa en base de datos y memoria."""
+    import time
+
     global _RUNTIME_BOT_PAUSED
     _RUNTIME_BOT_PAUSED = bool(paused)
     if db is not None:
@@ -152,6 +202,8 @@ def set_bot_paused_state(paused: bool, db: Session | None = None) -> None:
 
         from src.data.models import SystemState
 
+        bind_id = id(db.get_bind())
+        _BOT_PAUSED_CACHE[bind_id] = (time.monotonic(), bool(paused))
         try:
             row = db.query(SystemState).filter(SystemState.key == "bot_is_paused").first()
             val_str = "true" if paused else "false"

@@ -1,12 +1,13 @@
 """Rutas de API REST para el Sistema Contable P2P y Reconciliación Bancaria (SPEC-017)."""
 
 import calendar
+import json
 import os
 import tempfile
-from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -19,9 +20,16 @@ from src.data.repositories import (
     OrderRepository,
 )
 from src.integrations.receipt_ocr import BankReceiptOCR
+from src.integrations.statement_importer import (
+    MAX_STATEMENT_BYTES,
+    BankStatementImporter,
+    StatementAction,
+    StatementCommitRow,
+)
 from src.reporting.accounting_engine import AccountingEngine
 from src.reporting.excel_reporter import ExcelReporter
 from src.reporting.pdf_reporter import PDFReporter
+from src.reporting.tax_engine import FIFOCostMethod
 
 router = APIRouter(prefix="/api/accounting", tags=["Contabilidad y Libro Diario P2P"])
 
@@ -93,6 +101,87 @@ class LiveBalanceResponse(BaseModel):
     bank_breakdown: list[BankBalanceItemResponse]
 
 
+class StatementPreviewRowResponse(BaseModel):
+    row_index: int
+    date_vet: str
+    reference_number: str
+    concept: str
+    movement_type: Literal["DEBIT", "CREDIT"]
+    amount_ves: float
+    bank_fee_ves: float = 0.0
+    balance_ves: float | None = None
+    balance_ok: bool | None = None
+    balance_discrepancy: float = 0.0
+    payment_method: str
+    suggested_action: StatementAction
+    matched_order_number: str | None = None
+    matched_order_type: str | None = None
+    matched_order_crypto: float | None = None
+    matched_order_fiat: float | None = None
+    match_confidence: float = 0.0
+    notes: str = ""
+
+
+class StatementAvailableOrderResponse(BaseModel):
+    order_number: str
+    trade_type: str
+    fiat_amount: float
+    crypto_amount: float
+    date_vet: str
+
+
+class StatementPreviewResponse(BaseModel):
+    bank_name: str
+    file_type: str
+    extraction_method: str
+    detected_columns: list[str]
+    needs_column_mapping: bool
+    detected_order: str
+    opening_balance: float | None = None
+    closing_balance: float | None = None
+    balance_verified: bool
+    balance_mismatch_count: int
+    total_rows: int
+    p2p_matched_count: int
+    bank_fee_count: int
+    duplicate_count: int
+    unmatched_count: int
+    rows: list[StatementPreviewRowResponse]
+    warnings: list[str]
+    available_orders: list[StatementAvailableOrderResponse] = Field(default_factory=list)
+
+
+class StatementCommitRowRequest(BaseModel):
+    row_index: int
+    date_vet: str = Field(..., min_length=8, max_length=20)
+    reference_number: str = Field(default="S/R", max_length=50)
+    concept: str = Field(default="", max_length=255)
+    movement_type: Literal["DEBIT", "CREDIT"]
+    amount_ves: float = Field(..., ge=0.0)
+    payment_method: str = Field(default="TRANSFERENCIA", max_length=30)
+    action: StatementAction
+    order_number: str | None = Field(default=None, max_length=50)
+    bank_fee_ves: float = Field(default=0.0, ge=0.0)
+
+
+class StatementCommitRequest(BaseModel):
+    bank_name: str = Field(..., min_length=2, max_length=100)
+    rows: list[StatementCommitRowRequest] = Field(..., max_length=2500)
+
+
+class StatementCommitResponse(BaseModel):
+    status: str
+    bank_name: str
+    created_vouchers: int
+    matched_orders: int
+    bank_fees_recorded: int
+    internal_transfers_recorded: int
+    unmatched_recorded: int
+    ignored_rows: int
+    journal_entries_created: int
+    periods_affected: list[str]
+
+
 
 @router.get("/balances/live", response_model=LiveBalanceResponse)
 def get_live_balance(
@@ -102,17 +191,55 @@ def get_live_balance(
     month: Annotated[int, Query()] = 11,
     initial_usdt: Annotated[float, Query()] = 0.0,
     initial_ves: Annotated[float, Query()] = 0.0,
+    bank_balances_json: Annotated[str | None, Query()] = None,
 ) -> LiveBalanceResponse:
-    """Calcula el saldo teórico en tiempo real (Inflow - Outflow) aislado por usuario."""
+    """Calcula el saldo teórico en tiempo real (Inflow - Outflow) aislado por usuario y desglosado por sus bancos."""
+    from src.core.spread_monitor import SpreadMonitor
+
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     engine = AccountingEngine(db=db, user_id=uid)
+
+    explicit_banks: dict[str, float] = {}
+    if isinstance(bank_balances_json, str) and bank_balances_json.strip():
+        try:
+            parsed = json.loads(bank_balances_json)
+            if isinstance(parsed, dict):
+                for raw_k, raw_v in parsed.items():
+                    canon = SpreadMonitor.canonical_user_bank_name(str(raw_k))
+                    if canon:
+                        explicit_banks[canon] = round(
+                            explicit_banks.get(canon, 0.0) + max(0.0, float(raw_v or 0.0)),
+                            2,
+                        )
+        except (ValueError, TypeError):
+            explicit_banks = {}
+
+    if not explicit_banks and current_user is not None:
+        user_prefs = getattr(current_user, "preferred_banks", []) or []
+        user_bals = getattr(current_user, "bank_initial_balances", {}) or {}
+        for b_name in user_prefs:
+            canon = SpreadMonitor.canonical_user_bank_name(b_name)
+            if canon and canon not in explicit_banks:
+                explicit_banks[canon] = 0.0
+        for b_name, b_val in user_bals.items():
+            canon = SpreadMonitor.canonical_user_bank_name(b_name)
+            if canon:
+                explicit_banks[canon] = round(float(b_val or 0.0), 2)
+        if explicit_banks and initial_ves > 0.0 and sum(explicit_banks.values()) == 0.0:
+            first_bank = next(iter(explicit_banks.keys()))
+            explicit_banks[first_bank] = round(float(initial_ves), 2)
+
+    init_cfg: dict[str, Any] = {
+        "crypto_usdt": initial_usdt,
+        "total_ves": initial_ves,
+    }
+    if explicit_banks:
+        init_cfg["banks"] = explicit_banks
+
     summary = engine.get_live_theoretical_balance(
         year=year,
         month=month,
-        initial_balances={
-            "crypto_usdt": initial_usdt,
-            "total_ves": initial_ves,
-        },
+        initial_balances=init_cfg,
     )
 
     return LiveBalanceResponse(
@@ -240,6 +367,63 @@ def get_ledger_summaries(
     ]
 
 
+def _build_accounting_export_context(
+    db: Session,
+    current_user: User,
+    year: int,
+    month: int,
+) -> dict[str, Any]:
+    """Recopila asientos, mayor, comprobantes y resultados fiscales PEPS del período en hora VET (UTC-4)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    journal_repo = JournalEntryRepository(db, user_id=uid)
+    voucher_repo = BankVoucherRepository(db, user_id=uid)
+    order_repo = OrderRepository(db, user_id=uid)
+    engine = AccountingEngine(db=db, user_id=uid)
+
+    vet_tz = timezone(timedelta(hours=-4))
+    _, last_day = calendar.monthrange(year, month)
+    start_dt = datetime(year, month, 1, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    end_dt = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+
+    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
+    ledgers = engine.get_monthly_ledger_report(year=year, month=month)
+
+    def _to_vet_ym(dt: datetime | None) -> tuple[int, int] | None:
+        if not dt:
+            return None
+        aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+        v = aware.astimezone(vet_tz)
+        return (v.year, v.month)
+
+    vouchers = [
+        v
+        for v in voucher_repo.list_all(user_id=uid)
+        if v.voucher_date is None or _to_vet_ym(cast(datetime | None, v.voucher_date)) == (year, month)
+    ]
+
+    all_orders = order_repo.list_completed(user_id=uid)
+    all_tax_results = FIFOCostMethod().process_orders(all_orders)
+    period_orders = [o for o in all_orders if _to_vet_ym(cast(datetime | None, o.created_at)) == (year, month)]
+    period_tax_results = [r for r in all_tax_results if _to_vet_ym(r.created_at) == (year, month)]
+
+    bcv_vals = [float(o.bcv_rate) for o in period_orders if float(o.bcv_rate or 0.0) > 0]
+    bcv_rate = bcv_vals[-1] if bcv_vals else None
+    holder = str(getattr(current_user, "full_name", None) or current_user.username)
+    tax_id = str(getattr(current_user, "tax_id", None) or "").strip() or None
+
+    return {
+        "entries": entries,
+        "ledgers": ledgers,
+        "vouchers": vouchers,
+        "orders": period_orders,
+        "tax_results": period_tax_results,
+        "bcv_rate": bcv_rate,
+        "account_holder": holder,
+        "tax_id": tax_id,
+        "period": f"{year}-{month:02d}",
+    }
+
+
 @router.get("/export/excel")
 def export_accounting_excel(
     db: Annotated[Session, Depends(get_db)],
@@ -247,33 +431,22 @@ def export_accounting_excel(
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
 ) -> FileResponse:
-    """Exporta el reporte contable integral del operador en 4 pestañas (.xlsx)."""
-    uid = int(current_user.id) if current_user and current_user.id is not None else None
-    journal_repo = JournalEntryRepository(db, user_id=uid)
-    voucher_repo = BankVoucherRepository(db, user_id=uid)
-    engine = AccountingEngine(db=db, user_id=uid)
-
-    _, last_day = calendar.monthrange(year, month)
-    start_dt = datetime(year, month, 1, 0, 0, 0)
-    end_dt = datetime(year, month, last_day, 23, 59, 59, 999999)
-
-    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
-    ledgers = engine.get_monthly_ledger_report(year=year, month=month)
-    vouchers = [
-        v
-        for v in voucher_repo.list_all(user_id=uid)
-        if v.voucher_date is None
-        or (v.voucher_date.year == year and v.voucher_date.month == month)
-    ]
-
+    """Exporta el reporte contable integral del operador en 6 pestañas conformes con SENIAT (.xlsx)."""
+    ctx = _build_accounting_export_context(db, current_user, year, month)
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_p2p_{year}_{month:02d}.xlsx")
 
     ExcelReporter.generate_accounting_report(
-        journal_entries=entries,
-        ledger_summaries=ledgers,
-        vouchers=vouchers,
+        journal_entries=ctx["entries"],
+        ledger_summaries=ctx["ledgers"],
+        vouchers=ctx["vouchers"],
         output_path=file_path,
+        tax_results=ctx["tax_results"],
+        orders=ctx["orders"],
+        account_holder=ctx["account_holder"],
+        rif=ctx["tax_id"],
+        period=ctx["period"],
+        bcv_rate=ctx["bcv_rate"],
     )
 
     return FileResponse(
@@ -290,34 +463,22 @@ def export_accounting_pdf(
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
 ) -> FileResponse:
-    """Exporta el informe contable legal del operador listo para impresión fiscal SENIAT (.pdf)."""
-    uid = int(current_user.id) if current_user and current_user.id is not None else None
-    journal_repo = JournalEntryRepository(db, user_id=uid)
-    voucher_repo = BankVoucherRepository(db, user_id=uid)
-    engine = AccountingEngine(db=db, user_id=uid)
-
-    _, last_day = calendar.monthrange(year, month)
-    start_dt = datetime(year, month, 1, 0, 0, 0)
-    end_dt = datetime(year, month, last_day, 23, 59, 59, 999999)
-
-    entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
-    ledgers = engine.get_monthly_ledger_report(year=year, month=month)
-    vouchers = [
-        v
-        for v in voucher_repo.list_all(user_id=uid)
-        if v.voucher_date is None
-        or (v.voucher_date.year == year and v.voucher_date.month == month)
-    ]
-
+    """Exporta el informe contable legal multipágina del operador en horario VET (.pdf)."""
+    ctx = _build_accounting_export_context(db, current_user, year, month)
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_{year}_{month:02d}.pdf")
 
-    pdf_reporter = PDFReporter()
+    pdf_reporter = PDFReporter(
+        company_name=ctx["account_holder"],
+        rif=ctx["tax_id"] or "C.I. / RIF no registrado",
+    )
     pdf_reporter.generate_accounting_pdf(
-        journal_entries=entries,
-        ledger_summaries=ledgers,
-        vouchers=vouchers,
+        journal_entries=ctx["entries"],
+        ledger_summaries=ctx["ledgers"],
+        vouchers=ctx["vouchers"],
         output_path=file_path,
+        tax_results=ctx["tax_results"],
+        period=ctx["period"],
     )
 
     return FileResponse(
@@ -545,3 +706,143 @@ async def upload_voucher(
         "verification_status": voucher.verification_status,
         "matched_order_number": matched_order.order_number if matched_order else None,
     }
+
+
+@router.post("/statements/preview", response_model=StatementPreviewResponse)
+def preview_bank_statement(
+    file: Annotated[UploadFile, File()],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    bank_name: Annotated[str | None, Form()] = None,
+    column_mapping_json: Annotated[str | None, Form()] = None,
+    year_hint: Annotated[int | None, Form()] = None,
+) -> StatementPreviewResponse:
+    """Analiza un estado de cuenta bancario (PDF/XLSX/CSV/TXT), verifica saldo y sugiere conciliación."""
+    content = file.file.read(MAX_STATEMENT_BYTES + 1)
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El archivo de estado de cuenta está vacío.",
+        )
+    if len(content) > MAX_STATEMENT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="El archivo supera el límite máximo permitido de 10 MB.",
+        )
+
+    col_map: dict[str, str] | None = None
+    if column_mapping_json and column_mapping_json.strip():
+        try:
+            raw_map = json.loads(column_mapping_json)
+            if isinstance(raw_map, dict):
+                col_map = {str(k): str(v) for k, v in raw_map.items() if v}
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Formato inválido en mapeo de columnas JSON.",
+            ) from exc
+
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    importer = BankStatementImporter()
+    try:
+        res = importer.preview_from_bytes(
+            file_bytes=content,
+            filename=file.filename or "estado_cuenta.pdf",
+            db=db,
+            user_id=uid,
+            bank_name=bank_name,
+            column_mapping=col_map,
+            year_hint=year_hint,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return StatementPreviewResponse(
+        bank_name=res.bank_name,
+        file_type=res.file_type,
+        extraction_method=res.extraction_method,
+        detected_columns=res.detected_columns,
+        needs_column_mapping=res.needs_column_mapping,
+        detected_order=res.detected_order,
+        opening_balance=res.opening_balance,
+        closing_balance=res.closing_balance,
+        balance_verified=res.balance_verified,
+        balance_mismatch_count=res.balance_mismatch_count,
+        total_rows=res.total_rows,
+        p2p_matched_count=res.p2p_matched_count,
+        bank_fee_count=res.bank_fee_count,
+        duplicate_count=res.duplicate_count,
+        unmatched_count=res.unmatched_count,
+        rows=[
+            StatementPreviewRowResponse(
+                row_index=r.row_index,
+                date_vet=r.date_vet,
+                reference_number=r.reference_number,
+                concept=r.concept,
+                movement_type=r.movement_type,
+                amount_ves=r.amount_ves,
+                bank_fee_ves=r.bank_fee_ves,
+                balance_ves=r.balance_ves,
+                balance_ok=r.balance_ok,
+                balance_discrepancy=r.balance_discrepancy,
+                payment_method=r.payment_method,
+                suggested_action=r.suggested_action,
+                matched_order_number=r.matched_order_number,
+                matched_order_type=r.matched_order_type,
+                matched_order_crypto=r.matched_order_crypto,
+                matched_order_fiat=r.matched_order_fiat,
+                match_confidence=r.match_confidence,
+                notes=r.notes,
+            )
+            for r in res.rows
+        ],
+        warnings=res.warnings,
+        available_orders=[StatementAvailableOrderResponse(**o) for o in res.available_orders],
+    )
+
+
+@router.post("/statements/commit", response_model=StatementCommitResponse)
+def commit_bank_statement(
+    payload: StatementCommitRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+) -> StatementCommitResponse:
+    """Confirma y asienta en base de datos y Libro Diario las filas aprobadas del estado de cuenta."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    importer = BankStatementImporter()
+    commit_items = [
+        StatementCommitRow(
+            row_index=r.row_index,
+            date_vet=r.date_vet,
+            reference_number=r.reference_number,
+            concept=r.concept,
+            movement_type=r.movement_type,
+            amount_ves=r.amount_ves,
+            payment_method=r.payment_method,
+            action=r.action,
+            order_number=r.order_number,
+            bank_fee_ves=r.bank_fee_ves,
+        )
+        for r in payload.rows
+    ]
+    res = importer.commit_rows(
+        db=db,
+        user_id=uid,
+        bank_name=payload.bank_name,
+        rows=commit_items,
+    )
+    return StatementCommitResponse(
+        status="SUCCESS",
+        bank_name=res.bank_name,
+        created_vouchers=res.created_vouchers,
+        matched_orders=res.matched_orders,
+        bank_fees_recorded=res.bank_fees_recorded,
+        internal_transfers_recorded=res.internal_transfers_recorded,
+        unmatched_recorded=res.unmatched_recorded,
+        ignored_rows=res.ignored_rows,
+        journal_entries_created=res.journal_entries_created,
+        periods_affected=res.periods_affected,
+    )

@@ -43,6 +43,7 @@ Sistema automatizado de comercio P2P en Binance con arquitectura Fail-closed, ge
 5. **Cero Secretos en Logs o UI**: Prohibido registrar API Keys, tokens de Telegram o contraseñas en logs, excepciones, mensajes salientes o mostrarlas en texto plano en la UI.
 6. **Sin RPA No Oficial**: Solo utilizar la API oficial de Binance.
 7. **Auditorías de Seguridad Continuas**: Obligatorio invocar y ejecutar el skill `security-review` (SAST, SCA, escaneo de secretos en git history y revisión de vulnerabilidades) ante modificaciones en autenticación, endpoints expuestos, dependencias o antes de fusionar PRs a producción.
+8. **Auditoría Contable y Tributaria Venezuela Continua**: Obligatorio invocar y ejecutar el skill `venezuela-tax-cpa` ante modificaciones en cálculos fiscales, tasas BCV, motor contable, exportaciones (`Excel`, `PDF`, `CSV`, `Google Sheets`) o conciliación bancaria, verificando cumplimiento con LISLR, BA VEN-NIF N° 12, IGTF, hora VET (UTC-4) y formatos legales SENIAT.
 
 ## 🔄 Protocolo Obligatorio para Agentes (SDD & TDD)
 
@@ -50,7 +51,9 @@ Todo agente de IA que opere en este repositorio **DEBE** cumplir estrictamente e
 
 1. **Lectura Previa Obligatoria**: Consultar `.specify/memory/constitution.md`, `memory.md` y la especificación activa (`.specify/specs/NNN-*/tasks.md`) antes de proponer o realizar cualquier modificación.
 2. **Ciclo TDD**: Escribir la prueba unitaria/integración primero en rojo (`tests/`), verificar el fallo y luego escribir el código en verde (`src/`).
-3. **Auditoría Preventiva de Seguridad**: Si la tarea afecta seguridad, variables de entorno, modelos o infraestructura, ejecutar el skill `security-review` para descartar filtraciones o vulnerabilidades OWASP.
+3. **Auditoría Preventiva de Seguridad y Cumplimiento Tributario**:
+   - Si la tarea afecta seguridad, autenticación, variables de entorno, modelos o infraestructura, ejecutar el skill `security-review` para descartar filtraciones o vulnerabilidades OWASP.
+   - Si la tarea afecta lógica fiscal, contabilidad, tasas BCV, inventario cripto o exportes de reportes, ejecutar el skill `venezuela-tax-cpa` para validar la exactitud tributaria venezolana.
 4. **Actualización Inmediata de `tasks.md`**:
    - Cada tarea atómica completada debe ser marcada **inmediatamente** con `[x]` en el archivo `.specify/specs/NNN-*/tasks.md` correspondiente.
    - No avanzar a la siguiente tarea sin haber marcado la actual.

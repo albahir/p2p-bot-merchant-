@@ -202,6 +202,7 @@ class P2PBotEngine:
         # 8. Servicio de monitoreo continuo de tasas BCV y alertas de arbitraje P2P
         self.rate_alert_service = RateAlertService(cooldown_seconds=600)
         self.notifier.set_bot_commands()
+        self.notifier.sync_bot_profile_to_db()
 
         # Registrar evento de inicio en auditoría append-only
         self.audit.log(
@@ -314,6 +315,7 @@ class P2PBotEngine:
         db_state = SessionLocal()
         try:
             persisted_pause = get_bot_paused_state(db_state)
+            self.notifier.flush_db_outbox(db_state)
         finally:
             db_state.close()
 

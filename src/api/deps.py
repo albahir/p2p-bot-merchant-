@@ -1,11 +1,12 @@
 """Inyección de dependencias para FastAPI: Base de datos, configuración y RBAC."""
 
+import time
 from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, make_transient_to_detached
 
 from config.settings import Settings
 from src.api.security import decode_access_token
@@ -16,6 +17,56 @@ from src.data.repositories import UserRepository
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
 
 _settings_instance: Settings | None = None
+
+# Caché de corta duración (TTL 20s) para evitar round-trips repetitivos a Neon PostgreSQL al cambiar pestañas.
+# Se invalida de inmediato ante cambios de rol, suspensión de cuenta o actualización de perfil.
+_USER_AUTH_CACHE: dict[tuple[int, int], tuple[float, dict[str, Any]]] = {}
+_USER_AUTH_CACHE_TTL_SECONDS: float = 20.0
+
+_USER_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "id",
+    "username",
+    "full_name",
+    "tax_id",
+    "email",
+    "email_verified",
+    "password_hash",
+    "security_question",
+    "security_answer_hash",
+    "recovery_key_hash",
+    "role",
+    "telegram_id",
+    "google_sheet_id",
+    "google_refresh_token_enc",
+    "google_auth_type",
+    "preferred_banks_json",
+    "bank_balances_json",
+    "is_active",
+    "created_at",
+)
+
+
+def invalidate_user_auth_cache(user_id: int | None = None) -> None:
+    """Invalida la caché de autenticación (un usuario específico o todos)."""
+    if user_id is None:
+        _USER_AUTH_CACHE.clear()
+        return
+    target = int(user_id)
+    keys_to_remove = [k for k in _USER_AUTH_CACHE if k[1] == target]
+    for k in keys_to_remove:
+        _USER_AUTH_CACHE.pop(k, None)
+
+
+def _snapshot_user(user: User) -> dict[str, Any]:
+    return {field: getattr(user, field, None) for field in _USER_SNAPSHOT_FIELDS}
+
+
+def _restore_user_in_session(db: Session, snapshot: dict[str, Any]) -> User:
+    valid_cols = {c.key for c in User.__table__.columns}
+    filtered = {k: v for k, v in snapshot.items() if k in valid_cols}
+    detached = User(**filtered)
+    make_transient_to_detached(detached)
+    return db.merge(detached, load=False)
 
 
 def get_settings() -> Settings:
@@ -60,9 +111,23 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    bind_id = id(db.get_bind())
+    cache_key = (bind_id, user_id)
+    now_ts = time.monotonic()
+    cached_entry = _USER_AUTH_CACHE.get(cache_key)
+    if cached_entry is not None and (now_ts - cached_entry[0]) < _USER_AUTH_CACHE_TTL_SECONDS:
+        snap = cached_entry[1]
+        if not snap.get("is_active", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Esta cuenta de usuario ha sido desactivada.",
+            )
+        return _restore_user_in_session(db, snap)
+
     repo = UserRepository(db)
     user = repo.get_by_id(user_id)
     if not user:
+        _USER_AUTH_CACHE.pop(cache_key, None)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="El usuario asociado al token no existe.",
@@ -70,11 +135,13 @@ def get_current_user(
         )
 
     if not user.is_active:
+        _USER_AUTH_CACHE.pop(cache_key, None)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Esta cuenta de usuario ha sido desactivada.",
         )
 
+    _USER_AUTH_CACHE[cache_key] = (now_ts, _snapshot_user(user))
     return user
 
 

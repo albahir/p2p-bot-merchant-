@@ -328,6 +328,176 @@ class AccountingEngine:
 
         return created
 
+    def record_bank_fee_voucher(self, voucher: BankVoucher) -> list[JournalEntry]:
+        """Asienta una comisión bancaria deducible (LISLR Art. 27): DEBE 5.2.01 / HABER 1.1.01."""
+        fee_amount = round(float(voucher.bank_fee_ves or voucher.amount_ves or 0.0), 2)
+        if fee_amount <= 0.0:
+            return []
+
+        if voucher.id is not None:
+            existing = (
+                self.db.query(JournalEntry)
+                .filter(
+                    JournalEntry.voucher_id == voucher.id,
+                    JournalEntry.account_code == self.ACCOUNT_BANK_FEE,
+                )
+                .all()
+            )
+            if existing:
+                return existing
+
+        entry_number = self.journal_repo.get_next_entry_number()
+        last_entry = self.journal_repo.get_last_entry()
+        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+        dt = cast(datetime | None, voucher.voucher_date) or datetime.now(UTC)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(UTC).replace(tzinfo=None)
+
+        safe_ref = str(voucher.reference_number or "FEE")[:50]
+        concept_txt = str(voucher.concept or "Comisión bancaria")[:180]
+        lines: list[dict[str, Any]] = [
+            {
+                "account_code": self.ACCOUNT_BANK_FEE,
+                "account_name": "Gastos Financieros - Comisiones Bancarias",
+                "debit": fee_amount,
+                "credit": 0.0,
+                "reference": safe_ref,
+                "description": f"Comisión bancaria deducible ({voucher.bank_name}) - {concept_txt}",
+            },
+            {
+                "account_code": self.ACCOUNT_BANCO_VES,
+                "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}"[:100],
+                "debit": 0.0,
+                "credit": fee_amount,
+                "reference": safe_ref,
+                "description": f"Débito bancario por comisión ({voucher.bank_name}) - Ref {safe_ref}",
+            },
+        ]
+
+        created: list[JournalEntry] = []
+        eff_uid = self.user_id if self.user_id is not None else voucher.user_id
+        for line in lines:
+            entry_hash = self._compute_hash(
+                prev_hash=current_prev_hash,
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                debit=line["debit"],
+                credit=line["credit"],
+                reference=line["reference"],
+            )
+            entry = JournalEntry(
+                user_id=eff_uid,
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                account_name=str(line["account_name"])[:100],
+                debit=line["debit"],
+                credit=line["credit"],
+                reference=safe_ref,
+                description=line["description"],
+                voucher_id=voucher.id,
+                prev_hash=current_prev_hash,
+                entry_hash=entry_hash,
+            )
+            saved = self.journal_repo.create_entry(entry)
+            created.append(saved)
+            current_prev_hash = entry_hash
+
+        return created
+
+    def record_capital_transfer_voucher(self, voucher: BankVoucher) -> list[JournalEntry]:
+        """Asienta un traspaso o aporte de capital propio sin afectar ingresos gravables ni costo P2P."""
+        amount_ves = round(float(voucher.amount_ves or 0.0), 2)
+        if amount_ves <= 0.0:
+            return []
+
+        if voucher.id is not None:
+            existing = (
+                self.db.query(JournalEntry)
+                .filter(JournalEntry.voucher_id == voucher.id)
+                .all()
+            )
+            if existing:
+                return existing
+
+        entry_number = self.journal_repo.get_next_entry_number()
+        last_entry = self.journal_repo.get_last_entry()
+        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+        dt = cast(datetime | None, voucher.voucher_date) or datetime.now(UTC)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(UTC).replace(tzinfo=None)
+
+        mov_type = str(voucher.movement_type or "CREDIT").upper()
+        safe_ref = str(voucher.reference_number or "TRASPASO")[:50]
+        lines: list[dict[str, Any]]
+        if mov_type == "CREDIT":
+            lines = [
+                {
+                    "account_code": self.ACCOUNT_BANCO_VES,
+                    "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}"[:100],
+                    "debit": amount_ves,
+                    "credit": 0.0,
+                    "description": f"Traspaso / aporte de capital propio - Ref {safe_ref}",
+                },
+                {
+                    "account_code": "3.1.01",
+                    "account_name": "Capital Social / Aportes del Comerciante",
+                    "debit": 0.0,
+                    "credit": amount_ves,
+                    "description": f"Contrapartida capital propio (no gravable P2P) - Ref {safe_ref}",
+                },
+            ]
+        else:
+            lines = [
+                {
+                    "account_code": "3.1.01",
+                    "account_name": "Capital Social / Retiros y Traspasos Propios",
+                    "debit": amount_ves,
+                    "credit": 0.0,
+                    "description": f"Retiro / traspaso entre cuentas propias - Ref {safe_ref}",
+                },
+                {
+                    "account_code": self.ACCOUNT_BANCO_VES,
+                    "account_name": f"Banco Nacional VES - {voucher.bank_name or 'Comercial'}"[:100],
+                    "debit": 0.0,
+                    "credit": amount_ves,
+                    "description": f"Egreso bancario por traspaso propio - Ref {safe_ref}",
+                },
+            ]
+
+        created: list[JournalEntry] = []
+        eff_uid = self.user_id if self.user_id is not None else voucher.user_id
+        for line in lines:
+            entry_hash = self._compute_hash(
+                prev_hash=current_prev_hash,
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=line["account_code"],
+                debit=float(line["debit"]),
+                credit=float(line["credit"]),
+                reference=safe_ref,
+            )
+            entry = JournalEntry(
+                user_id=eff_uid,
+                entry_number=entry_number,
+                date_time=dt,
+                account_code=str(line["account_code"]),
+                account_name=str(line["account_name"])[:100],
+                debit=float(line["debit"]),
+                credit=float(line["credit"]),
+                reference=safe_ref,
+                description=str(line["description"]),
+                voucher_id=voucher.id,
+                prev_hash=current_prev_hash,
+                entry_hash=entry_hash,
+            )
+            saved = self.journal_repo.create_entry(entry)
+            created.append(saved)
+            current_prev_hash = entry_hash
+
+        return created
+
     def calculate_ledger_for_account(
         self,
         account_code: str,
@@ -460,11 +630,20 @@ class AccountingEngine:
             desc = (e.description or "").lower()
             acc_name = str(e.account_name or "")
             acc_lower = acc_name.lower()
+            extracted_bank = ""
+            if " - " in acc_name:
+                extracted_bank = acc_name.split(" - ", 1)[1].strip()
+
+            from src.core.spread_monitor import SpreadMonitor
 
             for b_name in bank_stats:
                 if b_name == "Banco Principal" and not has_explicit_banks:
                     continue
-                if b_name.lower() in desc or b_name.lower() in acc_lower:
+                if (
+                    b_name.lower() in desc
+                    or b_name.lower() in acc_lower
+                    or (extracted_bank and SpreadMonitor.bank_matches_user_bank(extracted_bank, b_name))
+                ):
                     matched_bank = b_name
                     break
 
@@ -472,11 +651,8 @@ class AccountingEngine:
                 if has_explicit_banks and len(explicit_banks_cfg) == 1:
                     matched_bank = next(iter(explicit_banks_cfg.keys()))
                 else:
-                    extracted_bank = ""
-                    if " - " in acc_name:
-                        extracted_bank = acc_name.split(" - ", 1)[1].strip()
                     if extracted_bank and extracted_bank.lower() not in ("comercial", "desconocido"):
-                        matched_bank = extracted_bank
+                        matched_bank = SpreadMonitor.canonical_user_bank_name(extracted_bank) or extracted_bank
                     elif not has_explicit_banks and "Banco Principal" in bank_stats:
                         matched_bank = "Banco Principal"
                     else:

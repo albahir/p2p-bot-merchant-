@@ -1,24 +1,16 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  BCVRates,
-  BinanceStatusResponse,
-  BotStatus,
-  User,
-  getBCVRates,
-  getBinanceSettings,
-  getBotStatus,
-  getCurrentUser,
-  loginTelegramWebApp,
   logout,
   pauseBot,
+  prefetchRouteData,
   resumeBot,
 } from "@/lib/api";
 import { useTheme } from "@/lib/theme-context";
-import { useWebSocket } from "@/lib/useWebSocket";
+import { useTelemetry } from "@/lib/telemetry-context";
 
 interface NavItem {
   href: string;
@@ -40,6 +32,12 @@ const NAV_ITEMS: NavItem[] = [
     label: "Calculadora",
     shortLabel: "Calculadora",
     icon: "calculate",
+  },
+  {
+    href: "/market",
+    label: "Velas P2P",
+    shortLabel: "Velas",
+    icon: "candlestick_chart",
   },
   {
     href: "/orders",
@@ -82,77 +80,10 @@ interface AppShellProps {
 export function AppShell({ children, title, subtitle, badge, actions }: AppShellProps) {
   const pathname = usePathname();
   const { theme, setTheme } = useTheme();
+  const { user, bcv, botStatus, binanceStatus, wsConnected, refreshTelemetry } = useTelemetry();
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [user, setUser] = useState<User | null>(null);
-  const [bcv, setBcv] = useState<BCVRates | null>(null);
-  const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
-  const [binanceStatus, setBinanceStatus] = useState<BinanceStatusResponse | null>(null);
   const [togglingBot, setTogglingBot] = useState(false);
-
-  const loadTelemetry = useCallback(async () => {
-    const currentUser = getCurrentUser();
-    setUser(currentUser);
-
-    try {
-      const rates = await getBCVRates();
-      setBcv(rates);
-    } catch {
-      // Silencioso en modo desconectado
-    }
-
-    if (currentUser) {
-      try {
-        const status = await getBotStatus();
-        setBotStatus(status);
-      } catch {
-        // Silencioso si la sesión expiró o el backend aún no responde
-        setUser(getCurrentUser());
-      }
-    } else {
-      setBotStatus(null);
-    }
-
-    if (currentUser && (currentUser.role === "ADMIN" || currentUser.role === "TRADER")) {
-      try {
-        const binance = await getBinanceSettings();
-        setBinanceStatus(binance);
-      } catch {
-        // Silencioso para usuarios sin permisos o backend desconectado
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    // Auto-SSO silencioso cuando se abre desde Telegram Mini App
-    if (typeof window !== "undefined") {
-      const tg = (window as any).Telegram?.WebApp;
-      if (tg) {
-        tg.ready?.();
-        tg.expand?.();
-        if (!getCurrentUser() && tg.initData) {
-          loginTelegramWebApp(tg.initData)
-            .then((res) => {
-              setUser(res.user);
-              loadTelemetry();
-            })
-            .catch(() => {});
-        }
-      }
-    }
-
-    loadTelemetry();
-    const interval = setInterval(loadTelemetry, 25000);
-    return () => clearInterval(interval);
-  }, [loadTelemetry]);
-
-  const { isConnected: wsConnected } = useWebSocket((msg) => {
-    if (msg.type === "bcv_update" && msg.data) {
-      setBcv((prev) => ({ ...(prev || {}), ...msg.data }));
-    } else if (msg.type === "bot_status" && msg.data) {
-      setBotStatus((prev) => ({ ...(prev || {}), ...msg.data }));
-    }
-  });
 
   async function handleToggleBot() {
     if (!user || user.role !== "ADMIN" || togglingBot) return;
@@ -163,7 +94,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
       } else {
         await pauseBot();
       }
-      await loadTelemetry();
+      await refreshTelemetry(true);
     } catch {
       // Ignorar error visualmente, mantenido fail-closed
     } finally {
@@ -191,7 +122,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
 
   return (
     <div
-      className={`min-h-screen bg-background text-on-surface flex flex-col lg:flex-row ${
+      className={`min-h-dvh bg-background text-on-surface flex flex-col lg:flex-row ${
         isPaused ? "border-t-4 border-error" : ""
       }`}
     >
@@ -252,6 +183,9 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                   <Link
                     key={item.href}
                     href={item.href}
+                    prefetch={true}
+                    onMouseEnter={() => prefetchRouteData(item.href)}
+                    onFocus={() => prefetchRouteData(item.href)}
                     aria-current={isActive ? "page" : undefined}
                     onClick={() => setMobileMenuOpen(false)}
                     className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-xs transition-all ${
