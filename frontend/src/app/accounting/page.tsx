@@ -6,6 +6,7 @@ import { AppShell } from "@/components/app-shell";
 import { BankAmountInput } from "@/components/bank-amount-input";
 import { StatementImportModal } from "@/components/statement-import-modal";
 import {
+  AccountingPeriodConfig,
   FiscalSummary,
   JournalEntryItem,
   LedgerSummaryItem,
@@ -20,6 +21,7 @@ import {
   createManualVoucher,
   downloadAccountingExcel,
   downloadAccountingPdf,
+  getAccountingPeriodConfig,
   getCachedApiResponse,
   getCachedUserBanks,
   getCurrentUser,
@@ -32,7 +34,9 @@ import {
   matchVoucherWithOrder,
   previewBankStatement,
   reconcileOrphanVouchers,
+  saveAccountingPeriodConfig,
   saveUserBanksSettings,
+  syncOrders,
   uploadVoucherFile,
 } from "@/lib/api";
 
@@ -107,7 +111,7 @@ export default function AccountingPage() {
       ? getCachedApiResponse<JournalEntryItem[]>("/api/accounting/journal?")
       : null;
 
-  const [user, setUser] = useState<User | null>(initialUser);
+  const [user, setUser] = useState<User | null>(null);
   const [year, setYear] = useState<number>(initY);
   const [month, setMonth] = useState<number>(initM);
   const [userBanks, setUserBanks] = useState<string[]>(defaultBanksList);
@@ -116,7 +120,13 @@ export default function AccountingPage() {
   const [showBankSelector, setShowBankSelector] = useState<boolean>(false);
   const [initialUsdt, setInitialUsdt] = useState<number>(0);
   const [committedUsdt, setCommittedUsdt] = useState<number>(0);
+  const [initialUsdtCostVes, setInitialUsdtCostVes] = useState<number>(0);
+  const [periodConfig, setPeriodConfig] = useState<AccountingPeriodConfig | null>(null);
+  const [syncingPeriodOrders, setSyncingPeriodOrders] = useState<boolean>(false);
+  const [closeActualUsdt, setCloseActualUsdt] = useState<number>(0);
+  const [closeActualBanks, setCloseActualBanks] = useState<Record<string, number>>({});
   const reqSeqRef = useRef<number>(0);
+  const periodHydratingRef = useRef<boolean>(false);
   const banksSyncedRef = useRef<boolean>(false);
   const [activeTab, setActiveTab] = useState<AccountingTab>("JOURNAL");
 
@@ -166,43 +176,103 @@ export default function AccountingPage() {
 
   // Sincronizar bancos registrados del usuario desde el servidor al montar
   useEffect(() => {
+    setUser(getCurrentUser());
     if (banksSyncedRef.current) return;
     banksSyncedRef.current = true;
     getUserBanksSettings()
       .then((res) => {
         if (res && res.preferred_banks && res.preferred_banks.length > 0) {
           setUserBanks(res.preferred_banks);
-          setBankInitialMap(res.bank_initial_balances || {});
-          setCommittedBankMap(res.bank_initial_balances || {});
           setManualBank(res.preferred_banks[0]);
         }
       })
       .catch(() => null);
   }, []);
 
-  // Debounce de 750ms para saldos iniciales por banco: evita disparar peticiones por cada dígito/cero tecleado
+  // Cargar apertura y arqueo aislados por período (YYYY-MM) con arrastre automático Mes N-1 -> Mes N
   useEffect(() => {
+    const current = getCurrentUser();
+    if (!current || current.role === "INVITADO") return;
+    let cancelled = false;
+    periodHydratingRef.current = true;
+    getAccountingPeriodConfig(year, month)
+      .then((cfg) => {
+        if (cancelled) return;
+        setPeriodConfig(cfg);
+        setBankInitialMap(cfg.initial_banks || {});
+        setCommittedBankMap(cfg.initial_banks || {});
+        setInitialUsdt(cfg.initial_usdt || 0);
+        setCommittedUsdt(cfg.initial_usdt || 0);
+        setInitialUsdtCostVes(cfg.initial_usdt_cost_ves || 0);
+        setPeriodClosed(Boolean(cfg.is_closed));
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (!cancelled) {
+          setTimeout(() => {
+            periodHydratingRef.current = false;
+          }, 150);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [year, month]);
+
+  const persistCurrentPeriodOpening = useCallback(
+    (nextBanks: Record<string, number>, nextUsdt: number, nextCostVes?: number) => {
+      if (periodHydratingRef.current) return;
+      const bcvDay1 = periodConfig?.bcv_day1_rate || 0;
+      const effCost =
+        nextCostVes !== undefined
+          ? nextCostVes
+          : initialUsdtCostVes > 0
+          ? initialUsdtCostVes
+          : nextUsdt > 0 && bcvDay1 > 0
+          ? Number((nextUsdt * bcvDay1).toFixed(2))
+          : 0;
+      void saveAccountingPeriodConfig({
+        year,
+        month,
+        initial_usdt: nextUsdt,
+        initial_usdt_cost_ves: effCost,
+        initial_banks: nextBanks,
+      })
+        .then((saved) => setPeriodConfig(saved))
+        .catch(() => null);
+    },
+    [year, month, initialUsdtCostVes, periodConfig?.bcv_day1_rate]
+  );
+
+  // Debounce de 750ms para saldos iniciales por banco aislados al período actual
+  useEffect(() => {
+    if (periodHydratingRef.current) return;
     const timer = setTimeout(() => {
       setCommittedBankMap((prev) => {
         const prevJson = JSON.stringify(prev);
         const nextJson = JSON.stringify(bankInitialMap);
         if (prevJson === nextJson) return prev;
-        void saveUserBanksSettings({
-          preferred_banks: userBanks,
-          bank_initial_balances: bankInitialMap,
-        });
+        persistCurrentPeriodOpening(bankInitialMap, initialUsdt);
         return { ...bankInitialMap };
       });
     }, 750);
     return () => clearTimeout(timer);
-  }, [bankInitialMap, userBanks]);
+  }, [bankInitialMap, initialUsdt, persistCurrentPeriodOpening]);
 
   useEffect(() => {
+    if (periodHydratingRef.current) return;
     const timer = setTimeout(() => {
-      setCommittedUsdt(initialUsdt);
+      setCommittedUsdt((prev) => {
+        if (prev === initialUsdt) return prev;
+        const bcvDay1 = periodConfig?.bcv_day1_rate || 0;
+        const autoCost = initialUsdt > 0 && bcvDay1 > 0 ? Number((initialUsdt * bcvDay1).toFixed(2)) : 0;
+        setInitialUsdtCostVes(autoCost);
+        persistCurrentPeriodOpening(bankInitialMap, initialUsdt, autoCost);
+        return initialUsdt;
+      });
     }, 750);
     return () => clearTimeout(timer);
-  }, [initialUsdt]);
+  }, [initialUsdt, bankInitialMap, periodConfig?.bcv_day1_rate, persistCurrentPeriodOpening]);
 
   function handleUpdateBankInitial(bankName: string, amount: number) {
     setBankInitialMap((prev) => ({
@@ -219,12 +289,36 @@ export default function AccountingPage() {
     setBankInitialMap(nextMap);
     setCommittedBankMap((prev) => {
       if (JSON.stringify(prev) === JSON.stringify(nextMap)) return prev;
-      void saveUserBanksSettings({
-        preferred_banks: userBanks,
-        bank_initial_balances: nextMap,
-      });
+      persistCurrentPeriodOpening(nextMap, initialUsdt);
       return nextMap;
     });
+  }
+
+  async function handleSyncPeriodOrders() {
+    setFeedback(null);
+    setSyncingPeriodOrders(true);
+    const mLabel = MONTHS.find((m) => m.value === month)?.label || String(month);
+    try {
+      const res = await syncOrders(31, undefined, year, month);
+      setFeedback({
+        type: "success",
+        text:
+          res?.message ||
+          `Órdenes de ${mLabel} ${year} sincronizadas con tasa BCV histórica.`,
+      });
+      const cfg = await getAccountingPeriodConfig(year, month).catch(() => null);
+      if (cfg) setPeriodConfig(cfg);
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text:
+          err.message ||
+          `No se pudo sincronizar ${mLabel} ${year} desde Binance API. Verifica tu API Key o sube el Excel en Órdenes.`,
+      });
+    } finally {
+      setSyncingPeriodOrders(false);
+    }
   }
 
   function handleToggleUserBank(rawBank: string) {
@@ -367,6 +461,14 @@ export default function AccountingPage() {
   async function handleUploadReceipt(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 15 * 1024 * 1024) {
+      setFeedback({
+        type: "error",
+        text: "El comprobante supera el límite de 15 MB. Comprímelo o recorta la captura antes de subirlo.",
+      });
+      if (voucherInputRef.current) voucherInputRef.current.value = "";
+      return;
+    }
     setFeedback(null);
     setUploadingOcr(true);
     try {
@@ -393,6 +495,14 @@ export default function AccountingPage() {
   async function handleUploadStatement(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      setFeedback({
+        type: "error",
+        text: "El estado de cuenta supera el límite de 25 MB. Divide el período o sube el PDF/captura optimizada.",
+      });
+      if (statementInputRef.current) statementInputRef.current.value = "";
+      return;
+    }
     setFeedback(null);
     setUploadingStatement(true);
     try {
@@ -580,8 +690,26 @@ export default function AccountingPage() {
 
           <button
             type="button"
-            onClick={() => setShowCloseModal(true)}
-            className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 flex items-center gap-1 whitespace-nowrap"
+            onClick={() => {
+              const initActualBanks: Record<string, number> = {};
+              for (const b of bankBoxes) {
+                initActualBanks[b.bank_name] =
+                  periodConfig?.actual_final_banks?.[b.bank_name] ??
+                  Number(b.theoretical_ves.toFixed(2));
+              }
+              setCloseActualBanks(initActualBanks);
+              setCloseActualUsdt(
+                periodConfig?.actual_final_usdt ??
+                  Number(
+                    (
+                      fiscalSummary?.calculated_final_balance ??
+                      displayedTheoreticalUsdt
+                    ).toFixed(4)
+                  )
+              );
+              setShowCloseModal(true);
+            }}
+            className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 flex items-center gap-1 whitespace-nowrap cursor-pointer"
           >
             <span className="material-symbols-outlined text-[15px]">lock_clock</span>
             <span>Cerrar mes</span>
@@ -616,6 +744,96 @@ export default function AccountingPage() {
             </button>
           </div>
         )}
+
+        {/* Barra compacta de Modo del Período (Histórico vs En vivo) + Flujo en 4 Pasos */}
+        <section className="p-3 sm:p-3.5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span
+                className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border ${
+                  periodConfig?.is_historical_month
+                    ? "bg-secondary/15 border-secondary/35 text-secondary"
+                    : "bg-tertiary/15 border-tertiary/35 text-tertiary"
+                }`}
+              >
+                {periodConfig?.is_historical_month
+                  ? `AUDITORÍA HISTÓRICA · ${MONTHS.find((m) => m.value === month)?.label?.toUpperCase()} ${year}`
+                  : `MES EN CURSO · ${MONTHS.find((m) => m.value === month)?.label?.toUpperCase()} ${year}`}
+              </span>
+              {periodConfig?.source === "carried_over" && periodConfig.carried_from && (
+                <span className="text-[10px] font-mono text-primary bg-primary-container/10 border border-primary-container/30 px-2 py-0.5 rounded-md">
+                  Saldo inicial heredado de {periodConfig.carried_from}
+                </span>
+              )}
+              {periodConfig && periodConfig.bcv_day1_rate > 0 && (
+                <span className="text-[10px] font-mono text-slate-400">
+                  BCV día 1: Bs. {periodConfig.bcv_day1_rate.toFixed(4)}
+                </span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSyncPeriodOrders}
+              disabled={syncingPeriodOrders}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-semibold border flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                (periodConfig?.orders_count_in_period ?? 0) === 0
+                  ? "bg-primary-container/15 border-primary-container/50 text-primary hover:bg-primary-container/25"
+                  : "bg-surface-container border-[#1e2430] text-slate-200 hover:border-primary-container/40"
+              }`}
+            >
+              <span
+                className={`material-symbols-outlined text-[14px] ${
+                  syncingPeriodOrders ? "animate-spin" : ""
+                }`}
+              >
+                cloud_sync
+              </span>
+              <span>
+                {syncingPeriodOrders
+                  ? `Sincronizando ${MONTHS.find((m) => m.value === month)?.label}...`
+                  : `Sincronizar ${MONTHS.find((m) => m.value === month)?.label} (${periodConfig?.orders_count_in_period ?? 0} órd.)`}
+              </span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] font-mono">
+            {[
+              {
+                n: "1",
+                label: "Apertura (Bs + USDT)",
+                done: periodConfig?.source === "saved" || initialVes > 0 || initialUsdt > 0,
+              },
+              {
+                n: "2",
+                label: "Órdenes y Pagos",
+                done: (periodConfig?.orders_count_in_period ?? 0) > 0 || journalEntries.length > 0,
+              },
+              {
+                n: "3",
+                label: "Arqueo Final Real",
+                done: periodConfig?.actual_final_usdt !== null && periodConfig?.actual_final_usdt !== undefined,
+              },
+              {
+                n: "4",
+                label: "Cerrar y Descargar",
+                done: periodClosed,
+              },
+            ].map((s) => (
+              <div
+                key={s.n}
+                className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 truncate ${
+                  s.done
+                    ? "bg-tertiary/10 border-tertiary/30 text-tertiary"
+                    : "bg-surface-container border-[#1e2430] text-slate-400"
+                }`}
+              >
+                <span className="font-bold">{s.done ? "✓" : `${s.n}.`}</span>
+                <span className="truncate">{s.label}</span>
+              </div>
+            ))}
+          </div>
+        </section>
 
         {/* 3 Tarjetas Bento de Saldos y Conciliación OCR (En móvil: Saldos VES y USDT lado a lado en una línea) */}
         <section className="grid grid-cols-2 lg:grid-cols-12 gap-2.5 sm:gap-4">
@@ -806,7 +1024,7 @@ export default function AccountingPage() {
             <input
               ref={statementInputRef}
               type="file"
-              accept=".pdf,.xlsx,.xls,.csv,.txt"
+              accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv,.txt"
               onChange={handleUploadStatement}
               className="hidden"
             />
@@ -1334,82 +1552,167 @@ export default function AccountingPage() {
           </div>
         )}
 
-        {/* Modal de Seguridad de Cierre Mensual */}
-        {showCloseModal && (
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Confirmación de Seguridad de Cierre Contable"
-            className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 overscroll-contain"
-          >
-            <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-primary-container/40 p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain">
-              <div className="flex items-center gap-2 text-primary font-bold text-base">
-                <span className="material-symbols-outlined">gpp_maybe</span>
-                <span>Confirmación de Seguridad de Cierre Contable</span>
-              </div>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Estás sellando el período{" "}
-                <strong className="text-white">
-                  {MONTHS.find((m) => m.value === month)?.label} {year}
-                </strong>
-                . Se bloqueará la carga de recibos OCR adicionales en la sesión actual y podrás descargar los respaldos firmados. Escribe{" "}
-                <code className="text-primary font-mono font-bold">CERRAR-MES</code> para confirmar:
-              </p>
-              <input
-                type="text"
-                autoComplete="off"
-                aria-label="Confirmación textual CERRAR-MES"
-                enterKeyHint="done"
-                value={closeConfirmText}
-                onChange={(e) => setCloseConfirmText(e.target.value)}
-                placeholder="Escribe CERRAR-MES"
-                className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-sm font-mono text-white"
-              />
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCloseConfirmText("");
-                    setShowCloseModal(false);
-                  }}
-                  className="px-3.5 py-2 rounded-lg bg-surface-container text-xs text-slate-300"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  disabled={closeConfirmText !== "CERRAR-MES"}
-                  onClick={async () => {
-                    try {
-                      const periodStr = `${year}-${String(month).padStart(2, "0")}`;
-                      const closedRes = await closeFiscalPeriod({
-                        period: periodStr,
-                        initial_balance: initialUsdt,
-                        actual_final_balance: fiscalSummary?.calculated_final_balance,
-                      });
-                      setFiscalSummary(closedRes);
-                      setPeriodClosed(true);
+        {/* Modal de Arqueo Final Real y Cierre Mensual */}
+        {showCloseModal && (() => {
+          const theoUsdt = Number(
+            (fiscalSummary?.calculated_final_balance ?? displayedTheoreticalUsdt).toFixed(4)
+          );
+          const diffUsdt = Number((closeActualUsdt - theoUsdt).toFixed(4));
+          const theoTotalVes = Number(displayedTheoreticalVes.toFixed(2));
+          const actualTotalVes = Number(
+            Object.values(closeActualBanks)
+              .reduce((acc, v) => acc + (Number(v) || 0), 0)
+              .toFixed(2)
+          );
+          const diffVes = Number((actualTotalVes - theoTotalVes).toFixed(2));
+          const isUsdtOk = Math.abs(diffUsdt) <= 0.05;
+          const isVesOk = Math.abs(diffVes) <= 1.0;
+
+          return (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Arqueo Final y Cierre Contable"
+              className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 overscroll-contain"
+            >
+              <div className="w-full max-w-lg rounded-2xl bg-surface-container-low border border-primary-container/40 p-5 sm:p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-primary font-bold text-base">
+                    <span className="material-symbols-outlined">fact_check</span>
+                    <span>
+                      Arqueo y Cierre · {MONTHS.find((m) => m.value === month)?.label} {year}
+                    </span>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Ingresa tu <strong className="text-white">saldo real de cierre</strong> en Binance y bancos para comparar contra el cálculo teórico. Ese saldo real pasará automáticamente como apertura del mes siguiente.
+                </p>
+
+                {/* Arqueo USDT */}
+                <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430] space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="text-slate-300 font-semibold">Binance USDT (Real vs Teórico)</span>
+                    <span className={isUsdtOk ? "text-tertiary font-bold" : "text-amber-400 font-bold"}>
+                      {isUsdtOk ? "✓ Cuadrado" : `Dif: ${diffUsdt >= 0 ? "+" : ""}${diffUsdt.toFixed(2)} USDT`}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Teórico: {theoUsdt.toFixed(2)} USDT
+                    </span>
+                    <BankAmountInput
+                      value={closeActualUsdt}
+                      onChange={setCloseActualUsdt}
+                      ariaLabel="Saldo final real en Binance USDT"
+                      className="w-36 px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-tertiary font-bold tabular-nums"
+                    />
+                  </div>
+                </div>
+
+                {/* Arqueo Bancos VES */}
+                <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430] space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="text-slate-300 font-semibold">Bancos VES (Real vs Teórico)</span>
+                    <span className={isVesOk ? "text-tertiary font-bold" : "text-amber-400 font-bold"}>
+                      {isVesOk ? "✓ Cuadrado" : `Dif: ${diffVes >= 0 ? "+" : ""}Bs. ${diffVes.toFixed(2)}`}
+                    </span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {bankBoxes.map((b) => (
+                      <div key={b.bank_name} className="flex items-center justify-between gap-2 text-xs font-mono">
+                        <div className="min-w-0">
+                          <div className="text-white truncate">{b.bank_name}</div>
+                          <div className="text-[10px] text-slate-400">
+                            Teórico: Bs. {b.theoretical_ves.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </div>
+                        </div>
+                        <BankAmountInput
+                          value={closeActualBanks[b.bank_name] ?? 0}
+                          onChange={(val) =>
+                            setCloseActualBanks((prev) => ({ ...prev, [b.bank_name]: val }))
+                          }
+                          ariaLabel={`Saldo final real en ${b.bank_name}`}
+                          className="w-36 px-2.5 py-1 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-primary font-bold tabular-nums"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-slate-300 mb-1.5">
+                    Escribe <code className="text-primary font-mono font-bold">CERRAR-MES</code> para sellar el período:
+                  </label>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    aria-label="Confirmación textual CERRAR-MES"
+                    enterKeyHint="done"
+                    value={closeConfirmText}
+                    onChange={(e) => setCloseConfirmText(e.target.value)}
+                    placeholder="Escribe CERRAR-MES"
+                    className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-sm font-mono text-white"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
                       setCloseConfirmText("");
                       setShowCloseModal(false);
-                      setFeedback({
-                        type: "success",
-                        text: `Período ${periodStr} sellado y persistido en base de datos (${closedRes.status}). Descarga tu Excel o PDF auditable arriba.`,
-                      });
-                    } catch (err: any) {
-                      setFeedback({
-                        type: "error",
-                        text: err.message || "Error al persistir el cierre mensual en base de datos.",
-                      });
-                    }
-                  }}
-                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold disabled:opacity-40 cursor-pointer"
-                >
-                  Confirmar Sello Contable
-                </button>
+                    }}
+                    className="px-3.5 py-2 rounded-lg bg-surface-container text-xs text-slate-300 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={closeConfirmText !== "CERRAR-MES"}
+                    onClick={async () => {
+                      try {
+                        const periodStr = `${year}-${String(month).padStart(2, "0")}`;
+                        const savedCfg = await saveAccountingPeriodConfig({
+                          year,
+                          month,
+                          initial_usdt: initialUsdt,
+                          initial_usdt_cost_ves: initialUsdtCostVes,
+                          initial_banks: bankInitialMap,
+                          actual_final_usdt: closeActualUsdt,
+                          actual_final_banks: closeActualBanks,
+                          mark_closed: true,
+                        });
+                        setPeriodConfig(savedCfg);
+                        const closedRes = await closeFiscalPeriod({
+                          period: periodStr,
+                          initial_balance: initialUsdt,
+                          actual_final_balance: closeActualUsdt,
+                        });
+                        setFiscalSummary(closedRes);
+                        setPeriodClosed(true);
+                        setCloseConfirmText("");
+                        setShowCloseModal(false);
+                        setFeedback({
+                          type: "success",
+                          text: `Período ${periodStr} sellado (${closedRes.status}). Arqueo real guardado para el Excel/PDF y arrastrado al mes siguiente.`,
+                        });
+                      } catch (err: any) {
+                        setFeedback({
+                          type: "error",
+                          text: err.message || "Error al persistir el cierre mensual en base de datos.",
+                        });
+                      }
+                    }}
+                    className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold disabled:opacity-40 cursor-pointer"
+                  >
+                    Confirmar Sello Contable
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         <StatementImportModal
           isOpen={Boolean(statementPreview)}

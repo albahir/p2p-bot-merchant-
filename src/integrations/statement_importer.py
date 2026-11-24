@@ -10,14 +10,19 @@ y respaldo opcional con IA multimodal para PDFs escaneados.
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import io
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Any, Literal, cast
 
 import httpx
@@ -25,6 +30,7 @@ import pandas as pd
 import pdfplumber
 from fastapi import HTTPException, status
 from pdfplumber.utils.exceptions import PdfminerException
+from PIL import Image, ImageFilter, ImageOps
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PdfReadError
 from sqlalchemy.orm import Session
@@ -40,15 +46,33 @@ from src.reporting.normalizers import (
     normalize_text,
     parse_monetary_amount,
 )
+from src.security.file_guards import (
+    MAX_OCR_IMAGE_PIXELS,
+    MAX_STATEMENT_UPLOAD_BYTES,
+    assert_not_executable_payload,
+    build_clean_ocr_env,
+    compute_safe_pdf_render_scale,
+    image_to_clean_png_bytes,
+    parse_html_table_rows,
+    sanitize_and_load_image,
+    validate_image_magic_bytes,
+    validate_pdf_safety,
+    validate_xls_safety,
+    validate_xlsx_zip_safety,
+)
 
 logger = logging.getLogger("statement_importer")
 
 VET_TZ = timezone(timedelta(hours=-4))
 
-MAX_STATEMENT_BYTES = 15 * 1024 * 1024  # 15 MB anti-DoS (soporta estados semestrales multi-página)
+MAX_STATEMENT_BYTES = MAX_STATEMENT_UPLOAD_BYTES  # 25 MB anti-DoS sin bloquear extractos extensos ni capturas
 MAX_STATEMENT_ROWS = 5000
 MAX_PDF_PAGES = 150
 PDF_AI_CHUNK_PAGES = 4
+MAX_OCR_IMAGE_WIDTH = 3600
+MAX_OCR_IMAGE_HEIGHT = 14000
+MAX_OCR_IMAGE_DIMENSION = MAX_OCR_IMAGE_HEIGHT
+IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp")
 
 StatementAction = Literal[
     "P2P_MATCH",
@@ -183,6 +207,7 @@ _BANK_FEE_KEYWORDS: tuple[str, ...] = (
     "PORTES",
     "EMISION EDO",
 )
+_COMIS_ABBREV_RE = re.compile(r"\bCOMIS[.,]?\b")
 
 _PAGO_MOVIL_KEYWORDS: tuple[str, ...] = (
     "PAGO MOVIL",
@@ -511,7 +536,9 @@ def _infer_payment_method(concept: str) -> str:
 
 def _is_bank_fee_concept(concept: str) -> bool:
     upper = normalize_text(concept)
-    return any(k in upper for k in _BANK_FEE_KEYWORDS)
+    if any(k in upper for k in _BANK_FEE_KEYWORDS):
+        return True
+    return bool(_COMIS_ABBREV_RE.search(upper))
 
 
 def _extract_reference(text: str, explicit_ref: str | None = None) -> tuple[str, str]:
@@ -553,6 +580,37 @@ def _match_header_role(col_name: str) -> str | None:
             alias_clean = re.sub(r"[^a-z0-9 ]", " ", alias).strip()
             if len(alias_clean) >= 5 and alias_clean in norm_alpha:
                 return role
+
+    # Tolerancia controlada a errores tipográficos leves de OCR en cabeceras (ej. "CARGS", "hgresos", "sSaldo", "Desctipeion")
+    compact = re.sub(r"\s+", "", norm_alpha)
+    if compact and not re.search(r"\d{2}", compact):
+        ocr_header_map: dict[str, str] = {
+            "ree": "reference",
+            "ref": "reference",
+            "cargs": "debit",
+            "egres0s": "debit",
+            "hgresos": "credit",
+            "ingres0s": "credit",
+            "ssaldo": "balance",
+            "sald0": "balance",
+            "sald0s": "balance",
+        }
+        if compact in ocr_header_map:
+            return ocr_header_map[compact]
+        if len(compact) >= 5:
+            best_role: str | None = None
+            best_ratio = 0.0
+            for role, aliases in _HEADER_SYNONYMS.items():
+                for alias in aliases:
+                    alias_c = re.sub(r"[^a-z0-9]", "", alias)
+                    if len(alias_c) < 5:
+                        continue
+                    ratio = SequenceMatcher(None, compact, alias_c).ratio()
+                    if ratio >= 0.80 and ratio > best_ratio:
+                        best_ratio = ratio
+                        best_role = role
+            if best_role is not None:
+                return best_role
     return None
 
 
@@ -935,6 +993,277 @@ def _calibrate_pdf_column_bands(
     return cols
 
 
+_OCR_GLUED_MONEY_RE = re.compile(
+    r"^([+-]?\s*(?:\d{1,3}(?:[.,]\d{3})+|\d+)[.,]\d{2})([+-]?\s*(?:\d{1,3}(?:[.,]\d{3})+|\d+)[.,]\d{2})$"
+)
+_OCR_GLUED_DATE_REF_RE = re.compile(r"^(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})(\d{5,})$")
+_OCR_GLUED_REF_DESC_RE = re.compile(r"^([A-Za-z]?\d{8,16})(N[DC]\s*[-–].*|[A-Z]{2,}.*)$")
+
+_RAPIDOCR_ENGINE: Any = None
+_RAPIDOCR_LOCK = threading.Lock()
+
+
+def _get_rapidocr_engine() -> Any:
+    """Inicializa de forma perezosa y thread-safe el motor local RapidOCR (ONNX)."""
+    global _RAPIDOCR_ENGINE
+    if _RAPIDOCR_ENGINE is not None:
+        return _RAPIDOCR_ENGINE
+    with _RAPIDOCR_LOCK:
+        if _RAPIDOCR_ENGINE is None:
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+
+                _RAPIDOCR_ENGINE = RapidOCR()
+            except (ImportError, OSError, RuntimeError):
+                return None
+    return _RAPIDOCR_ENGINE
+
+
+def _find_tesseract_cmd() -> str | None:
+    """Localiza el ejecutable nativo de Tesseract 5 en Linux o Windows."""
+    cmd = shutil.which("tesseract")
+    if cmd:
+        return cmd
+    for win_path in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ):
+        if os.path.isfile(win_path):
+            return win_path
+    return None
+
+
+def _preprocess_image_for_ocr(img: Image.Image) -> tuple[Image.Image, float]:
+    """Convierte a RGB sobre fondo blanco, reescala capturas pequeñas 2x y devuelve escala a ancho 612pt."""
+    if img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        rgb = Image.alpha_composite(bg, rgba).convert("RGB")
+    elif img.mode != "RGB":
+        rgb = img.convert("RGB")
+    else:
+        rgb = img
+
+    w, h = rgb.size
+    if w <= 0 or h <= 0:
+        raise ValueError("La imagen del estado de cuenta tiene dimensiones inválidas.")
+
+    if w < 1800 and h <= MAX_OCR_IMAGE_HEIGHT:
+        factor = min(2.0, MAX_OCR_IMAGE_WIDTH / float(w), MAX_OCR_IMAGE_HEIGHT / float(h))
+        if factor > 1.01:
+            new_w = max(1, round(w * factor))
+            new_h = max(1, round(h * factor))
+            rgb = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    elif w > MAX_OCR_IMAGE_WIDTH or h > MAX_OCR_IMAGE_HEIGHT:
+        ratio = min(MAX_OCR_IMAGE_WIDTH / float(w), MAX_OCR_IMAGE_HEIGHT / float(h))
+        new_w = max(1, round(w * ratio))
+        new_h = max(1, round(h * ratio))
+        rgb = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    norm_scale = 612.0 / float(rgb.width)
+    return rgb, norm_scale
+
+
+def _split_ocr_text_into_subwords(
+    raw_text: str,
+    x0: float,
+    top: float,
+    x1: float,
+    bottom: float,
+) -> list[dict[str, Any]]:
+    """Separa bloques OCR con columnas pegadas y distribuye proporcionalmente sus coordenadas X."""
+    cleaned = re.sub(r"\s+", " ", raw_text or "").strip()
+    if not cleaned:
+        return []
+
+    parts: list[str] = []
+    for tok in cleaned.split(" "):
+        if not tok:
+            continue
+        if _MONEY_TOKEN_RE.fullmatch(tok):
+            parts.append(tok)
+            continue
+        m_gm = _OCR_GLUED_MONEY_RE.fullmatch(tok)
+        if m_gm:
+            parts.extend([m_gm.group(1).strip(), m_gm.group(2).strip()])
+            continue
+        m_dr = _OCR_GLUED_DATE_REF_RE.match(tok)
+        if m_dr:
+            parts.extend([m_dr.group(1), m_dr.group(2)])
+            continue
+        m_rd = _OCR_GLUED_REF_DESC_RE.match(tok)
+        if m_rd:
+            parts.extend([m_rd.group(1), m_rd.group(2)])
+            continue
+        parts.append(tok)
+
+    if len(parts) == 1:
+        return [{"text": parts[0], "x0": x0, "x1": x1, "top": top, "bottom": bottom}]
+
+    width = max(1.0, x1 - x0)
+    total_chars = max(1, sum(len(p) for p in parts) + (len(parts) - 1))
+    words: list[dict[str, Any]] = []
+    cursor = 0
+    for part in parts:
+        p_len = len(part)
+        sub_x0 = x0 + (cursor / total_chars) * width
+        sub_x1 = x0 + ((cursor + p_len) / total_chars) * width
+        words.append(
+            {
+                "text": part,
+                "x0": sub_x0,
+                "x1": max(sub_x0 + 1.0, sub_x1),
+                "top": top,
+                "bottom": bottom,
+            }
+        )
+        cursor += p_len + 1
+    return words
+
+
+def _run_rapidocr_on_image(img: Image.Image) -> tuple[list[dict[str, Any]], float]:
+    """Ejecuta RapidOCR (ONNX CPU) localmente devolviendo palabras normalizadas a espacio 612pt."""
+    engine = _get_rapidocr_engine()
+    if engine is None:
+        return [], 0.0
+    try:
+        import numpy as np
+
+        rgb_img, scale = _preprocess_image_for_ocr(img)
+        raw_res, _ = engine(np.asarray(rgb_img))
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError):
+        return [], 0.0
+
+    if not raw_res:
+        return [], 0.0
+
+    words: list[dict[str, Any]] = []
+    scores: list[float] = []
+    for item in raw_res:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        box, txt = item[0], str(item[1] or "").strip()
+        sc_raw = item[2] if len(item) >= 3 else 0.85
+        try:
+            conf = float(sc_raw)
+        except (ValueError, TypeError):
+            conf = 0.85
+        if conf < 0.25 or not txt:
+            continue
+        try:
+            xs = [float(pt[0]) * scale for pt in box]
+            ys = [float(pt[1]) * scale for pt in box]
+        except (TypeError, ValueError, IndexError):
+            continue
+        x0, x1 = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        sub = _split_ocr_text_into_subwords(txt, x0, top, x1, bottom)
+        if sub:
+            words.extend(sub)
+            scores.append(conf)
+
+    mean_conf = (sum(scores) / len(scores)) if scores else 0.0
+    return words, round(mean_conf, 4)
+
+
+def _run_tesseract_on_image(img: Image.Image) -> tuple[list[dict[str, Any]], float]:
+    """Ejecuta Tesseract 5 (`tesseract-ocr-spa`) aislado sin env ni secretos, devolviendo cajas 612pt."""
+    tess_cmd = _find_tesseract_cmd()
+    if not tess_cmd:
+        return [], 0.0
+
+    try:
+        rgb_img, scale = _preprocess_image_for_ocr(img)
+        gray = ImageOps.autocontrast(rgb_img.convert("L"), cutoff=1).filter(ImageFilter.SHARPEN)
+        png_bytes = image_to_clean_png_bytes(gray)
+        clean_env = build_clean_ocr_env()
+
+        tsv_text = ""
+        for lang in ("spa+eng", "spa", "eng"):
+            try:
+                proc = subprocess.run(
+                    [tess_cmd, "stdin", "stdout", "-l", lang, "--psm", "6", "tsv"],
+                    input=png_bytes,
+                    env=clean_env,
+                    capture_output=True,
+                    timeout=20,
+                    check=False,
+                )
+            except (subprocess.SubprocessError, OSError, TimeoutError):
+                return [], 0.0
+            if proc.returncode == 0 and proc.stdout:
+                tsv_text = proc.stdout.decode("utf-8", errors="replace")
+                break
+        if not tsv_text:
+            return [], 0.0
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return [], 0.0
+
+    words: list[dict[str, Any]] = []
+    scores: list[float] = []
+    reader = csv.DictReader(io.StringIO(tsv_text), delimiter="\t")
+    for row in reader:
+        txt = str(row.get("text") or "").strip()
+        if not txt:
+            continue
+        try:
+            conf_pct = float(row.get("conf") or -1.0)
+            x_px = float(row.get("left") or 0.0)
+            y_px = float(row.get("top") or 0.0)
+            w_px = float(row.get("width") or 0.0)
+            h_px = float(row.get("height") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if conf_pct < 20.0:
+            continue
+        x0 = x_px * scale
+        top = y_px * scale
+        x1 = (x_px + w_px) * scale
+        bottom = (y_px + h_px) * scale
+        sub = _split_ocr_text_into_subwords(txt, x0, top, x1, bottom)
+        if sub:
+            words.extend(sub)
+            scores.append(min(1.0, max(0.0, conf_pct / 100.0)))
+
+    mean_conf = (sum(scores) / len(scores)) if scores else 0.0
+    return words, round(mean_conf, 4)
+
+
+def _render_pdf_pages_as_images(file_bytes: bytes, max_pages: int = MAX_PDF_PAGES) -> list[Image.Image]:
+    """Renderiza páginas de PDF escaneado a imágenes RGB limpias acotando dimensiones de salida."""
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return []
+
+    rendered: list[Image.Image] = []
+    try:
+        pdf_doc = pdfium.PdfDocument(file_bytes)
+    except Exception:  # noqa: BLE001 - fallo de driver PDFium aislado fail-closed
+        return []
+
+    try:
+        count = min(len(pdf_doc), max_pages)
+        for idx in range(count):
+            page = pdf_doc[idx]
+            try:
+                w_pt, h_pt = page.get_size()
+                safe_scale = compute_safe_pdf_render_scale(float(w_pt), float(h_pt), target_scale=2.2)
+                if safe_scale is None:
+                    continue
+                bitmap = page.render(scale=safe_scale)
+                raw_pil = bitmap.to_pil().convert("RGB")
+                if (raw_pil.width * raw_pil.height) > MAX_OCR_IMAGE_PIXELS:
+                    continue
+                clean_pil = Image.frombytes("RGB", raw_pil.size, raw_pil.tobytes())
+                rendered.append(clean_pil)
+            finally:
+                page.close()
+    finally:
+        pdf_doc.close()
+    return rendered
+
+
 class BankStatementImporter:
     """Extractor, verificador matemático y conciliador universal de estados de cuenta bancarios."""
 
@@ -944,6 +1273,7 @@ class BankStatementImporter:
         self,
         key_pool: AIKeyPool | None = None,
         http_client: httpx.Client | None = None,
+        ocr_engines: dict[str, Any] | None = None,
     ) -> None:
         if key_pool is None:
             raw_keys = (
@@ -957,37 +1287,46 @@ class BankStatementImporter:
         else:
             self.key_pool = key_pool
         self._client = http_client
+        self._ocr_engines: dict[str, Any] | None = ocr_engines
 
     def _has_real_ai_key(self) -> bool:
         keys = getattr(self.key_pool, "keys", [])
         return any(k and k != "dummy_key" for k in keys)
 
     def _validate_upload(self, file_bytes: bytes, filename: str) -> str:
-        """Valida tamaño, extensión y magic bytes (Fail-Closed)."""
+        """Valida tamaño, extensión, magic bytes y estructura anti-backdoor/DoS (Fail-Closed)."""
         if not file_bytes:
             raise ValueError("El archivo de estado de cuenta está vacío.")
         if len(file_bytes) > MAX_STATEMENT_BYTES:
-            raise ValueError("El archivo supera el límite máximo permitido de 10 MB.")
+            max_mb = MAX_STATEMENT_BYTES // (1024 * 1024)
+            raise ValueError(f"El archivo supera el límite máximo permitido de {max_mb} MB.")
 
         ext = os.path.splitext((filename or "").lower())[1]
         if ext == ".pdf":
-            head = file_bytes[:64].lstrip()
-            if not head.startswith(b"%PDF-"):
-                raise ValueError("El archivo PDF tiene cabecera o firma inválida (Fail-closed).")
+            validate_pdf_safety(file_bytes)
             return "PDF"
+        if ext in IMAGE_EXTENSIONS:
+            validate_image_magic_bytes(file_bytes, ext)
+            return "IMAGE"
         if ext == ".xlsx":
-            if not file_bytes[:4].startswith(b"PK\x03\x04"):
-                raise ValueError("El archivo Excel .xlsx no posee estructura ZIP válida.")
+            validate_xlsx_zip_safety(file_bytes)
             return "XLSX"
         if ext == ".xls":
+            xls_kind = validate_xls_safety(file_bytes)
+            if xls_kind == "XLSX":
+                return "XLSX"
+            if xls_kind == "HTML":
+                return "XLS_HTML"
             return "XLS"
         if ext in (".csv", ".txt"):
+            assert_not_executable_payload(file_bytes)
             if b"\x00" in file_bytes[:4096]:
                 raise ValueError("El archivo de texto/CSV contiene bytes binarios inválidos.")
             return "CSV"
 
         raise ValueError(
-            f"Formato '{ext or 'desconocido'}' no soportado. Usa PDF, XLSX, XLS, CSV o TXT."
+            f"Formato '{ext or 'desconocido'}' no soportado. "
+            "Usa PDF, PNG, JPG, WEBP, XLSX, XLS, CSV o TXT."
         )
 
     def parse_bytes(
@@ -998,11 +1337,19 @@ class BankStatementImporter:
         column_mapping: dict[str, str] | None = None,
         year_hint: int | None = None,
     ) -> StatementPreviewResult:
-        """Extrae movimientos bancarios desde PDF, Excel o CSV y valida su cuadre matemático."""
+        """Extrae movimientos bancarios desde PDF, Imagen, Excel o CSV y valida su cuadre matemático."""
         file_type = self._validate_upload(file_bytes, filename)
         default_year = year_hint or datetime.now(VET_TZ).year
 
-        if file_type in ("CSV", "XLSX", "XLS"):
+        if file_type == "IMAGE":
+            return self._parse_image_bytes(
+                file_bytes=file_bytes,
+                filename=filename,
+                bank_name_override=bank_name,
+                default_year=default_year,
+            )
+
+        if file_type in ("CSV", "XLSX", "XLS", "XLS_HTML"):
             result = self._parse_tabular_bytes(
                 file_bytes=file_bytes,
                 file_type=file_type,
@@ -1019,7 +1366,8 @@ class BankStatementImporter:
                 default_year=default_year,
             )
 
-        self._verify_and_classify_rows(result)
+        if not result.extraction_method.startswith(("PDF_OCR_", "IMAGE_OCR_")):
+            self._verify_and_classify_rows(result)
         return result
 
     def _decode_csv_rows(self, file_bytes: bytes) -> list[list[str]]:
@@ -1045,8 +1393,19 @@ class BankStatementImporter:
             rows.append([str(c or "").strip() for c in row])
         return rows
 
-    def _read_excel_rows(self, file_bytes: bytes) -> list[list[str]]:
-        df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=MAX_STATEMENT_ROWS + 50)
+    def _read_excel_rows(self, file_bytes: bytes, file_type: str = "XLSX") -> list[list[str]]:
+        if file_type == "XLS_HTML":
+            return parse_html_table_rows(file_bytes, max_rows=MAX_STATEMENT_ROWS + 50)
+        if file_type == "XLSX":
+            df_raw = pd.read_excel(
+                io.BytesIO(file_bytes),
+                header=None,
+                nrows=MAX_STATEMENT_ROWS + 50,
+                engine="openpyxl",
+                engine_kwargs={"read_only": True, "data_only": True},
+            )
+        else:
+            df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=MAX_STATEMENT_ROWS + 50)
         rows: list[list[str]] = []
         for _, row in df_raw.iterrows():
             rows.append([("" if pd.isna(v) else str(v).strip()) for v in row.tolist()])
@@ -1061,7 +1420,12 @@ class BankStatementImporter:
         column_mapping: dict[str, str] | None,
         default_year: int,
     ) -> StatementPreviewResult:
-        raw_rows = self._decode_csv_rows(file_bytes) if file_type == "CSV" else self._read_excel_rows(file_bytes)
+        raw_rows = (
+            self._decode_csv_rows(file_bytes)
+            if file_type == "CSV"
+            else self._read_excel_rows(file_bytes, file_type=file_type)
+        )
+        normalized_file_type = "XLS" if file_type == "XLS_HTML" else file_type
         if not raw_rows:
             raise ValueError("El archivo tabular no contiene filas legibles.")
 
@@ -1121,7 +1485,7 @@ class BankStatementImporter:
             candidate_cols = next((r for r in raw_rows[:15] if sum(1 for c in r if c) >= 2), [])
             return StatementPreviewResult(
                 bank_name=detected_bank,
-                file_type=file_type,
+                file_type=normalized_file_type,
                 extraction_method="TABULAR_NEEDS_MAPPING",
                 detected_columns=[c for c in candidate_cols if c],
                 needs_column_mapping=True,
@@ -1227,7 +1591,7 @@ class BankStatementImporter:
 
         return StatementPreviewResult(
             bank_name=detected_bank,
-            file_type=file_type,
+            file_type=normalized_file_type,
             extraction_method="TABULAR_AUTO" if not column_mapping else "TABULAR_MAPPED",
             detected_columns=[h for h in headers if h],
             needs_column_mapping=False,
@@ -1303,7 +1667,23 @@ class BankStatementImporter:
                 if rows:
                     extraction_method = "PDF_LAYOUT_UNIVERSAL"
 
-        # 3. Respaldo IA multimodal en lotes de páginas para PDFs escaneados (sin capa de texto)
+        # 3. OCR local gratuito y privado (Dual-OCR RapidOCR + Tesseract 5 con árbitro matemático)
+        if not rows and not has_text_layer:
+            rendered_pages = _render_pdf_pages_as_images(file_bytes, max_pages=MAX_PDF_PAGES)
+            if rendered_pages:
+                ocr_res = self._extract_with_dual_ocr(
+                    images=rendered_pages,
+                    file_type="PDF",
+                    method_prefix="PDF_OCR",
+                    filename=filename,
+                    bank_name_override=bank_name_override,
+                    default_year=eff_year,
+                    extra_warnings=warnings,
+                )
+                if ocr_res.rows:
+                    return ocr_res
+
+        # 4. Último respaldo IA multimodal (solo si falla OCR local o no hay librerías OCR y existe clave Gemini)
         if not rows and self._has_real_ai_key():
             ai_rows = self._fallback_extract_pdf_with_ai(file_bytes, eff_year, detected_bank)
             if ai_rows:
@@ -1311,12 +1691,12 @@ class BankStatementImporter:
                 extraction_method = "PDF_AI_FALLBACK"
             else:
                 warnings.append(
-                    "No se detectaron movimientos legibles en el PDF (ni por texto ni por IA)."
+                    "No se detectaron movimientos legibles en el PDF (ni por texto, OCR local ni IA)."
                 )
         elif not rows:
             warnings.append(
-                "No se encontraron filas tabulares con fechas y montos en el PDF. "
-                "Si el PDF es una imagen escaneada, configúrale una clave Gemini o expórtalo a CSV/Excel."
+                "No se encontraron filas tabulares con fechas y montos en el PDF "
+                "(ni en texto nativo ni mediante OCR local)."
             )
 
         return StatementPreviewResult(
@@ -1339,6 +1719,288 @@ class BankStatementImporter:
             warnings=warnings,
         )
 
+    def _parse_image_bytes(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+    ) -> StatementPreviewResult:
+        """Extrae y concilia movimientos desde una captura de pantalla o foto (.png/.jpg/.webp) sin salir del VPS."""
+        res = self._extract_with_dual_ocr(
+            images=[sanitize_and_load_image(file_bytes, filename)],
+            file_type="IMAGE",
+            method_prefix="IMAGE_OCR",
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+            extra_warnings=[],
+        )
+        if not res.rows:
+            res.warnings.append(
+                "No se identificaron movimientos tabulares legibles en la imagen con RapidOCR/Tesseract."
+            )
+        return res
+
+    def _evaluate_ocr_candidate(
+        self,
+        engine_name: Literal["rapidocr", "tesseract"],
+        images: list[Image.Image],
+        file_type: str,
+        method_prefix: str,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+    ) -> tuple[StatementPreviewResult | None, float]:
+        """Ejecuta un motor OCR específico sobre las páginas y devuelve resultado verificado y confianza."""
+        custom_fn = self._ocr_engines.get(engine_name) if self._ocr_engines is not None else None
+        if self._ocr_engines is not None and engine_name not in self._ocr_engines:
+            return None, 0.0
+
+        pages_words: list[tuple[list[dict[str, Any]], float]] = []
+        confs: list[float] = []
+        for img in images:
+            if custom_fn is not None:
+                words, conf = custom_fn(img)
+            elif engine_name == "rapidocr":
+                words, conf = _run_rapidocr_on_image(img)
+            else:
+                words, conf = _run_tesseract_on_image(img)
+            pages_words.append((words, 612.0))
+            if words:
+                confs.append(float(conf))
+
+        if not any(pw[0] for pw in pages_words):
+            return None, 0.0
+
+        mean_conf = (sum(confs) / len(confs)) if confs else 0.0
+        rows, bank_name, _eff_year, extract_warnings = self._extract_rows_from_word_pages(
+            pages_words=pages_words,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+            y_tol=None,
+        )
+        res = StatementPreviewResult(
+            bank_name=bank_name,
+            file_type=file_type,
+            extraction_method=f"{method_prefix}_{engine_name.upper()}",
+            detected_columns=[],
+            needs_column_mapping=False,
+            detected_order="UNKNOWN",
+            opening_balance=None,
+            closing_balance=None,
+            balance_verified=False,
+            balance_mismatch_count=0,
+            total_rows=len(rows),
+            p2p_matched_count=0,
+            bank_fee_count=0,
+            duplicate_count=0,
+            unmatched_count=len(rows),
+            rows=rows,
+            warnings=list(extract_warnings),
+        )
+        self._verify_and_classify_rows(res)
+        return res, round(mean_conf, 4)
+
+    @staticmethod
+    def _needs_second_ocr_opinion(res: StatementPreviewResult | None, mean_conf: float) -> bool:
+        """Determina si existen dudas que justifican invocar al segundo motor OCR para arbitraje."""
+        if res is None or res.total_rows == 0:
+            return True
+        if res.balance_mismatch_count > 0:
+            return True
+        with_bal = sum(1 for r in res.rows if r.balance_ves is not None)
+        if with_bal >= 2 and not res.balance_verified:
+            return True
+        if any(r.amount_uncertain or r.reference_number == "S/R" for r in res.rows):
+            return True
+        if res.bank_name == "BANCO DESCONOCIDO":
+            return True
+        return mean_conf < 0.78
+
+    @staticmethod
+    def _score_ocr_result(res: StatementPreviewResult | None, mean_conf: float) -> float:
+        """Puntúa la calidad matemática y estructural de un candidato OCR."""
+        if res is None or res.total_rows == 0:
+            return -1000.0
+        score = float(res.total_rows) * 40.0
+        if res.balance_verified:
+            score += 10000.0
+        score -= float(res.balance_mismatch_count) * 1500.0
+        uncertain_cnt = sum(1 for r in res.rows if r.amount_uncertain)
+        sr_cnt = sum(1 for r in res.rows if r.reference_number == "S/R")
+        score -= float(uncertain_cnt) * 25.0
+        score -= float(sr_cnt) * 10.0
+        if res.bank_name != "BANCO DESCONOCIDO":
+            score += 200.0
+        score += float(mean_conf) * 100.0
+        return round(score, 2)
+
+    def _attempt_row_level_ocr_consensus(
+        self,
+        primary: StatementPreviewResult,
+        secondary: StatementPreviewResult,
+        method_prefix: str,
+    ) -> StatementPreviewResult | None:
+        """Concilia filas puntuales con error en el ganador usando filas matemáticamente válidas del otro motor."""
+        if not primary.rows or not secondary.rows:
+            return None
+
+        cand = copy.deepcopy(primary)
+        p_chron = cand.rows if cand.detected_order == "ASC" else list(reversed(cand.rows))
+        s_chron = secondary.rows if secondary.detected_order == "ASC" else list(reversed(secondary.rows))
+
+        repaired_any = False
+        for idx, pr in enumerate(p_chron):
+            has_bal_issue = pr.balance_ok is False or pr.amount_uncertain
+            if not has_bal_issue:
+                continue
+
+            prev_bal = p_chron[idx - 1].balance_ves if idx > 0 else None
+            next_bal = p_chron[idx + 1].balance_ves if idx + 1 < len(p_chron) else None
+            next_net = (
+                (p_chron[idx + 1].amount_ves if p_chron[idx + 1].movement_type == "CREDIT" else -p_chron[idx + 1].amount_ves)
+                if idx + 1 < len(p_chron)
+                else None
+            )
+
+            matched_sec: ParsedStatementRow | None = None
+            for sr in s_chron:
+                same_date = sr.date_vet == pr.date_vet
+                same_ref = (
+                    pr.reference_number != "S/R"
+                    and sr.reference_number != "S/R"
+                    and sr.reference_number == pr.reference_number
+                )
+                if not (same_date and (same_ref or sr.movement_type == pr.movement_type)):
+                    continue
+
+                sr_net = sr.amount_ves if sr.movement_type == "CREDIT" else -sr.amount_ves
+                fits_prev = True
+                if prev_bal is not None and sr.balance_ves is not None:
+                    fits_prev = abs((prev_bal + sr_net) - sr.balance_ves) <= 0.02
+                fits_next = True
+                if next_bal is not None and next_net is not None and sr.balance_ves is not None:
+                    fits_next = abs((sr.balance_ves + next_net) - next_bal) <= 0.02
+
+                if fits_prev and fits_next and sr.balance_ves is not None:
+                    matched_sec = sr
+                    break
+
+            if matched_sec is not None:
+                pr.amount_ves = matched_sec.amount_ves
+                pr.movement_type = matched_sec.movement_type
+                pr.balance_ves = matched_sec.balance_ves
+                pr.amount_uncertain = False
+                if pr.reference_number == "S/R" and matched_sec.reference_number != "S/R":
+                    pr.reference_number = matched_sec.reference_number
+                repaired_any = True
+
+        if not repaired_any:
+            return None
+
+        cand.extraction_method = f"{method_prefix}_CONSENSUS"
+        self._verify_and_classify_rows(cand)
+        return cand
+
+    def _extract_with_dual_ocr(
+        self,
+        images: list[Image.Image],
+        file_type: str,
+        method_prefix: str,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+        extra_warnings: list[str],
+    ) -> StatementPreviewResult:
+        """Orquesta RapidOCR + Tesseract 5 local con árbitro matemático y conciliación fila-a-fila."""
+        rapid_res, rapid_conf = self._evaluate_ocr_candidate(
+            engine_name="rapidocr",
+            images=images,
+            file_type=file_type,
+            method_prefix=method_prefix,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+        )
+
+        tess_res: StatementPreviewResult | None = None
+        tess_conf = 0.0
+        if self._needs_second_ocr_opinion(rapid_res, rapid_conf):
+            tess_res, tess_conf = self._evaluate_ocr_candidate(
+                engine_name="tesseract",
+                images=images,
+                file_type=file_type,
+                method_prefix=method_prefix,
+                filename=filename,
+                bank_name_override=bank_name_override,
+                default_year=default_year,
+            )
+
+        candidates: list[tuple[str, StatementPreviewResult, float]] = []
+        if rapid_res is not None and rapid_res.total_rows > 0:
+            candidates.append(("RapidOCR", rapid_res, self._score_ocr_result(rapid_res, rapid_conf)))
+        if tess_res is not None and tess_res.total_rows > 0:
+            candidates.append(("Tesseract", tess_res, self._score_ocr_result(tess_res, tess_conf)))
+
+        if not candidates:
+            fallback_bank = (
+                normalize_bank_name(bank_name_override)
+                if bank_name_override and bank_name_override.strip()
+                else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
+            )
+            return StatementPreviewResult(
+                bank_name=fallback_bank,
+                file_type=file_type,
+                extraction_method=f"{method_prefix}_NONE",
+                detected_columns=[],
+                needs_column_mapping=False,
+                detected_order="UNKNOWN",
+                opening_balance=None,
+                closing_balance=None,
+                balance_verified=False,
+                balance_mismatch_count=0,
+                total_rows=0,
+                p2p_matched_count=0,
+                bank_fee_count=0,
+                duplicate_count=0,
+                unmatched_count=0,
+                rows=[],
+                warnings=list(extra_warnings),
+            )
+
+        candidates.sort(key=lambda it: it[2], reverse=True)
+        winner_label, winner_res, winner_score = candidates[0]
+
+        # Intentar consenso fila-a-fila si ambos motores extrajeron filas y aún queda duda o diferencias de cobertura
+        if rapid_res is not None and tess_res is not None and rapid_res.total_rows > 0 and tess_res.total_rows > 0:
+            other_res = tess_res if winner_res is rapid_res else rapid_res
+            needs_consensus = (not winner_res.balance_verified) or (winner_res.total_rows < other_res.total_rows)
+            if needs_consensus:
+                best_cons: StatementPreviewResult | None = None
+                best_cons_score = winner_score
+                for base_res, helper_res in ((rapid_res, tess_res), (tess_res, rapid_res)):
+                    cand_cons = self._attempt_row_level_ocr_consensus(base_res, helper_res, method_prefix)
+                    if cand_cons is not None:
+                        cand_sc = self._score_ocr_result(cand_cons, max(rapid_conf, tess_conf))
+                        if cand_sc > best_cons_score:
+                            best_cons_score = cand_sc
+                            best_cons = cand_cons
+                if best_cons is not None:
+                    winner_label = "Consenso Dual-OCR"
+                    winner_res = best_cons
+
+            r_desc = f"RapidOCR ({rapid_res.total_rows} filas, {rapid_res.balance_mismatch_count} descuadres, {int(rapid_conf * 100)}% conf.)"
+            t_desc = f"Tesseract ({tess_res.total_rows} filas, {tess_res.balance_mismatch_count} descuadres, {int(tess_conf * 100)}% conf.)"
+            winner_res.warnings.append(
+                f"Arbitraje OCR local: {r_desc} vs {t_desc} -> Seleccionado {winner_label}."
+            )
+
+        if extra_warnings:
+            winner_res.warnings = [*extra_warnings, *winner_res.warnings]
+        return winner_res
+
     @staticmethod
     def _infer_bank_from_concepts(rows: list[ParsedStatementRow]) -> str | None:
         """Identifica el banco emisor cuando el logo es una imagen pero los conceptos mencionan el riel propio."""
@@ -1360,202 +2022,191 @@ class BankStatementImporter:
             return None
         return max(counts, key=lambda b: counts[b])
 
-    def _extract_pdf_with_pdfplumber(
+    def _extract_rows_from_word_pages(
         self,
-        file_bytes: bytes,
+        pages_words: list[tuple[list[dict[str, Any]], float]],
         filename: str,
         bank_name_override: str | None,
         default_year: int,
-    ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str]]:
-        """Extrae filas multi-banco de PDFs digitales usando coordenadas exactas, calibración y salto de página."""
+        y_tol: float | None = 2.6,
+    ) -> tuple[list[ParsedStatementRow], str, int, list[str]]:
+        """Motor geométrico compartido por pdfplumber (PDF nativo) y RapidOCR/Tesseract (escaneados/imágenes)."""
         warnings: list[str] = []
         rows: list[ParsedStatementRow] = []
         last_global_row: ParsedStatementRow | None = None
         active_bands: list[_PdfColAnchor] | None = None
         active_table_x_min = 0.0
         meta_lines: list[str] = []
-        has_any_text = False
 
-        try:
-            pdf_doc = pdfplumber.open(io.BytesIO(file_bytes))
-        except (PdfminerException, OSError, ValueError, TypeError, KeyError, AttributeError):
-            fallback_bank = (
-                normalize_bank_name(bank_name_override)
-                if bank_name_override and bank_name_override.strip()
-                else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
-            )
-            return [], fallback_bank, default_year, False, warnings
+        eff_year = default_year
+        eff_month: int | None = None
+        year_explicit = default_year != datetime.now(VET_TZ).year
 
-        with pdf_doc:
-            pages = pdf_doc.pages[:MAX_PDF_PAGES]
-            eff_year = default_year
-            eff_month: int | None = None
-            year_explicit = default_year != datetime.now(VET_TZ).year
-
-            for p_idx, page in enumerate(pages):
-                words = (
-                    page.extract_words(
-                        keep_blank_chars=False,
-                        use_text_flow=False,
-                        x_tolerance=1.8,
-                        y_tolerance=2.5,
-                    )
-                    or []
+        for p_idx, (words, raw_page_w) in enumerate(pages_words[:MAX_PDF_PAGES]):
+            if not words:
+                continue
+            if y_tol is None:
+                heights = sorted(
+                    max(2.0, float(w["bottom"]) - float(w["top"]))
+                    for w in words
                 )
-                if not words:
-                    continue
-                has_any_text = True
-                wlines = _group_words_into_lines(words, y_tol=2.6)
-                if not wlines:
-                    continue
+                med_h = heights[len(heights) // 2] if heights else 8.0
+                eff_y_tol = max(3.6, min(9.5, med_h * 0.55))
+            else:
+                eff_y_tol = y_tol
 
-                page_w = float(page.width or 612.0)
-                hdr = _detect_pdf_word_header(wlines)
-                if hdr is not None:
-                    hdr_start, hdr_end, anchors = hdr
-                    table_x_min = max(0.0, anchors[0].hdr_x0 - 20.0) if anchors[0].hdr_x0 >= 120.0 else 0.0
-                    active_table_x_min = table_x_min
-                    if p_idx == 0:
-                        meta_lines.extend(ln.text for ln in wlines[:hdr_start])
-                        if table_x_min > 0.0:
-                            left_words = [w for w in words if float(w["x1"]) <= table_x_min]
-                            meta_lines.extend(ln.text for ln in _group_words_into_lines(left_words, y_tol=2.6))
+            wlines = _group_words_into_lines(words, y_tol=eff_y_tol)
+            if not wlines:
+                continue
 
-                    if table_x_min > 0.0:
-                        hdr_bottom_v = wlines[hdr_end - 1].bottom
-                        right_words = [
-                            w
-                            for w in words
-                            if float(w["x0"]) >= table_x_min - 2.0 and float(w["top"]) > hdr_bottom_v + 1.0
-                        ]
-                        body_lines = _group_words_into_lines(right_words, y_tol=2.6)
-                    else:
-                        body_lines = wlines[hdr_end:]
-                elif active_bands is not None and p_idx > 0:
-                    anchors = active_bands
-                    if active_table_x_min > 0.0:
-                        right_words = [w for w in words if float(w["x0"]) >= active_table_x_min - 2.0]
-                        body_lines = _group_words_into_lines(right_words, y_tol=2.6)
-                    else:
-                        body_lines = wlines
-                else:
-                    if p_idx == 0:
-                        meta_lines.extend(ln.text for ln in wlines[:15])
-                    continue
-
+            page_w = float(raw_page_w or 612.0)
+            hdr = _detect_pdf_word_header(wlines)
+            if hdr is not None:
+                hdr_start, hdr_end, anchors = hdr
+                table_x_min = max(0.0, anchors[0].hdr_x0 - 20.0) if anchors[0].hdr_x0 >= 120.0 else 0.0
+                active_table_x_min = table_x_min
                 if p_idx == 0:
-                    for wl in wlines[-5:]:
-                        if _is_noise_or_footer_line(wl.text):
-                            meta_lines.append(wl.text)
-                    meta_sample = "\n".join(meta_lines) + f"\n{filename}"
-                    parsed_yr, parsed_mo = _extract_period_year_month(meta_sample, eff_year)
-                    if not year_explicit:
-                        eff_year = parsed_yr
-                    if parsed_mo is not None:
-                        eff_month = parsed_mo
+                    meta_lines.extend(ln.text for ln in wlines[:hdr_start])
+                    if table_x_min > 0.0:
+                        left_words = [w for w in words if float(w["x1"]) <= table_x_min]
+                        meta_lines.extend(ln.text for ln in _group_words_into_lines(left_words, y_tol=eff_y_tol))
 
-                bands = _calibrate_pdf_column_bands(
-                    anchors,
-                    body_lines,
-                    page_w,
-                    allow_day_only=(eff_month is not None),
-                )
-                active_bands = bands
+                if table_x_min > 0.0:
+                    hdr_word_ids = {id(w) for ln in wlines[hdr_start:hdr_end] for w in ln.words}
+                    hdr_bottom_v = wlines[hdr_end - 1].bottom
+                    right_words = [
+                        w
+                        for w in words
+                        if float(w["x0"]) >= table_x_min - 2.0
+                        and float(w["top"]) > hdr_bottom_v - 1.5
+                        and id(w) not in hdr_word_ids
+                    ]
+                    body_lines = _group_words_into_lines(right_words, y_tol=eff_y_tol)
+                else:
+                    body_lines = wlines[hdr_end:]
+            elif active_bands is not None and p_idx > 0:
+                anchors = active_bands
+                if active_table_x_min > 0.0:
+                    right_words = [w for w in words if float(w["x0"]) >= active_table_x_min - 2.0]
+                    body_lines = _group_words_into_lines(right_words, y_tol=eff_y_tol)
+                else:
+                    body_lines = wlines
+            else:
+                if p_idx == 0:
+                    meta_lines.extend(ln.text for ln in wlines[:15])
+                continue
 
-                # Separar anclas transaccionales de líneas candidatas de continuación (multilínea / salto página)
-                page_anchors: list[dict[str, Any]] = []
-                cont_candidates: list[dict[str, Any]] = []
-
-                for b_idx, wl in enumerate(body_lines):
+            if p_idx == 0:
+                for wl in wlines[-5:]:
                     if _is_noise_or_footer_line(wl.text):
-                        continue
-                    parsed = self._parse_pdf_word_line(wl, bands, eff_year, default_month=eff_month)
-                    if parsed is not None:
-                        page_anchors.append(
+                        meta_lines.append(wl.text)
+                meta_sample = "\n".join(meta_lines) + f"\n{filename}"
+                parsed_yr, parsed_mo = _extract_period_year_month(meta_sample, eff_year)
+                if not year_explicit:
+                    eff_year = parsed_yr
+                if parsed_mo is not None:
+                    eff_month = parsed_mo
+
+            bands = _calibrate_pdf_column_bands(
+                anchors,
+                body_lines,
+                page_w,
+                allow_day_only=(eff_month is not None),
+            )
+            active_bands = bands
+
+            page_anchors: list[dict[str, Any]] = []
+            cont_candidates: list[dict[str, Any]] = []
+
+            for b_idx, wl in enumerate(body_lines):
+                if _is_noise_or_footer_line(wl.text):
+                    continue
+                parsed = self._parse_pdf_word_line(wl, bands, eff_year, default_month=eff_month)
+                if parsed is not None:
+                    page_anchors.append(
+                        {
+                            "line_idx": b_idx,
+                            "y_mid": wl.y_mid,
+                            "row": parsed["row"],
+                            "inline_concept": parsed["inline_concept"],
+                            "has_inline": parsed["has_inline_concept"],
+                            "top_parts": [],
+                            "bottom_parts": [],
+                        }
+                    )
+                else:
+                    cont_txt = self._extract_continuation_text(wl, bands)
+                    if cont_txt:
+                        cont_candidates.append(
                             {
                                 "line_idx": b_idx,
                                 "y_mid": wl.y_mid,
-                                "row": parsed["row"],
-                                "inline_concept": parsed["inline_concept"],
-                                "has_inline": parsed["has_inline_concept"],
-                                "top_parts": [],
-                                "bottom_parts": [],
+                                "text": cont_txt,
                             }
                         )
+
+            cross_page_parts: list[str] = []
+            for cand in cont_candidates:
+                c_idx = int(cand["line_idx"])
+                c_y = float(cand["y_mid"])
+                c_txt = str(cand["text"])
+
+                prev_a = next(
+                    (a for a in reversed(page_anchors) if int(a["line_idx"]) < c_idx),
+                    None,
+                )
+                next_a = next((a for a in page_anchors if int(a["line_idx"]) > c_idx), None)
+
+                d_prev = (c_y - float(prev_a["y_mid"])) if prev_a is not None else 9999.0
+                d_next = (float(next_a["y_mid"]) - c_y) if next_a is not None else 9999.0
+
+                if (
+                    next_a is not None
+                    and not next_a["has_inline"]
+                    and d_next <= 12.0
+                    and d_next < d_prev
+                ):
+                    next_a["top_parts"].append(c_txt)
+                elif prev_a is not None:
+                    prev_a["bottom_parts"].append(c_txt)
+                elif last_global_row is not None:
+                    cross_page_parts.append(c_txt)
+
+            if cross_page_parts and last_global_row is not None:
+                merged_prev = _sanitize_cell_text(
+                    f"{last_global_row.concept} {' '.join(cross_page_parts)}"
+                )
+                if merged_prev:
+                    last_global_row.concept = merged_prev
+                    last_global_row.payment_method = _infer_payment_method(merged_prev)
+
+            for anch in page_anchors:
+                row_obj: ParsedStatementRow = anch["row"]
+                parts = [
+                    *anch["top_parts"],
+                    *([anch["inline_concept"]] if anch["inline_concept"] else []),
+                    *anch["bottom_parts"],
+                ]
+                assembled = _sanitize_cell_text(" ".join(parts))
+                if assembled:
+                    if row_obj.reference_number == "S/R":
+                        new_ref, new_conc = _extract_reference(assembled)
+                        row_obj.reference_number = new_ref
+                        row_obj.concept = new_conc or assembled
                     else:
-                        cont_txt = self._extract_continuation_text(wl, bands)
-                        if cont_txt:
-                            cont_candidates.append(
-                                {
-                                    "line_idx": b_idx,
-                                    "y_mid": wl.y_mid,
-                                    "text": cont_txt,
-                                }
-                            )
-
-                # Asociar descripciones envueltas (arriba/abajo centradas o al cruzar página)
-                cross_page_parts: list[str] = []
-                for cand in cont_candidates:
-                    c_idx = int(cand["line_idx"])
-                    c_y = float(cand["y_mid"])
-                    c_txt = str(cand["text"])
-
-                    prev_a = next(
-                        (a for a in reversed(page_anchors) if int(a["line_idx"]) < c_idx),
-                        None,
-                    )
-                    next_a = next((a for a in page_anchors if int(a["line_idx"]) > c_idx), None)
-
-                    d_prev = (c_y - float(prev_a["y_mid"])) if prev_a is not None else 9999.0
-                    d_next = (float(next_a["y_mid"]) - c_y) if next_a is not None else 9999.0
-
-                    if (
-                        next_a is not None
-                        and not next_a["has_inline"]
-                        and d_next <= 12.0
-                        and d_next < d_prev
-                    ):
-                        next_a["top_parts"].append(c_txt)
-                    elif prev_a is not None:
-                        prev_a["bottom_parts"].append(c_txt)
-                    elif last_global_row is not None:
-                        cross_page_parts.append(c_txt)
-
-                if cross_page_parts and last_global_row is not None:
-                    merged_prev = _sanitize_cell_text(
-                        f"{last_global_row.concept} {' '.join(cross_page_parts)}"
-                    )
-                    if merged_prev:
-                        last_global_row.concept = merged_prev
-                        last_global_row.payment_method = _infer_payment_method(merged_prev)
-
-                for anch in page_anchors:
-                    row_obj: ParsedStatementRow = anch["row"]
-                    parts = [
-                        *anch["top_parts"],
-                        *([anch["inline_concept"]] if anch["inline_concept"] else []),
-                        *anch["bottom_parts"],
-                    ]
-                    assembled = _sanitize_cell_text(" ".join(parts))
-                    if assembled:
-                        if row_obj.reference_number == "S/R":
-                            new_ref, new_conc = _extract_reference(assembled)
-                            row_obj.reference_number = new_ref
-                            row_obj.concept = new_conc or assembled
-                        else:
-                            row_obj.concept = assembled
-                    row_obj.payment_method = _infer_payment_method(row_obj.concept)
-                    row_obj.row_index = len(rows)
-                    rows.append(row_obj)
-                    last_global_row = row_obj
-                    if len(rows) >= MAX_STATEMENT_ROWS:
-                        warnings.append(
-                            f"Se alcanzó el límite de seguridad de {MAX_STATEMENT_ROWS} movimientos."
-                        )
-                        break
-
+                        row_obj.concept = assembled
+                row_obj.payment_method = _infer_payment_method(row_obj.concept)
+                row_obj.row_index = len(rows)
+                rows.append(row_obj)
+                last_global_row = row_obj
                 if len(rows) >= MAX_STATEMENT_ROWS:
+                    warnings.append(
+                        f"Se alcanzó el límite de seguridad de {MAX_STATEMENT_ROWS} movimientos."
+                    )
                     break
+
+            if len(rows) >= MAX_STATEMENT_ROWS:
+                break
 
         meta_sample_all = "\n".join(meta_lines) + f"\n{filename}"
         detected_bank = (
@@ -1567,7 +2218,59 @@ class BankStatementImporter:
             inferred = self._infer_bank_from_concepts(rows)
             if inferred:
                 detected_bank = inferred
-        return rows, detected_bank, eff_year, has_any_text, warnings
+        return rows, detected_bank, eff_year, warnings
+
+    def _extract_pdf_with_pdfplumber(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+    ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str]]:
+        """Extrae palabras vectoriales con pdfplumber y delega al motor geométrico universal."""
+        try:
+            pdf_doc = pdfplumber.open(io.BytesIO(file_bytes))
+        except (PdfminerException, OSError, ValueError, TypeError, KeyError, AttributeError):
+            fallback_bank = (
+                normalize_bank_name(bank_name_override)
+                if bank_name_override and bank_name_override.strip()
+                else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
+            )
+            return [], fallback_bank, default_year, False, []
+
+        pages_words: list[tuple[list[dict[str, Any]], float]] = []
+        has_any_text = False
+        with pdf_doc:
+            for page in pdf_doc.pages[:MAX_PDF_PAGES]:
+                words = (
+                    page.extract_words(
+                        keep_blank_chars=False,
+                        use_text_flow=False,
+                        x_tolerance=1.8,
+                        y_tolerance=2.5,
+                    )
+                    or []
+                )
+                if words:
+                    has_any_text = True
+                pages_words.append((words, float(page.width or 612.0)))
+
+        if not has_any_text:
+            fallback_bank = (
+                normalize_bank_name(bank_name_override)
+                if bank_name_override and bank_name_override.strip()
+                else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
+            )
+            return [], fallback_bank, default_year, False, []
+
+        rows, detected_bank, eff_year, warnings = self._extract_rows_from_word_pages(
+            pages_words=pages_words,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+            y_tol=2.6,
+        )
+        return rows, detected_bank, eff_year, True, warnings
 
     def _extract_continuation_text(self, wl: _PdfWordLine, bands: list[_PdfColAnchor]) -> str:
         """Extrae texto limpio de una línea de continuación sin mezclar ruidos numéricos ni resúmenes."""
@@ -2172,6 +2875,7 @@ class BankStatementImporter:
                     and r.reference_number == prev_r.reference_number
                     and r.movement_type == prev_r.movement_type
                     and abs(r.amount_ves - prev_r.amount_ves) <= 0.02
+                    and normalize_text(r.concept) == normalize_text(prev_r.concept)
                 )
                 if (
                     same_meta

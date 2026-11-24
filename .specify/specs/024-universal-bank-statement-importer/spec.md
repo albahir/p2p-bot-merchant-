@@ -15,7 +15,7 @@ Los comerciantes P2P operan en múltiples bancos venezolanos (Banesco, Banco de 
 
 ### 1.2 Solución Propuesta
 Construir un **Importador Universal de Estados de Cuenta Bancarios** agnóstico al banco que:
-1. Acepte archivos **PDF** (texto nativo vectorial con respaldo multimodal IA opcional para PDFs escaneados o atípicos), **Excel (`.xlsx` / `.xls`)**, **CSV** y **TXT delimitado**.
+1. Acepte archivos **PDF** (texto nativo vectorial, **OCR local dual `RapidOCR` + `Tesseract 5`** para PDFs escaneados sin sacar datos de la infraestructura, y respaldo multimodal IA opcional), **Imágenes (`.png`, `.jpg`, `.jpeg`, `.webp`)**, **Excel (`.xlsx` / `.xls`)**, **CSV** y **TXT delimitado**.
 2. Funcione para **cualquier entidad bancaria** mediante detección de cabeceras, alineación espacial por columnas (`x`-coordinates), inferencia de dirección por variación de saldo y mapeo manual de columnas cuando sea necesario.
 3. Aplique **verificación matemática Fail-Closed** fila a fila sobre el saldo acumulado (`Saldo Anterior + Crédito - Débito == Saldo Siguiente`), detectando automáticamente orden cronológico ascendente o descendente.
 4. Ejecute **previsualización interactiva antes de persistir**, cruzando con órdenes Binance P2P en horario **VET (`UTC-4`)**, deduplicando contra comprobantes ya subidos por OCR/Telegram, detectando comisiones bancarias (`0,30%` / `I.D.B.` / mantenimiento) y permitiendo excluir gastos personales o traspasos propios para no contaminar la contabilidad fiscal SENIAT.

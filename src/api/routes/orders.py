@@ -15,6 +15,7 @@ from src.api.schemas.orders import (
 from src.core.binance_history_syncer import BinanceHistorySyncer
 from src.data.models import User
 from src.data.repositories import OrderRepository
+from src.security.file_guards import MAX_ORDERS_UPLOAD_BYTES, read_upload_bounded
 
 router = APIRouter(prefix="/api/orders", tags=["Órdenes P2P"])
 
@@ -86,6 +87,8 @@ def sync_binance_orders(
         days=req.days,
         trade_type=req.trade_type or "ALL",
         user_id=uid,
+        year=req.year,
+        month=req.month,
     )
 
     if not result.success:
@@ -108,18 +111,13 @@ def sync_binance_orders(
 
 
 @router.post("/upload", response_model=SyncOrdersResponse)
-async def upload_orders_file(
+def upload_orders_file(
     file: Annotated[UploadFile, File()],
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_trader)],
 ) -> SyncOrdersResponse:
     """Importa órdenes de Binance P2P directamente desde un archivo Excel (.xlsx) o CSV descargado."""
-    content = await file.read()
-    if not content:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El archivo subido está vacío.",
-        )
+    content = read_upload_bounded(file, MAX_ORDERS_UPLOAD_BYTES)
 
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     syncer = BinanceHistorySyncer()

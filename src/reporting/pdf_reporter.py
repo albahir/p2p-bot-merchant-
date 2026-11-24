@@ -8,7 +8,7 @@ hora legal de Venezuela (VET UTC-4), Sumas Iguales y Estado de Resultados PEPS.
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, cast
 
-from src.data.models import BankVoucher, JournalEntry
+from src.data.models import BankVoucher, JournalEntry, Order
 from src.reporting.accounting_engine import LedgerSummary
 from src.reporting.tax_engine import TradeResult
 
@@ -53,10 +53,17 @@ class PDFReporter:
         metadata: dict[str, Any] | None = None,
         tax_results: list[TradeResult] | None = None,
         period: str | None = None,
+        orders: list[Order] | None = None,
+        initial_usdt: float = 0.0,
+        initial_usdt_cost_ves: float = 0.0,
+        initial_ves: float = 0.0,
+        actual_final_usdt: float | None = None,
+        actual_final_ves: float | None = None,
     ) -> str:
         """Construye un archivo PDF 1.4 multipágina completo sin truncar asientos."""
         now_vet = datetime.now(VET_TZ).strftime("%Y-%m-%d %H:%M:%S VET")
         results = tax_results or []
+        order_list = orders or []
         period_label = period or (metadata.get("period") if metadata else None) or "Mes en curso"
 
         pages: list[list[str]] = []
@@ -145,12 +152,78 @@ class PDFReporter:
         )
 
         # -------------------------------------------------------------
-        # SECCION 2: LIBRO MAYOR
+        # SECCION 2: ESTADO DE SITUACION FINANCIERA (BALANCE GENERAL - BA VEN-NIF 12)
         # -------------------------------------------------------------
-        y -= 24
+        completed_orders = [o for o in order_list if str(getattr(o, "order_status", "COMPLETED")) == "COMPLETED"]
+        compras_usdt = round(sum(float(o.crypto_amount) for o in completed_orders if o.trade_type == "BUY"), 4)
+        compras_ves = round(sum(float(o.fiat_amount) for o in completed_orders if o.trade_type == "BUY"), 2)
+        ventas_usdt = round(
+            sum(float(o.crypto_amount) for o in completed_orders if o.trade_type == "SELL")
+            if completed_orders
+            else sum(float(r.crypto_amount) for r in results),
+            4,
+        )
+        init_usdt_val = round(float(initial_usdt or 0.0), 4)
+        init_usdt_cost = round(float(initial_usdt_cost_ves or 0.0), 2)
+        inv_final_usdt = round(init_usdt_val + compras_usdt - ventas_usdt, 4)
+        inv_final_ves = round(max(0.0, init_usdt_cost + compras_ves - costo_peps), 2)
+
+        banco_ledger = next((s for s in ledger_summaries if str(s.account_code) == "1.1.01"), None)
+        banco_teorico = (
+            round(float(banco_ledger.final_balance), 2)
+            if banco_ledger is not None
+            else round(float(initial_ves or 0.0), 2)
+        )
+        efectivo_bancos = round(float(actual_final_ves), 2) if actual_final_ves is not None else banco_teorico
+        total_activo = round(efectivo_bancos + inv_final_ves, 2)
+        capital_inicial = round(float(initial_ves or 0.0) + init_usdt_cost, 2)
+
+        y -= 22
+        ensure_space(60)
+        current_cmds.append("0.15 0.3 0.5 rg")
+        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (2. ESTADO DE SITUACION FINANCIERA - BA VEN-NIF 12) Tj ET")
+        y -= 15
+        current_cmds.append("0 0 0 rg")
+        current_cmds.append(
+            f"BT /F1 8 Tf 35 {y} Td (Efectivo Bancos VES: Bs. {efectivo_bancos:,.2f}  |  Criptoactivos USDT Costo: Bs. {inv_final_ves:,.2f}  |  Total Activo: Bs. {total_activo:,.2f}) Tj ET"
+        )
+        y -= 13
+        arqueo_ves_txt = (
+            f"Arqueo Bancario Real: Bs. {efectivo_bancos:,.2f} (Dif: {efectivo_bancos - banco_teorico:+,.2f})"
+            if actual_final_ves is not None
+            else f"Saldo Teorico Bancos: Bs. {banco_teorico:,.2f} (Sin arqueo real)"
+        )
+        current_cmds.append(
+            f"BT /F1 8 Tf 35 {y} Td (Capital Inicial: Bs. {capital_inicial:,.2f}  |  Resultado ISLR: Bs. {neto_islr:,.2f}  |  {self._escape_pdf_text(arqueo_ves_txt)}) Tj ET"
+        )
+
+        # -------------------------------------------------------------
+        # SECCION 3: KARDEX DE INVENTARIO USDT (ART. 177 RGTO. LISLR)
+        # -------------------------------------------------------------
+        y -= 22
+        ensure_space(50)
+        current_cmds.append("0.15 0.3 0.5 rg")
+        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (3. KARDEX DE INVENTARIO USDT - ART. 177 RGTO. LISLR) Tj ET")
+        y -= 15
+        current_cmds.append("0 0 0 rg")
+        current_cmds.append(
+            f"BT /F1 8 Tf 35 {y} Td (Inicial: {init_usdt_val:,.4f} USDT  |  +Compras: {compras_usdt:,.4f}  |  -Ventas: {ventas_usdt:,.4f}  |  Final Teorico: {inv_final_usdt:,.4f} USDT) Tj ET"
+        )
+        if actual_final_usdt is not None:
+            y -= 13
+            real_u = round(float(actual_final_usdt), 4)
+            diff_u = round(real_u - inv_final_usdt, 4)
+            current_cmds.append(
+                f"BT /F2 8 Tf 35 {y} Td (Arqueo Real Binance: {real_u:,.4f} USDT  |  Discrepancia: {diff_u:+,.4f} USDT) Tj ET"
+            )
+
+        # -------------------------------------------------------------
+        # SECCION 4: LIBRO MAYOR
+        # -------------------------------------------------------------
+        y -= 22
         ensure_space(45)
         current_cmds.append("0.15 0.3 0.5 rg")
-        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (2. LIBRO MAYOR CONSOLIDADO) Tj ET")
+        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (4. LIBRO MAYOR CONSOLIDADO) Tj ET")
         y -= 16
         current_cmds.append("0.9 0.9 0.95 rg")
         current_cmds.append(f"30 {y - 3} 535 15 re f")
@@ -179,7 +252,7 @@ class PDFReporter:
         y -= 24
         ensure_space(50)
         current_cmds.append("0.15 0.3 0.5 rg")
-        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (3. LIBRO DIARIO COMPLETO - PARTIDA DOBLE ({len(journal_entries)} MOVIMIENTOS)) Tj ET")
+        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (5. LIBRO DIARIO COMPLETO - PARTIDA DOBLE ({len(journal_entries)} MOVIMIENTOS)) Tj ET")
         y -= 16
         draw_diario_header()
 
@@ -220,11 +293,11 @@ class PDFReporter:
         total_vouchers = len(vouchers)
         rate_pct = (matched_count / total_vouchers * 100.0) if total_vouchers > 0 else 100.0
         current_cmds.append("0.15 0.3 0.5 rg")
-        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (4. CONCILIACION BANCARIA Y TRAZABILIDAD) Tj ET")
+        current_cmds.append(f"BT /F2 10 Tf 30 {y} Td (6. CONCILIACION BANCARIA, IGTF Y TRAZABILIDAD) Tj ET")
         y -= 15
         current_cmds.append("0 0 0 rg")
         current_cmds.append(
-            f"BT /F1 8 Tf 35 {y} Td (Comprobantes procesados: {total_vouchers}  |  Conciliados: {matched_count} ({rate_pct:.1f}%)) Tj ET"
+            f"BT /F1 8 Tf 35 {y} Td (Comprobantes procesados: {total_vouchers}  |  Conciliados: {matched_count} ({rate_pct:.1f}%)  |  IGTF Banca Nacional VES: 0% - Prov. SNAT/2026/00099) Tj ET"
         )
 
         # Pies de página enumerados

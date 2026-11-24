@@ -146,6 +146,55 @@ class FiscalPeriodSnapshot(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 
 
+class AccountingPeriodBalance(Base):
+    """Saldos iniciales (apertura) y arqueo final real por período mensual (YYYY-MM) y usuario."""
+    __tablename__ = "accounting_period_balances"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, index=True, nullable=True)
+    period = Column(String(16), index=True, nullable=False)  # YYYY-MM
+    initial_usdt = Column(Float, default=0.0, nullable=False)
+    initial_usdt_cost_ves = Column(Float, default=0.0, nullable=False)
+    initial_banks_json = Column(Text, nullable=True)  # {"Banesco": 50000.0, ...}
+    actual_final_usdt = Column(Float, nullable=True)
+    actual_final_banks_json = Column(Text, nullable=True)  # {"Banesco": 62000.0, ...}
+    is_closed = Column(Boolean, default=False, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    @property
+    def initial_banks(self) -> dict[str, float]:
+        import json
+
+        if not self.initial_banks_json:
+            return {}
+        try:
+            raw = json.loads(str(self.initial_banks_json))
+            if isinstance(raw, dict):
+                return {str(k): round(max(0.0, float(v or 0.0)), 2) for k, v in raw.items() if str(k).strip()}
+        except (ValueError, TypeError):
+            pass
+        return {}
+
+    @property
+    def actual_final_banks(self) -> dict[str, float] | None:
+        import json
+
+        if not self.actual_final_banks_json:
+            return None
+        try:
+            raw = json.loads(str(self.actual_final_banks_json))
+            if isinstance(raw, dict):
+                return {str(k): round(max(0.0, float(v or 0.0)), 2) for k, v in raw.items() if str(k).strip()}
+        except (ValueError, TypeError):
+            pass
+        return None
+
+
 class User(Base):
     """Usuario del sistema con control de acceso basado en roles (RBAC)."""
     __tablename__ = "app_users"

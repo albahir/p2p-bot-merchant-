@@ -296,14 +296,19 @@ class ExcelReporter:
         period: str | None = None,
         bcv_rate: float | None = None,
         initial_usdt: float = 0.0,
+        initial_usdt_cost_ves: float = 0.0,
+        initial_ves: float = 0.0,
+        actual_final_usdt: float | None = None,
+        actual_final_ves: float | None = None,
     ) -> str:
-        """Crea el informe contable venezolano de 6 pestañas conformes con LISLR / BA VEN-NIF N° 12:
+        """Crea el informe contable venezolano de 7 pestañas conformes con LISLR / BA VEN-NIF N° 12:
         1. 'Libro Diario': Partida doble cronológica en VET con fila de SUMAS IGUALES.
         2. 'Libro Mayor': Consolidación mensual con Saldo Inicial, Debe, Haber y Saldo Final.
         3. 'Estado de Resultados': Base imponible real (Ventas - Costo PEPS - Comisiones).
-        4. 'Kardex Inventario USDT': Control de existencias cripto (Reglamento LISLR Art. 177).
-        5. 'Conciliación Bancaria': Comprobantes procesados y trazabilidad bancaria.
-        6. 'Liquidación Fiscal SENIAT': Resumen tributario ISLR / IGTF y datos del contribuyente.
+        4. 'Balance General (VEN-NIF 12)': Estado de Situación Financiera (Efectivo VES vs Criptoactivos USDT).
+        5. 'Kardex Inventario USDT': Control de existencias cripto (Art. 177 Rgto. LISLR) y Arqueo.
+        6. 'Conciliación Bancaria': Comprobantes procesados y trazabilidad bancaria.
+        7. 'Liquidación Fiscal SENIAT': Resumen tributario ISLR / IGTF y datos del contribuyente.
         """
         results = tax_results or []
         order_list = orders or []
@@ -412,15 +417,120 @@ class ExcelReporter:
             else sum(float(r.crypto_amount) for r in results),
             4,
         )
-        inventario_final_usdt = round(float(initial_usdt) + compras_usdt - ventas_usdt, 4)
+        init_usdt_val = round(float(initial_usdt or 0.0), 4)
+        init_usdt_cost = round(float(initial_usdt_cost_ves or 0.0), 2)
+        if init_usdt_cost <= 0.0 and init_usdt_val > 0.0 and ref_bcv > 0.0:
+            init_usdt_cost = round(init_usdt_val * ref_bcv, 2)
+        inventario_final_usdt = round(init_usdt_val + compras_usdt - ventas_usdt, 4)
+        inventario_final_ves = round(max(0.0, init_usdt_cost + compras_ves - costo_ventas_peps), 2)
 
-        kardex_rows = [
-            {"Concepto": "Saldo Inicial USDT", "Cantidad (USDT)": round(float(initial_usdt), 4), "Valor Referencial (VES)": 0.0},
+        kardex_rows: list[dict[str, object]] = [
+            {"Concepto": "Saldo Inicial USDT", "Cantidad (USDT)": init_usdt_val, "Valor Referencial (VES)": init_usdt_cost},
             {"Concepto": "(+) Compras P2P USDT", "Cantidad (USDT)": compras_usdt, "Valor Referencial (VES)": compras_ves},
             {"Concepto": "(-) Ventas P2P USDT", "Cantidad (USDT)": ventas_usdt, "Valor Referencial (VES)": costo_ventas_peps},
-            {"Concepto": "(=) Inventario Final USDT", "Cantidad (USDT)": inventario_final_usdt, "Valor Referencial (VES)": round(max(0.0, compras_ves - costo_ventas_peps), 2)},
+            {"Concepto": "(=) Inventario Final USDT", "Cantidad (USDT)": inventario_final_usdt, "Valor Referencial (VES)": inventario_final_ves},
         ]
+        if actual_final_usdt is not None:
+            real_usdt = round(float(actual_final_usdt), 4)
+            diff_usdt = round(real_usdt - inventario_final_usdt, 4)
+            kardex_rows.append(
+                {
+                    "Concepto": "Saldo Final Real (Arqueo Binance USDT)",
+                    "Cantidad (USDT)": real_usdt,
+                    "Valor Referencial (VES)": round(real_usdt * ref_bcv, 2) if ref_bcv > 0 else 0.0,
+                }
+            )
+            kardex_rows.append(
+                {
+                    "Concepto": "Diferencia de Arqueo (Real - Teórico)",
+                    "Cantidad (USDT)": diff_usdt,
+                    "Valor Referencial (VES)": round(diff_usdt * ref_bcv, 2) if ref_bcv > 0 else 0.0,
+                }
+            )
         df_kardex = pd.DataFrame(kardex_rows)
+
+        # 4b. Estado de Situación Financiera / Balance General (BA VEN-NIF N° 12)
+        banco_ledger = next((s for s in ledger_summaries if str(s.account_code) == "1.1.01"), None)
+        banco_teorico_ves = (
+            round(float(banco_ledger.final_balance), 2)
+            if banco_ledger is not None
+            else round(float(initial_ves or 0.0), 2)
+        )
+        efectivo_bancos_ves = (
+            round(float(actual_final_ves), 2) if actual_final_ves is not None else banco_teorico_ves
+        )
+        pasivo_pendiente_ves = round(
+            sum(float(e.credit) - float(e.debit) for e in journal_entries if str(e.account_code) == "2.1.09"),
+            2,
+        )
+        pasivo_pendiente_ves = max(0.0, pasivo_pendiente_ves)
+        total_activo_ves = round(efectivo_bancos_ves + inventario_final_ves, 2)
+        capital_inicial_ves = round(float(initial_ves or 0.0) + init_usdt_cost, 2)
+        ajuste_conciliacion_ves = round(
+            total_activo_ves - pasivo_pendiente_ves - capital_inicial_ves - enriquecimiento_neto,
+            2,
+        )
+        total_pasivo_patrimonio_ves = round(
+            pasivo_pendiente_ves + capital_inicial_ves + enriquecimiento_neto + ajuste_conciliacion_ves,
+            2,
+        )
+        diff_ves_arqueo = (
+            round(float(actual_final_ves) - banco_teorico_ves, 2) if actual_final_ves is not None else None
+        )
+        balance_general_rows = [
+            {"Rubro (BA VEN-NIF N° 12)": "ACTIVO CORRIENTE", "Monto (VES)": "", "Equivalente USD (BCV)": ""},
+            {
+                "Rubro (BA VEN-NIF N° 12)": "1.1.01 Efectivo en Bancos Nacionales (VES)",
+                "Monto (VES)": efectivo_bancos_ves,
+                "Equivalente USD (BCV)": round(efectivo_bancos_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "1.1.05 Criptoactivos Propios — Inventario USDT al Costo (Separado de Efectivo)",
+                "Monto (VES)": inventario_final_ves,
+                "Equivalente USD (BCV)": round(inventario_final_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "TOTAL ACTIVO (VES)",
+                "Monto (VES)": total_activo_ves,
+                "Equivalente USD (BCV)": round(total_activo_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {"Rubro (BA VEN-NIF N° 12)": "PASIVO Y PATRIMONIO", "Monto (VES)": "", "Equivalente USD (BCV)": ""},
+            {
+                "Rubro (BA VEN-NIF N° 12)": "2.1.09 Pasivos / Créditos Bancarios por Conciliar",
+                "Monto (VES)": pasivo_pendiente_ves,
+                "Equivalente USD (BCV)": round(pasivo_pendiente_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "3.1.01 Patrimonio — Capital Inicial Declarado (Bancos + USDT)",
+                "Monto (VES)": capital_inicial_ves,
+                "Equivalente USD (BCV)": round(capital_inicial_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "3.2.01 Resultado Neto del Período (ISLR PEPS)",
+                "Monto (VES)": enriquecimiento_neto,
+                "Equivalente USD (BCV)": enriquecimiento_usd_bcv,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "3.2.02 Ajustes de Arqueo / Tránsito Bancario",
+                "Monto (VES)": ajuste_conciliacion_ves,
+                "Equivalente USD (BCV)": round(ajuste_conciliacion_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "TOTAL PASIVO + PATRIMONIO (VES)",
+                "Monto (VES)": total_pasivo_patrimonio_ves,
+                "Equivalente USD (BCV)": round(total_pasivo_patrimonio_ves / ref_bcv, 2) if ref_bcv > 0 else 0.0,
+            },
+            {
+                "Rubro (BA VEN-NIF N° 12)": "Arqueo Bancario VES (Real vs Teórico)",
+                "Monto (VES)": (
+                    f"Real: {efectivo_bancos_ves:,.2f} | Teórico: {banco_teorico_ves:,.2f} | Dif: {diff_ves_arqueo:+,.2f}"
+                    if diff_ves_arqueo is not None
+                    else "Sin arqueo final ingresado (usa saldo teórico)"
+                ),
+                "Equivalente USD (BCV)": "Ecuación Patrimonial Cuadrada" if abs(total_activo_ves - total_pasivo_patrimonio_ves) < 0.02 else "Revisar",
+            },
+        ]
+        df_balance_general = pd.DataFrame(balance_general_rows)
 
         # 5. Conciliación Bancaria
         vouchers_rows = [
@@ -465,6 +575,7 @@ class ExcelReporter:
             df_diario.to_excel(writer, sheet_name="Libro Diario", index=False)
             df_mayor.to_excel(writer, sheet_name="Libro Mayor", index=False)
             df_resultados.to_excel(writer, sheet_name="Estado de Resultados", index=False)
+            df_balance_general.to_excel(writer, sheet_name="Balance General (VEN-NIF 12)", index=False)
             df_kardex.to_excel(writer, sheet_name="Kardex Inventario USDT", index=False)
             df_vouchers.to_excel(writer, sheet_name="Conciliación Bancaria", index=False)
             df_seniat.to_excel(writer, sheet_name="Liquidación Fiscal SENIAT", index=False)

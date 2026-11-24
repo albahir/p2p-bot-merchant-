@@ -34,9 +34,11 @@ class OrderListResponse(BaseModel):
 
 
 class SyncOrdersRequest(BaseModel):
-    """Parámetros para solicitar extracción directa de Binance P2P."""
+    """Parámetros para solicitar extracción directa de Binance P2P (por últimos N días o mes calendario VET)."""
     days: int = Field(default=30, ge=1, le=365)
     trade_type: str | None = Field(default=None, pattern="^(BUY|SELL)$")
+    year: int | None = Field(default=None, ge=2020, le=2100)
+    month: int | None = Field(default=None, ge=1, le=12)
 
 
 class SyncOrdersResponse(BaseModel):

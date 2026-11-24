@@ -967,3 +967,205 @@ def test_parse_bnc_debe_haber_and_mercantil_egresos_ingresos_sin_saldo():
     assert merc_prev.rows[1].amount_ves == 814.00
     assert merc_prev.rows[2].suggested_action == "BANK_FEE"
     assert merc_prev.rows[2].amount_ves == 0.50
+
+
+def test_comis_abbreviation_and_concept_aware_dedup():
+    """Debe detectar abreviatura COMIS como comisión deducible sin falsos positivos y exigir concepto igual al depurar impresiones repetidas."""
+    csv_content = (
+        b"Banco de Venezuela\n"
+        b"Fecha;Referencia;Descripcion;Debito;Credito;Saldo\n"
+        b"23/08/2026;9604523082026;COMIS CLAVE DE PAGO VIA S;0,52;0,00;37867,67\n"
+        b"23/08/2026;9604523082026;COMIS CLAVE DE PAGO VIA S;0,52;0,00;37867,67\n"
+        b"23/08/2026;999888777;TRANSFERENCIA FIDEICOMISO PRUEBA;100,00;0,00;37767,67\n"
+        b"23/08/2026;999888777;AJUSTE OPERATIVO DISTINTO;100,00;0,00;37767,67"
+    )
+
+    importer = BankStatementImporter()
+    preview = importer.parse_bytes(file_bytes=csv_content, filename="bdv_comis.csv")
+
+    assert preview.total_rows == 3
+    assert preview.rows[0].suggested_action == "BANK_FEE"
+    assert preview.rows[0].bank_fee_ves == 0.52
+    # "FIDEICOMISO" no debe confundirse con "COMIS"
+    assert preview.rows[1].suggested_action == "P2P_UNMATCHED"
+    # Misma fecha/ref/monto/saldo pero distinto concepto NO se descarta como duplicado de impresión
+    assert preview.rows[2].concept == "AJUSTE OPERATIVO DISTINTO"
+
+
+def _render_positioned_statement_image(
+    rows_positioned: list[list[tuple[int, str]]],
+    *,
+    img_format: str = "PNG",
+    size: tuple[int, int] = (1200, 420),
+) -> bytes:
+    """Genera una imagen bancaria nítida (PNG/JPEG/PDF-raster) sin capa de texto para probar OCR real."""
+    import io
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default(size=20)
+    for row_idx, cols in enumerate(rows_positioned):
+        y = 28 + row_idx * 46
+        for x, text in cols:
+            draw.text((x, y), text, fill="black", font=font)
+    buf = io.BytesIO()
+    img.save(buf, format=img_format)
+    return buf.getvalue()
+
+
+def test_image_upload_fail_closed_and_real_local_rapidocr():
+    """Debe validar magic bytes de imágenes (Fail-Closed) y extraer movimientos offline desde PNG con RapidOCR."""
+    importer = BankStatementImporter()
+
+    # Archivo .png con bytes falsos -> Fail-Closed
+    with pytest.raises(ValueError, match="imagen|PNG|firma|inválida"):
+        importer.parse_bytes(file_bytes=b"NOT_A_REAL_PNG_FILE", filename="captura_falsa.png")
+
+    # Imagen PNG real generada en memoria simulando estado Mercantil/BNC con saldo verificable
+    png_bytes = _render_positioned_statement_image(
+        [
+            [(30, "BANCO NACIONAL DE CREDITO")],
+            [(30, "Fecha"), (200, "Referencia"), (390, "Descripcion"), (740, "Debe"), (890, "Haber"), (1040, "Saldo")],
+            [(30, "05/10/2024"), (200, "349947745"), (390, "ABONO PAGO MOVIL"), (740, "0,00"), (890, "140,00"), (1040, "142,58")],
+            [(30, "05/10/2024"), (200, "349947746"), (390, "COMISION PAGO MOVIL"), (740, "5,00"), (890, "0,00"), (1040, "137,58")],
+            [(30, "06/10/2024"), (200, "349947747"), (390, "COMPRA POS"), (740, "60,00"), (890, "0,00"), (1040, "77,58")],
+        ],
+        img_format="PNG",
+    )
+    preview = importer.parse_bytes(file_bytes=png_bytes, filename="captura_bnc.png")
+
+    assert preview.bank_name == "BNC"
+    assert preview.file_type == "IMAGE"
+    assert preview.extraction_method.startswith("IMAGE_OCR_")
+    assert preview.total_rows == 3
+    assert preview.balance_verified is True
+    assert preview.balance_mismatch_count == 0
+    assert preview.bank_fee_count == 1
+    assert preview.rows[0].movement_type == "CREDIT"
+    assert preview.rows[0].amount_ves == 140.00
+    assert preview.rows[2].balance_ves == pytest.approx(77.58, abs=0.02)
+
+
+def test_dual_ocr_arbitration_and_row_level_consensus():
+    """En caso de dudas (descuadre de saldo), el árbitro Dual-OCR evalúa Tesseract y concilia fila a fila."""
+
+    def _mk_words(rows_spec: list[tuple[float, list[tuple[float, float, str]]]]) -> tuple[list[dict[str, object]], float]:
+        words: list[dict[str, object]] = []
+        for y, cols in rows_spec:
+            for x0, x1, txt in cols:
+                words.append({"text": txt, "x0": x0, "x1": x1, "top": y, "bottom": y + 10.0})
+        return words, 0.82
+
+    header = (
+        40.0,
+        [
+            (30.0, 70.0, "Fecha"),
+            (110.0, 175.0, "Referencia"),
+            (210.0, 290.0, "Concepto"),
+            (390.0, 440.0, "Cargos"),
+            (465.0, 515.0, "Abonos"),
+            (540.0, 590.0, "Saldo"),
+        ],
+    )
+
+    # Caso A: RapidOCR lee un saldo erróneo (999,00) generando 1 descuadre; Tesseract lee exacto (850,00) y gana el arbitraje
+    rapid_bad = _mk_words(
+        [
+            (15.0, [(30.0, 150.0, "Banesco")]),
+            header,
+            (60.0, [(30.0, 85.0, "02/05/2025"), (110.0, 165.0, "1001"), (210.0, 320.0, "ABONO PAGO MOVIL"), (465.0, 515.0, "500,00"), (540.0, 595.0, "999,00")]),
+            (80.0, [(30.0, 85.0, "02/05/2025"), (110.0, 165.0, "1002"), (210.0, 320.0, "COMISION PAGO MOVIL"), (390.0, 440.0, "10,00"), (540.0, 595.0, "840,00")]),
+        ]
+    )
+    tess_clean = _mk_words(
+        [
+            (15.0, [(30.0, 150.0, "Banesco")]),
+            header,
+            (60.0, [(30.0, 85.0, "02/05/2025"), (110.0, 165.0, "1001"), (210.0, 320.0, "ABONO PAGO MOVIL"), (465.0, 515.0, "500,00"), (540.0, 595.0, "850,00")]),
+            (80.0, [(30.0, 85.0, "02/05/2025"), (110.0, 165.0, "1002"), (210.0, 320.0, "COMISION PAGO MOVIL"), (390.0, 440.0, "10,00"), (540.0, 595.0, "840,00")]),
+        ]
+    )
+
+    dummy_png = _render_positioned_statement_image([[(10, "dummy")]], size=(120, 60))
+    importer_a = BankStatementImporter(
+        ocr_engines={
+            "rapidocr": lambda _img: rapid_bad,
+            "tesseract": lambda _img: tess_clean,
+        }
+    )
+    res_a = importer_a.parse_bytes(file_bytes=dummy_png, filename="banesco_duda.png")
+    assert res_a.extraction_method == "IMAGE_OCR_TESSERACT"
+    assert res_a.balance_verified is True
+    assert res_a.balance_mismatch_count == 0
+    assert res_a.rows[0].balance_ves == 850.00
+    assert any("Tesseract" in w and "RapidOCR" in w for w in res_a.warnings)
+
+    # Caso B: Consenso fila-a-fila: RapidOCR captura 3 filas con 1 error puntual en fila 1; Tesseract captura 2 filas pero bien fila 1 -> Consenso repara y cuadra 3/3!
+    rapid_3_with_1_err = _mk_words(
+        [
+            (15.0, [(30.0, 150.0, "Banesco")]),
+            header,
+            (60.0, [(30.0, 85.0, "02/05/2025"), (110.0, 165.0, "2001"), (210.0, 320.0, "ABONO UNO"), (465.0, 515.0, "500,00"), (540.0, 595.0, "500,00")]),
+            (80.0, [(30.0, 85.0, "03/05/2025"), (110.0, 165.0, "2002"), (210.0, 320.0, "CARGO DOS"), (390.0, 440.0, "100,00"), (540.0, 595.0, "999,00")]),
+            (100.0, [(30.0, 85.0, "04/05/2025"), (110.0, 165.0, "2003"), (210.0, 320.0, "ABONO TRES"), (465.0, 515.0, "50,00"), (540.0, 595.0, "450,00")]),
+        ]
+    )
+    tess_2_repaired = _mk_words(
+        [
+            (15.0, [(30.0, 150.0, "Banesco")]),
+            header,
+            (60.0, [(30.0, 85.0, "02/05/2025"), (110.0, 165.0, "2001"), (210.0, 320.0, "ABONO UNO"), (465.0, 515.0, "500,00"), (540.0, 595.0, "500,00")]),
+            (80.0, [(30.0, 85.0, "03/05/2025"), (110.0, 165.0, "2002"), (210.0, 320.0, "CARGO DOS"), (390.0, 440.0, "100,00"), (540.0, 595.0, "400,00")]),
+        ]
+    )
+    importer_b = BankStatementImporter(
+        ocr_engines={
+            "rapidocr": lambda _img: rapid_3_with_1_err,
+            "tesseract": lambda _img: tess_2_repaired,
+        }
+    )
+    res_b = importer_b.parse_bytes(file_bytes=dummy_png, filename="banesco_consenso.png")
+    assert res_b.total_rows == 3
+    assert res_b.balance_verified is True
+    assert res_b.balance_mismatch_count == 0
+    assert res_b.rows[1].balance_ves == 400.00
+    assert res_b.extraction_method == "IMAGE_OCR_CONSENSUS"
+
+
+def test_scanned_image_pdf_uses_local_ocr_without_gemini_key():
+    """Un PDF escaneado (solo imagen raster sin capa de texto) debe leerse localmente y gratis con RapidOCR sin clave Gemini."""
+    scanned_pdf = _render_positioned_statement_image(
+        [
+            [(30, "BANESCO ESTADO DE CUENTA")],
+            [(30, "Fecha"), (200, "Referencia"), (390, "Concepto"), (740, "Cargos"), (890, "Abonos"), (1040, "Saldo")],
+            [(30, "05/05/2025"), (200, "512441715"), (390, "PAGO MOVIL RECIBIDO"), (740, "0,00"), (890, "2.000,00"), (1040, "12.000,00")],
+            [(30, "05/05/2025"), (200, "512444862"), (390, "COMISION PAGO MOVIL"), (740, "6,00"), (890, "0,00"), (1040, "11.994,00")],
+        ],
+        img_format="PDF",
+    )
+
+    importer = BankStatementImporter()  # Sin clave Gemini
+    preview = importer.parse_bytes(file_bytes=scanned_pdf, filename="escaneado_local.pdf")
+
+    assert preview.bank_name == "BANESCO"
+    assert preview.file_type == "PDF"
+    assert preview.extraction_method.startswith("PDF_OCR_")
+    assert preview.total_rows == 2
+    assert preview.balance_verified is True
+    assert preview.bank_fee_count == 1
+    assert preview.rows[1].balance_ves == pytest.approx(11994.00, abs=0.02)
+
+
+def test_oversized_pixel_bomb_image_rejected_fail_closed():
+    """Una imagen que declare dimensiones superiores al límite anti-DoS debe rechazarse Fail-Closed sin decodificar píxeles."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("1", (8000, 8000), 1).save(buf, format="PNG")
+    importer = BankStatementImporter()
+    with pytest.raises(ValueError, match="Dimensiones de imagen fuera del límite de seguridad"):
+        importer.parse_bytes(file_bytes=buf.getvalue(), filename="bomba.png")
