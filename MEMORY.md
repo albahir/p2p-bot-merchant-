@@ -871,6 +871,25 @@
       - Actualizados [`frontend/src/lib/api.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/api.ts) y [`frontend/src/lib/useWebSocket.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/useWebSocket.ts) para operar por mismo origen (`/api/*` y `/ws/live`) detrás de Caddy + Cloudflare Proxy en puertos `80`/`443` (evitando bloqueos del puerto `8000` en Cloudflare Free).
       - Creado script automatizado [`scripts/deploy_vps.sh`](file:///c:/p2p-bot-merchant/scripts/deploy_vps.sh) con validación fail-closed de `.env`, verificación de IP pública y configuración firewall `ufw`.
 
+67. **Auto-Despliegue Continuo CI → CD → VPS via SSH y Endurecimiento de Perfil / UX OAuth (ADR 067)**:
+    - **Pipeline Encadenado Fail-Closed ([`.github/workflows/ci.yml`](file:///c:/p2p-bot-merchant/.github/workflows/ci.yml), [`.github/workflows/cd.yml`](file:///c:/p2p-bot-merchant/.github/workflows/cd.yml))**:
+      - `CI Pipeline` valida Ruff, Mypy, TypeScript (`tsc --noEmit` en `frontend/`) y Pytest en cada push a `main`.
+      - `CD Pipeline` escucha exclusivamente `workflow_run` exitoso de `CI Pipeline` en `main`: construye las 3 imágenes reales del VPS (`engine`, `api`, `frontend`), corre `smoke_test.py` y se conecta por OpenSSH nativo (`VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY` sin acciones SSH de terceros ni inyección de shell) ejecutando `git pull --ff-only origin main && bash scripts/deploy_vps.sh`.
+    - **Verificación de Correo Automática, Perfil No Destructivo y FOUT Eliminado ([`src/api/routes/auth.py`](file:///c:/p2p-bot-merchant/src/api/routes/auth.py), [`settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx), [`register/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/register/page.tsx), [`sheets/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/sheets/page.tsx), [`layout.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/layout.tsx), [`globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css))**:
+      - `update_recovery_profile` ahora valida `email_verification_token` persistiendo `email_verified=True` sin borrar campos previos; `/settings` muestra el correo guardado en tarjeta bloqueada con botón `Cambiar correo` y auto-verifica/guarda al teclear el 6.º dígito OTP; `/register` dispara y valida OTP automáticamente; `/sheets` refresca en modo `fresh` tras OAuth; y Material Symbols usa `display=block` + `overflow: hidden` evitando flash en Times New Roman.
+
+68. **Tarjetas Bloqueadas para Cédula/RIF e ID de Telegram (con OTP por Correo) y Fuentes `.woff2` Locales en Next.js (ADR 068)**:
+    - **Protección de Cambios de `telegram_id` y Perfil No Destructivo ([`src/api/routes/auth.py`](file:///c:/p2p-bot-merchant/src/api/routes/auth.py), [`src/api/schemas/auth.py`](file:///c:/p2p-bot-merchant/src/api/schemas/auth.py), [`tests/unit/test_email_verification.py`](file:///c:/p2p-bot-merchant/tests/unit/test_email_verification.py))**:
+      - Extraído `_dispatch_email_otp_for_address` para reutilizar el flujo de códigos OTP HMAC-SHA256.
+      - Añadido endpoint autenticado `POST /api/auth/profile/send-email-otp` (`send_profile_email_otp`) para despachar OTP exclusivamente al `current_user.email` ya guardado (tanto para verificar un correo pendiente como para autorizar un cambio de `telegram_id`), manteniendo el endpoint público `/api/auth/email/send-code` bloqueado contra correos ya registrados.
+      - Actualizado `RecoveryProfileUpdateRequest` y `update_recovery_profile` (`POST /api/auth/recovery-profile`) para aceptar `telegram_id` (5-15 dígitos, verificando unicidad) exigiendo estrictamente `email_verified=True` y un `email_verification_token` válido emitido para `current_user.email`.
+    - **Patrón Tarjeta Bloqueada + `Editar` en `/settings` ([`frontend/src/app/settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx), [`frontend/src/lib/api.ts`](file:///c:/p2p-bot-merchant/frontend/src/lib/api.ts))**:
+      - Añadido cliente `sendProfileEmailOtp()` en `api.ts`.
+      - Extendido el patrón de tarjeta bloqueada (`✓ Guardada` + `Editar` para `Cédula o RIF`, `✓ Vinculado` + `Cambiar ID` para `ID de Telegram`) evitando reescrituras accidentales e integrando caja de verificación OTP por correo con auto-validación al teclear el 6.º dígito antes de desbloquear el guardado de un nuevo `telegram_id`.
+    - **Auto-Hospedaje Local de Fuentes `.woff2` Sin Peticiones Externas ([`frontend/package.json`](file:///c:/p2p-bot-merchant/frontend/package.json), [`frontend/src/app/layout.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/layout.tsx), [`frontend/src/app/globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css))**:
+      - Instalados paquetes locales `@fontsource-variable/inter`, `@fontsource-variable/jetbrains-mono` y `material-symbols`.
+      - Reemplazados todos los enlaces externos a `fonts.googleapis.com` y `fonts.gstatic.com` por `next/font/local` sirviendo archivos `.woff2` propios desde el servidor Next.js (`--font-inter`, `--font-jetbrains-mono`, `--font-material-symbols`), eliminando dependencias y fugas de metadatos hacia Google Fonts.
+
 ---
 
 ## 🎯 Guía Operativa Actual

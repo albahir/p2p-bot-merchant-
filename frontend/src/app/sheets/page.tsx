@@ -45,7 +45,7 @@ export default function SheetsSyncPage() {
     text: string;
   } | null>(null);
 
-  const loadConfig = useCallback(async () => {
+  const loadConfig = useCallback(async (fresh = false) => {
     const current = getCurrentUser();
     setUser(current);
     if (!current || current.role === "INVITADO") {
@@ -53,7 +53,7 @@ export default function SheetsSyncPage() {
       return;
     }
 
-    const cached = getCachedSheetsSettings();
+    const cached = fresh ? null : getCachedSheetsSettings();
     if (cached) {
       setConfig((prev) => prev || cached);
       setSheetInput((prev) => prev || cached.google_sheet_id || "");
@@ -62,7 +62,7 @@ export default function SheetsSyncPage() {
       setLoading(true);
     }
     try {
-      const res = await getSheetsSettings();
+      const res = await getSheetsSettings(fresh);
       setConfig(res);
       setSheetInput(res.google_sheet_id || "");
       if (res.google_auth_type === "SERVICE_ACCOUNT" && !res.oauth_connected && res.service_account_email && !res.oauth_available) {
@@ -89,7 +89,7 @@ export default function SheetsSyncPage() {
     if (oauthErr) {
       window.history.replaceState({}, "", "/sheets");
       setFeedback({ type: "error", text: "Autorización con Google cancelada." });
-      loadConfig();
+      loadConfig(true);
       return;
     }
 
@@ -104,19 +104,20 @@ export default function SheetsSyncPage() {
           setConfig(res);
           setSheetInput(res.google_sheet_id || "");
           setAuthMode("OAUTH2");
+          setLoading(false);
           setFeedback({ type: "success", text: res.message || "Cuenta de Google conectada." });
         })
         .catch((err: any) => {
           setFeedback({ type: "error", text: err.message || "No se pudo completar la conexión con Google." });
+          loadConfig(true);
         })
         .finally(() => {
           setConnectingGoogle(false);
-          loadConfig();
         });
       return;
     }
 
-    loadConfig();
+    loadConfig(false);
   }, [loadConfig]);
 
   async function handleConnectGoogle() {

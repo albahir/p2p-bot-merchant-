@@ -74,7 +74,9 @@ class RecoveryProfileUpdateRequest(BaseModel):
     """Actualización de datos de respaldo y recuperación para usuarios existentes."""
     full_name: str | None = Field(default=None, max_length=120)
     tax_id: str | None = Field(default=None, max_length=30)
+    telegram_id: str | None = Field(default=None, max_length=30)
     email: str | None = Field(default=None, max_length=150)
+    email_verification_token: str | None = Field(default=None)
     security_question: str | None = Field(default=None, max_length=200)
     security_answer: str | None = Field(default=None, max_length=120)
     regenerate_recovery_key: bool = Field(default=False)
