@@ -1,24 +1,29 @@
-name: CD Pipeline
+name: CD Pipeline (Auto-Deploy to VPS)
 
 on:
-  push:
+  workflow_run:
+    workflows: [ "CI Pipeline" ]
+    types: [ completed ]
     branches: [ main ]
-    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
 
-# Evitar despliegues concurrentes simultáneos para prevenir condiciones de carrera
+# Evitar despliegues concurrentes simultáneos en el VPS
 concurrency:
-  group: cd-deploy
+  group: cd-vps-deploy
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  build-and-scan:
-    name: Build & Security Container Scan
+  build-and-verify:
+    name: Build VPS Images & Smoke Tests
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -29,31 +34,23 @@ jobs:
           context: .
           file: docker/Dockerfile.engine
           load: true
-          tags: p2p-engine:${{ github.sha }}
+          tags: p2p-engine:ci
 
-      - name: Build Dashboard Image
+      - name: Build API Image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/Dockerfile.dashboard
+          file: docker/Dockerfile.api
           load: true
-          tags: p2p-dashboard:${{ github.sha }}
+          tags: p2p-api:ci
 
-      - name: Scan Engine Container (Trivy)
-        uses: aquasecurity/trivy-action@master
+      - name: Build Frontend Image
+        uses: docker/build-push-action@v5
         with:
-          image-ref: p2p-engine:${{ github.sha }}
-          format: 'table'
-          exit-code: '0'
-          severity: 'CRITICAL,HIGH'
-
-  deploy-staging:
-    name: Deploy to Staging VPS & Smoke Test
-    needs: build-and-scan
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
+          context: .
+          file: docker/Dockerfile.frontend
+          load: true
+          tags: p2p-frontend:ci
 
       - name: Set up Python for Smoke Tests
         uses: actions/setup-python@v5
@@ -61,35 +58,40 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -e .
-
       - name: Run Operational Smoke Tests
-        run: python scripts/smoke_test.py --stage=staging
-
-  deploy-production:
-    name: Deploy to Production (Manual Approval Required)
-    needs: deploy-staging
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-
-      - name: Install Dependencies
+        env:
+          MASTER_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          JWT_SECRET_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          DATABASE_URL: "sqlite:///:memory:"
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e .
+          python scripts/smoke_test.py --stage=staging
 
-      - name: Run Production Health & Operational Verification
-        run: python scripts/smoke_test.py --stage=production
+  deploy-vps:
+    name: Deploy Automático al VPS Contabo
+    needs: [ build-and-verify ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate VPS Secrets & Deploy via Native SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_USER" ] || [ -z "$VPS_SSH_KEY" ]; then
+            echo "ERROR FAIL-CLOSED: Faltan GitHub Secrets (VPS_HOST, VPS_USER o VPS_SSH_KEY)."
+            exit 1
+          fi
+          PORT="${VPS_PORT:-22}"
+          KEY_FILE="$RUNNER_TEMP/vps_deploy_key"
+          printf '%s\n' "$VPS_SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          ssh -i "$KEY_FILE" -p "$PORT" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "${VPS_USER}@${VPS_HOST}" \
+            "cd /opt/p2p-bot-merchant && git pull --ff-only origin main && bash scripts/deploy_vps.sh"
+
+      - name: Cleanup Ephemeral SSH Key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vps_deploy_key"

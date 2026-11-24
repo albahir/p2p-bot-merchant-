@@ -185,33 +185,18 @@ def _email_otp_state_key(clean_email: str) -> str:
     return f"email_otp:{digest}"
 
 
-@router.post("/email/send-code")
-def send_email_verification_code(
-    req: EmailSendCodeRequest,
-    db: Annotated[Session, Depends(get_db)],
-    settings: Annotated[Settings, Depends(get_settings)],
+def _dispatch_email_otp_for_address(
+    clean_email: str,
+    db: Session,
+    settings: Settings,
 ) -> dict[str, Any]:
-    """Envía un código OTP de 6 dígitos al correo vía SMTP durante el registro."""
+    """Despacha OTP de 6 dígitos al correo indicado y registra hash HMAC en SystemState."""
     import json
 
     from sqlalchemy.exc import SQLAlchemyError
 
     from src.data.models import SystemState
     from src.integrations.email_verifier import EmailVerificationService
-
-    clean_email = _validate_and_normalize_email(req.email)
-    if not clean_email:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Ingresa un correo electrónico válido.",
-        )
-
-    existing = UserRepository(db).get_by_email(clean_email)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Este correo electrónico ya está asociado a otra cuenta.",
-        )
 
     mailer = EmailVerificationService(settings)
     if not mailer.is_configured:
@@ -286,6 +271,47 @@ def send_email_verification_code(
         "smtp_configured": True,
         "message": f"Código de 6 dígitos enviado a {clean_email}.",
     }
+
+
+@router.post("/email/send-code")
+def send_email_verification_code(
+    req: EmailSendCodeRequest,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    """Envía un código OTP de 6 dígitos al correo vía SMTP durante el registro o edición a correo nuevo."""
+    clean_email = _validate_and_normalize_email(req.email)
+    if not clean_email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Ingresa un correo electrónico válido.",
+        )
+
+    existing = UserRepository(db).get_by_email(clean_email)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este correo electrónico ya está asociado a otra cuenta.",
+        )
+
+    return _dispatch_email_otp_for_address(clean_email, db, settings)
+
+
+@router.post("/profile/send-email-otp")
+def send_profile_email_otp(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings | None, Depends(get_settings)] = None,
+) -> dict[str, Any]:
+    """Envía un código OTP al correo propio del usuario autenticado (para verificarlo o cambiar Telegram ID)."""
+    clean_email = _validate_and_normalize_email(getattr(current_user, "email", None))
+    if not clean_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tu cuenta no tiene un correo electrónico configurado.",
+        )
+    effective_settings = settings or get_settings()
+    return _dispatch_email_otp_for_address(clean_email, db, effective_settings)
 
 
 @router.post("/email/verify-code")
@@ -1157,17 +1183,19 @@ def update_recovery_profile(
     req: RecoveryProfileUpdateRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings | None, Depends(get_settings)] = None,
 ) -> dict[str, Any]:
     """Configura o actualiza correo de respaldo, nombre, pregunta secreta y Llave Maestra del usuario autenticado."""
     user_repo = UserRepository(db)
+    effective_settings = settings or get_settings()
 
-    if req.full_name is not None:
-        current_user.full_name = req.full_name.strip() or None  # type: ignore[assignment]
+    if req.full_name is not None and req.full_name.strip():
+        current_user.full_name = req.full_name.strip()  # type: ignore[assignment]
 
-    if req.tax_id is not None:
+    if req.tax_id is not None and req.tax_id.strip():
         current_user.tax_id = _validate_and_normalize_tax_id(req.tax_id)  # type: ignore[assignment]
 
-    if req.email is not None:
+    if req.email is not None and req.email.strip():
         clean_email = _validate_and_normalize_email(req.email)
         if clean_email:
             owner = user_repo.get_by_email(clean_email)
@@ -1176,7 +1204,76 @@ def update_recovery_profile(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Este correo electrónico ya está en uso por otro operador.",
                 )
-        current_user.email = clean_email  # type: ignore[assignment]
+            previous_email = str(current_user.email or "").strip().lower()
+            email_changed = clean_email != previous_email
+            current_user.email = clean_email  # type: ignore[assignment]
+
+            if req.email_verification_token:
+                ver_payload = decode_access_token(
+                    token=req.email_verification_token,
+                    secret_key=effective_settings.jwt_secret,
+                    algorithm=effective_settings.JWT_ALGORITHM,
+                )
+                if (
+                    ver_payload
+                    and ver_payload.get("purpose") == "email_verified"
+                    and str(ver_payload.get("sub") or "").strip().lower() == clean_email
+                ):
+                    current_user.email_verified = True  # type: ignore[assignment]
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="El token de verificación de correo es inválido o no coincide.",
+                    )
+            elif email_changed:
+                current_user.email_verified = False  # type: ignore[assignment]
+    elif req.email_verification_token and not (req.telegram_id and req.telegram_id.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debes especificar el correo electrónico a verificar.",
+        )
+
+    if req.telegram_id is not None and req.telegram_id.strip():
+        clean_tg = re.sub(r"\D", "", req.telegram_id.strip())
+        if len(clean_tg) < 5 or len(clean_tg) > 15:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="El ID de Telegram debe tener entre 5 y 15 dígitos numéricos.",
+            )
+        current_tg = str(current_user.telegram_id or "").strip()
+        if clean_tg != current_tg:
+            owner_email = str(current_user.email or "").strip().lower()
+            if not owner_email or not bool(current_user.email_verified):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Para cambiar tu ID de Telegram debes tener un correo electrónico verificado.",
+                )
+            if not req.email_verification_token:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Se requiere código OTP verificado en tu correo para cambiar el ID de Telegram.",
+                )
+            tg_ver_payload = decode_access_token(
+                token=req.email_verification_token,
+                secret_key=effective_settings.jwt_secret,
+                algorithm=effective_settings.JWT_ALGORITHM,
+            )
+            if (
+                not tg_ver_payload
+                or tg_ver_payload.get("purpose") != "email_verified"
+                or str(tg_ver_payload.get("sub") or "").strip().lower() != owner_email
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El código OTP de verificación de correo es inválido o expiró.",
+                )
+            existing_tg = user_repo.get_by_telegram_id(clean_tg)
+            if existing_tg is not None and int(existing_tg.id) != int(current_user.id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Este ID de Telegram ya está vinculado a otra cuenta.",
+                )
+            current_user.telegram_id = clean_tg  # type: ignore[assignment]
 
     clean_q = req.security_question.strip() if req.security_question and req.security_question.strip() else None
     clean_a = req.security_answer.strip() if req.security_answer and req.security_answer.strip() else None

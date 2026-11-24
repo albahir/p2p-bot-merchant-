@@ -11,6 +11,9 @@
 	# Si montas un Certificado Origin CA de Cloudflare en docker/certs/, descomenta:
 	# tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
 
+	@next_static path /_next/static/*
+	header @next_static Cache-Control "public, max-age=31536000, immutable"
+
 	@backend path /api/* /ws/* /health
 	handle @backend {
 		reverse_proxy api:8000

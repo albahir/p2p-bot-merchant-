@@ -20,6 +20,7 @@ import {
   resumeBot,
   saveBinanceSettings,
   sendEmailVerificationCode,
+  sendProfileEmailOtp,
   sendTelegramTestAlert,
   updateRecoveryProfile,
   updateUserRole,
@@ -106,6 +107,19 @@ export default function SettingsSecurityPage() {
   const [recEmailSendingCode, setRecEmailSendingCode] = useState<boolean>(false);
   const [recEmailVerifying, setRecEmailVerifying] = useState<boolean>(false);
   const [recEmailVerifiedToken, setRecEmailVerifiedToken] = useState<string>("");
+  const [editingRecEmail, setEditingRecEmail] = useState<boolean>(false);
+  const [editingRecTax, setEditingRecTax] = useState<boolean>(false);
+  const [editingRecTelegram, setEditingRecTelegram] = useState<boolean>(false);
+  const [recTelegramId, setRecTelegramId] = useState<string>("");
+  const [tgOtpSent, setTgOtpSent] = useState<boolean>(false);
+  const [tgSendingOtp, setTgSendingOtp] = useState<boolean>(false);
+  const [tgOtpCode, setTgOtpCode] = useState<string>("");
+  const [tgVerifyingOtp, setTgVerifyingOtp] = useState<boolean>(false);
+  const [tgVerifiedToken, setTgVerifiedToken] = useState<string>("");
+  const [tgStatusMsg, setTgStatusMsg] = useState<{
+    text: string;
+    tone: "info" | "ok" | "warn" | "error";
+  } | null>(null);
   const [recEmailStatusMsg, setRecEmailStatusMsg] = useState<{
     text: string;
     tone: "info" | "ok" | "warn" | "error";
@@ -156,10 +170,14 @@ export default function SettingsSecurityPage() {
             setRecTaxPrefix("V");
             setRecTaxNumber(myProfile.tax_id.replace(/\D/g, ""));
           }
+          setEditingRecTax(false);
         } else {
           setRecTaxPrefix("NONE");
           setRecTaxNumber("");
+          setEditingRecTax(true);
         }
+        setRecTelegramId(myProfile.telegram_id || "");
+        setEditingRecTelegram(!myProfile.telegram_id);
         if (myProfile.email) {
           const cleanEmail = myProfile.email.trim().toLowerCase();
           const atIdx = cleanEmail.indexOf("@");
@@ -181,6 +199,9 @@ export default function SettingsSecurityPage() {
             setRecEmailDomain("__custom__");
             setRecCustomEmail(cleanEmail);
           }
+          setEditingRecEmail(false);
+        } else {
+          setEditingRecEmail(true);
         }
       }
 
@@ -366,14 +387,19 @@ export default function SettingsSecurityPage() {
   }
 
   async function handleSendRecEmailCode() {
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(recEmailComputed)) {
+    const verifyingExisting = Boolean(
+      !editingRecEmail && currentUser?.email && !currentUser.email_verified
+    );
+    if (!verifyingExisting && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(recEmailComputed)) {
       setRecEmailStatusMsg({ text: "Ingresa un correo válido.", tone: "error" });
       return;
     }
     setRecEmailSendingCode(true);
     setRecEmailStatusMsg(null);
     try {
-      const res = await sendEmailVerificationCode(recEmailComputed);
+      const res = verifyingExisting
+        ? await sendProfileEmailOtp()
+        : await sendEmailVerificationCode(recEmailComputed);
       if (res.sent) {
         setRecEmailCodeSent(true);
         setRecEmailCode("");
@@ -393,8 +419,68 @@ export default function SettingsSecurityPage() {
     }
   }
 
-  async function handleVerifyRecEmailCode() {
-    const cleaned = recEmailCode.replace(/\D/g, "").slice(0, 6);
+  async function handleSendTgEmailOtp() {
+    if (!currentUser?.email || !currentUser.email_verified) {
+      setTgStatusMsg({
+        text: "Primero guarda y verifica tu correo electrónico arriba.",
+        tone: "warn",
+      });
+      return;
+    }
+    setTgSendingOtp(true);
+    setTgStatusMsg(null);
+    try {
+      const res = await sendProfileEmailOtp();
+      if (res.sent) {
+        setTgOtpSent(true);
+        setTgOtpCode("");
+        setTgStatusMsg({ text: res.message, tone: "info" });
+        setTimeout(() => document.getElementById("rec-tg-otp-code")?.focus(), 0);
+      } else {
+        setTgStatusMsg({ text: res.message, tone: "warn" });
+      }
+    } catch (err: any) {
+      setTgStatusMsg({
+        text: err.message || "No se pudo enviar el código OTP al correo.",
+        tone: "error",
+      });
+    } finally {
+      setTgSendingOtp(false);
+    }
+  }
+
+  async function handleVerifyTgEmailOtp(codeOverride?: string) {
+    const ownerEmail = (currentUser?.email || "").trim().toLowerCase();
+    const cleaned = (codeOverride ?? tgOtpCode).replace(/\D/g, "").slice(0, 6);
+    if (!ownerEmail || cleaned.length !== 6) {
+      setTgStatusMsg({ text: "Ingresa los 6 dígitos.", tone: "error" });
+      return;
+    }
+    setTgVerifyingOtp(true);
+    setTgStatusMsg(null);
+    try {
+      const res = await verifyEmailCode(ownerEmail, cleaned);
+      if (res.verified && res.verification_token) {
+        setTgVerifiedToken(res.verification_token);
+        setTgOtpSent(false);
+        setTgOtpCode("");
+        setTgStatusMsg({
+          text: "Código confirmado. Escribe tu nuevo ID de Telegram y pulsa Guardar.",
+          tone: "ok",
+        });
+      }
+    } catch (err: any) {
+      setTgStatusMsg({
+        text: err.message || "Código incorrecto o expirado.",
+        tone: "error",
+      });
+    } finally {
+      setTgVerifyingOtp(false);
+    }
+  }
+
+  async function handleVerifyRecEmailCode(codeOverride?: string) {
+    const cleaned = (codeOverride ?? recEmailCode).replace(/\D/g, "").slice(0, 6);
     if (cleaned.length !== 6) {
       setRecEmailStatusMsg({ text: "Ingresa los 6 dígitos.", tone: "error" });
       document.getElementById("rec-email-code")?.focus();
@@ -408,7 +494,17 @@ export default function SettingsSecurityPage() {
         setRecEmailVerifiedToken(res.verification_token);
         setRecEmailCodeSent(false);
         setRecEmailCode("");
-        setRecEmailStatusMsg({ text: res.message || "Correo verificado.", tone: "ok" });
+        // Persistir automáticamente en BD para que quede verificado de inmediato sin doble clic
+        const saved = await updateRecoveryProfile({
+          email: recEmailComputed,
+          email_verification_token: res.verification_token,
+        });
+        setCurrentUser(saved.user);
+        setEditingRecEmail(false);
+        setRecEmailStatusMsg({
+          text: "Correo verificado y guardado en tu perfil.",
+          tone: "ok",
+        });
       }
     } catch (err: any) {
       setRecEmailStatusMsg({
@@ -429,15 +525,64 @@ export default function SettingsSecurityPage() {
     setNewMasterKey(null);
     setSavingRecovery(true);
     try {
-      const res = await updateRecoveryProfile({
-        full_name: recFullName.trim() || undefined,
-        tax_id: formattedRecTaxId || undefined,
-        email: recEmailComputed || undefined,
-        security_question: recQuestion.trim() || undefined,
-        security_answer: recAnswer.trim() || undefined,
+      const trimmedName = recFullName.trim();
+      const prevName = (currentUser?.full_name || "").trim();
+      const prevTax = (currentUser?.tax_id || "").trim();
+      const prevEmail = (currentUser?.email || "").trim().toLowerCase();
+      const prevTg = (currentUser?.telegram_id || "").trim();
+      const nextEmail = editingRecEmail ? recEmailComputed : "";
+      const nextTg = editingRecTelegram ? recTelegramId.replace(/\D/g, "") : "";
+
+      const payload: {
+        full_name?: string;
+        tax_id?: string;
+        telegram_id?: string;
+        email?: string;
+        email_verification_token?: string;
+        security_question?: string;
+        security_answer?: string;
+        regenerate_recovery_key?: boolean;
+      } = {
         regenerate_recovery_key: regenerateKey,
-      });
+      };
+
+      if (trimmedName && trimmedName !== prevName) {
+        payload.full_name = trimmedName;
+      }
+      if (editingRecTax && formattedRecTaxId && formattedRecTaxId !== prevTax) {
+        payload.tax_id = formattedRecTaxId;
+      }
+      if (editingRecEmail && nextEmail && nextEmail !== prevEmail) {
+        payload.email = nextEmail;
+        if (recEmailVerifiedToken) {
+          payload.email_verification_token = recEmailVerifiedToken;
+        }
+      } else if (recEmailVerifiedToken && prevEmail) {
+        payload.email = prevEmail;
+        payload.email_verification_token = recEmailVerifiedToken;
+      }
+      if (editingRecTelegram && nextTg && nextTg !== prevTg) {
+        payload.telegram_id = nextTg;
+        if (tgVerifiedToken) {
+          payload.email_verification_token = tgVerifiedToken;
+        }
+      }
+      if (recQuestion.trim()) {
+        payload.security_question = recQuestion.trim();
+      }
+      if (recAnswer.trim()) {
+        payload.security_answer = recAnswer.trim();
+      }
+
+      const res = await updateRecoveryProfile(payload);
       setCurrentUser(res.user);
+      setEditingRecEmail(!res.user.email);
+      setEditingRecTax(!res.user.tax_id);
+      setEditingRecTelegram(!res.user.telegram_id);
+      setTgVerifiedToken("");
+      setTgOtpSent(false);
+      setTgOtpCode("");
+      setTgStatusMsg(null);
       setRecQuestion("");
       setRecAnswer("");
       if (res.recovery_key) {
@@ -1067,55 +1212,226 @@ export default function SettingsSecurityPage() {
                 >
                   Cédula o RIF
                 </label>
-                {formattedRecTaxId && (
-                  <span className="text-[10px] font-mono text-primary font-bold">
-                    {formattedRecTaxId}
-                  </span>
+                {currentUser.tax_id && !editingRecTax ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-semibold text-tertiary">
+                      ✓ Guardada
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setEditingRecTax(true)}
+                      className="text-[10px] font-mono text-secondary hover:underline cursor-pointer"
+                    >
+                      Editar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    {formattedRecTaxId && (
+                      <span className="text-[10px] font-mono text-primary font-bold">
+                        {formattedRecTaxId}
+                      </span>
+                    )}
+                    {currentUser.tax_id && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingRecTax(false)}
+                        className="text-[10px] font-mono text-slate-400 hover:underline cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
-              <div className="flex items-stretch rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden focus-within:border-primary-container">
-                <select
-                  aria-label="Tipo de documento"
-                  value={recTaxPrefix}
-                  onChange={(e) => {
-                    const next = e.target.value as TaxDocPrefix;
-                    setRecTaxPrefix(next);
-                    if (next === "NONE") setRecTaxNumber("");
-                  }}
-                  className="px-2 py-2 bg-surface-container border-r border-[#1e2430] text-xs font-mono font-bold text-primary focus:outline-hidden cursor-pointer shrink-0"
+              {currentUser.tax_id && !editingRecTax ? (
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white">
+                  <span>{currentUser.tax_id}</span>
+                  <span className="px-1.5 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-semibold">
+                    SENIAT
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-stretch rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden focus-within:border-primary-container">
+                  <select
+                    aria-label="Tipo de documento"
+                    value={recTaxPrefix}
+                    onChange={(e) => {
+                      const next = e.target.value as TaxDocPrefix;
+                      setRecTaxPrefix(next);
+                      if (next === "NONE") setRecTaxNumber("");
+                    }}
+                    className="px-2 py-2 bg-surface-container border-r border-[#1e2430] text-xs font-mono font-bold text-primary focus:outline-hidden cursor-pointer shrink-0"
+                  >
+                    {TAX_PREFIX_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id} className="bg-[#141920] text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    id="rec-tax-id"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    enterKeyHint="next"
+                    disabled={recTaxPrefix === "NONE"}
+                    maxLength={selectedRecTaxMeta.isRif ? 9 : 10}
+                    value={recTaxNumber}
+                    onChange={(e) =>
+                      setRecTaxNumber(
+                        e.target.value
+                          .replace(/\D/g, "")
+                          .slice(0, selectedRecTaxMeta.isRif ? 9 : 10)
+                      )
+                    }
+                    placeholder={
+                      recTaxPrefix === "NONE"
+                        ? "Omitido"
+                        : selectedRecTaxMeta.isRif
+                        ? "9 dígitos"
+                        : "12345678"
+                    }
+                    className="w-full px-2.5 py-2 bg-transparent focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-40"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="rec-telegram-id"
+                  className="text-[10px] font-mono uppercase text-slate-400"
                 >
-                  {TAX_PREFIX_OPTIONS.map((opt) => (
-                    <option key={opt.id} value={opt.id} className="bg-[#141920] text-white">
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  id="rec-tax-id"
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  enterKeyHint="next"
-                  disabled={recTaxPrefix === "NONE"}
-                  maxLength={selectedRecTaxMeta.isRif ? 9 : 10}
-                  value={recTaxNumber}
-                  onChange={(e) =>
-                    setRecTaxNumber(
-                      e.target.value
-                        .replace(/\D/g, "")
-                        .slice(0, selectedRecTaxMeta.isRif ? 9 : 10)
-                    )
-                  }
-                  placeholder={
-                    recTaxPrefix === "NONE"
-                      ? "Omitido"
-                      : selectedRecTaxMeta.isRif
-                      ? "9 dígitos"
-                      : "12345678"
-                  }
-                  className="w-full px-2.5 py-2 bg-transparent focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600 disabled:opacity-40"
-                />
+                  ID de Telegram
+                </label>
+                {currentUser.telegram_id && !editingRecTelegram ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-semibold text-tertiary">
+                      ✓ Vinculado
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingRecTelegram(true);
+                        setRecTelegramId(currentUser.telegram_id || "");
+                        setTgVerifiedToken("");
+                        setTgOtpSent(false);
+                        setTgOtpCode("");
+                        setTgStatusMsg(null);
+                      }}
+                      className="text-[10px] font-mono text-secondary hover:underline cursor-pointer"
+                    >
+                      Cambiar ID
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    {tgVerifiedToken ? (
+                      <span className="text-[10px] font-mono font-semibold text-tertiary">
+                        ✓ OTP Confirmado
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleSendTgEmailOtp}
+                        disabled={tgSendingOtp}
+                        className="text-[10px] font-mono font-semibold text-primary hover:underline disabled:opacity-50 cursor-pointer"
+                      >
+                        {tgSendingOtp
+                          ? "Enviando..."
+                          : tgOtpSent
+                          ? "Reenviar OTP"
+                          : "Enviar OTP al correo"}
+                      </button>
+                    )}
+                    {currentUser.telegram_id && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingRecTelegram(false);
+                          setTgVerifiedToken("");
+                          setTgOtpSent(false);
+                          setTgOtpCode("");
+                          setTgStatusMsg(null);
+                        }}
+                        className="text-[10px] font-mono text-slate-400 hover:underline cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
+              {currentUser.telegram_id && !editingRecTelegram ? (
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white">
+                  <span>{currentUser.telegram_id}</span>
+                  <span className="px-1.5 py-0.5 rounded bg-secondary/15 text-secondary text-[10px] font-semibold">
+                    Bot Activo
+                  </span>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <input
+                    id="rec-telegram-id"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    maxLength={15}
+                    value={recTelegramId}
+                    onChange={(e) => setRecTelegramId(e.target.value.replace(/\D/g, "").slice(0, 15))}
+                    placeholder="ej. 6326947793"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
+                  />
+                  {tgOtpSent && !tgVerifiedToken && (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        id="rec-tg-otp-code"
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        value={tgOtpCode}
+                        onChange={(e) => {
+                          const nextVal = e.target.value.replace(/\D/g, "").slice(0, 6);
+                          setTgOtpCode(nextVal);
+                          if (tgStatusMsg?.tone === "error") setTgStatusMsg(null);
+                          if (nextVal.length === 6 && !tgVerifyingOtp) {
+                            void handleVerifyTgEmailOtp(nextVal);
+                          }
+                        }}
+                        placeholder="OTP correo (6 dígitos)"
+                        aria-label="Código OTP de correo para cambiar Telegram ID"
+                        className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono tracking-[0.2em] text-white placeholder:tracking-normal placeholder:text-slate-600"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void handleVerifyTgEmailOtp()}
+                        disabled={tgVerifyingOtp || tgOtpCode.length !== 6}
+                        className="px-2.5 py-1.5 rounded-lg bg-primary-container/20 border border-primary-container/40 text-xs font-semibold text-primary hover:bg-primary-container/30 disabled:opacity-40 cursor-pointer shrink-0"
+                      >
+                        {tgVerifyingOtp ? "..." : "OK"}
+                      </button>
+                    </div>
+                  )}
+                  {tgStatusMsg && (
+                    <p
+                      className={`text-[10px] ${
+                        tgStatusMsg.tone === "ok"
+                          ? "text-tertiary"
+                          : tgStatusMsg.tone === "error"
+                          ? "text-error"
+                          : tgStatusMsg.tone === "warn"
+                          ? "text-amber-400"
+                          : "text-slate-400"
+                      }`}
+                    >
+                      {tgStatusMsg.text}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
@@ -1126,55 +1442,123 @@ export default function SettingsSecurityPage() {
                 >
                   Correo de Respaldo
                 </label>
-                {recEmailVerifiedToken ||
-                (currentUser.email_verified && recEmailComputed === currentUser.email) ? (
-                  <span className="text-[10px] font-mono font-semibold text-tertiary">
-                    ✓ Verificado
-                  </span>
+                {currentUser.email && !editingRecEmail ? (
+                  <div className="flex items-center gap-2">
+                    {currentUser.email_verified ? (
+                      <span className="text-[10px] font-mono font-semibold text-tertiary">
+                        ✓ Verificado
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleSendRecEmailCode}
+                        disabled={recEmailSendingCode}
+                        className="text-[10px] font-mono font-semibold text-amber-400 hover:underline disabled:opacity-50 cursor-pointer"
+                      >
+                        {recEmailSendingCode
+                          ? "Enviando..."
+                          : recEmailCodeSent
+                          ? "Reenviar código"
+                          : "Pendiente · Verificar ahora"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingRecEmail(true);
+                        resetRecEmailVerification();
+                      }}
+                      className="text-[10px] font-mono text-secondary hover:underline cursor-pointer"
+                    >
+                      Cambiar correo
+                    </button>
+                  </div>
                 ) : /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(recEmailComputed) ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSendRecEmailCode}
+                      disabled={recEmailSendingCode}
+                      className="text-[10px] font-mono font-semibold text-primary hover:underline disabled:opacity-50 cursor-pointer"
+                    >
+                      {recEmailSendingCode
+                        ? "Enviando..."
+                        : recEmailCodeSent
+                        ? "Reenviar código"
+                        : "Verificar correo"}
+                    </button>
+                    {currentUser.email && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingRecEmail(false);
+                          resetRecEmailVerification();
+                        }}
+                        className="text-[10px] font-mono text-slate-400 hover:underline cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                    )}
+                  </div>
+                ) : currentUser.email ? (
                   <button
                     type="button"
-                    onClick={handleSendRecEmailCode}
-                    disabled={recEmailSendingCode}
-                    className="text-[10px] font-mono font-semibold text-primary hover:underline disabled:opacity-50 cursor-pointer"
+                    onClick={() => {
+                      setEditingRecEmail(false);
+                      resetRecEmailVerification();
+                    }}
+                    className="text-[10px] font-mono text-slate-400 hover:underline cursor-pointer"
                   >
-                    {recEmailSendingCode
-                      ? "Enviando..."
-                      : recEmailCodeSent
-                      ? "Reenviar código"
-                      : "Verificar correo"}
+                    Cancelar
                   </button>
                 ) : null}
               </div>
-              <div className="flex items-stretch rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden focus-within:border-primary-container">
-                <input
-                  id="rec-email"
-                  type={recEmailDomain === "__custom__" ? "email" : "text"}
-                  autoComplete="email"
-                  inputMode="email"
-                  enterKeyHint="next"
-                  value={recEmailDomain === "__custom__" ? recCustomEmail : recEmailLocal}
-                  onChange={(e) => handleRecEmailTextChange(e.target.value)}
-                  placeholder={
-                    recEmailDomain === "__custom__" ? "carlos@dominio.com" : "carlos.p2p"
-                  }
-                  className="flex-1 min-w-0 px-2.5 py-2 bg-transparent focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
-                />
-                <select
-                  aria-label="Dominio del correo"
-                  value={recEmailDomain}
-                  onChange={(e) =>
-                    handleRecEmailDomainChange(e.target.value as EmailDomainOption)
-                  }
-                  className="px-2 py-2 bg-surface-container border-l border-[#1e2430] text-xs font-mono font-semibold text-primary focus:outline-hidden cursor-pointer shrink-0"
-                >
-                  {EMAIL_DOMAIN_OPTIONS.map((dom) => (
-                    <option key={dom} value={dom} className="bg-[#141920] text-white">
-                      {dom === "__custom__" ? "Otro..." : dom}
-                    </option>
-                  ))}
-                </select>
-              </div>
+
+              {currentUser.email && !editingRecEmail ? (
+                <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white">
+                  <span className="truncate">{currentUser.email}</span>
+                  <span
+                    className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                      currentUser.email_verified
+                        ? "bg-tertiary/15 text-tertiary"
+                        : "bg-amber-500/15 text-amber-400"
+                    }`}
+                  >
+                    {currentUser.email_verified ? "Protegido" : "Sin verificar"}
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-stretch rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden focus-within:border-primary-container">
+                  <input
+                    id="rec-email"
+                    type={recEmailDomain === "__custom__" ? "email" : "text"}
+                    autoComplete="email"
+                    inputMode="email"
+                    enterKeyHint="next"
+                    value={recEmailDomain === "__custom__" ? recCustomEmail : recEmailLocal}
+                    onChange={(e) => handleRecEmailTextChange(e.target.value)}
+                    placeholder={
+                      recEmailDomain === "__custom__" ? "carlos@dominio.com" : "carlos.p2p"
+                    }
+                    className="flex-1 min-w-0 px-2.5 py-2 bg-transparent focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-600"
+                  />
+                  <select
+                    aria-label="Dominio del correo"
+                    value={recEmailDomain}
+                    onChange={(e) =>
+                      handleRecEmailDomainChange(e.target.value as EmailDomainOption)
+                    }
+                    className="px-2 py-2 bg-surface-container border-l border-[#1e2430] text-xs font-mono font-semibold text-primary focus:outline-hidden cursor-pointer shrink-0"
+                  >
+                    {EMAIL_DOMAIN_OPTIONS.map((dom) => (
+                      <option key={dom} value={dom} className="bg-[#141920] text-white">
+                        {dom === "__custom__" ? "Otro..." : dom}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {recEmailCodeSent && !recEmailVerifiedToken && (
                 <div className="mt-1.5 flex items-center gap-1.5">
                   <input
@@ -1185,13 +1569,17 @@ export default function SettingsSecurityPage() {
                     maxLength={6}
                     value={recEmailCode}
                     onChange={(e) => {
-                      setRecEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      const nextVal = e.target.value.replace(/\D/g, "").slice(0, 6);
+                      setRecEmailCode(nextVal);
                       if (recEmailStatusMsg?.tone === "error") setRecEmailStatusMsg(null);
+                      if (nextVal.length === 6 && !recEmailVerifying) {
+                        void handleVerifyRecEmailCode(nextVal);
+                      }
                     }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
-                        handleVerifyRecEmailCode();
+                        void handleVerifyRecEmailCode();
                       }
                     }}
                     placeholder="Código 6 dígitos"
@@ -1200,7 +1588,7 @@ export default function SettingsSecurityPage() {
                   />
                   <button
                     type="button"
-                    onClick={handleVerifyRecEmailCode}
+                    onClick={() => void handleVerifyRecEmailCode()}
                     disabled={recEmailVerifying || recEmailCode.length !== 6}
                     className="px-2.5 py-1.5 rounded-lg bg-primary-container/20 border border-primary-container/40 text-xs font-semibold text-primary hover:bg-primary-container/30 disabled:opacity-40 cursor-pointer shrink-0"
                   >
@@ -1226,12 +1614,17 @@ export default function SettingsSecurityPage() {
             </div>
 
             <div>
-              <label
-                htmlFor="rec-question"
-                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
-              >
-                Pregunta secreta
-              </label>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="rec-question"
+                  className="text-[10px] font-mono uppercase text-slate-400"
+                >
+                  Pregunta secreta
+                </label>
+                {currentUser.has_security_question && (
+                  <span className="text-[10px] font-mono text-tertiary">✓ Configurada</span>
+                )}
+              </div>
               <input
                 id="rec-question"
                 type="text"
@@ -1239,18 +1632,27 @@ export default function SettingsSecurityPage() {
                 enterKeyHint="next"
                 value={recQuestion}
                 onChange={(e) => setRecQuestion(e.target.value)}
-                placeholder="ej. Nombre de tu primera mascota"
+                placeholder={
+                  currentUser.has_security_question
+                    ? "Ya configurada (escribe solo para cambiar)"
+                    : "ej. Nombre de tu primera mascota"
+                }
                 className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
               />
             </div>
 
             <div>
-              <label
-                htmlFor="rec-answer"
-                className="block text-[10px] font-mono uppercase text-slate-400 mb-1"
-              >
-                Respuesta secreta
-              </label>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label
+                  htmlFor="rec-answer"
+                  className="text-[10px] font-mono uppercase text-slate-400"
+                >
+                  Respuesta secreta
+                </label>
+                {currentUser.has_security_question && (
+                  <span className="text-[10px] font-mono text-slate-500">Protegida</span>
+                )}
+              </div>
               <input
                 id="rec-answer"
                 type="password"
@@ -1258,7 +1660,11 @@ export default function SettingsSecurityPage() {
                 enterKeyHint="done"
                 value={recAnswer}
                 onChange={(e) => setRecAnswer(e.target.value)}
-                placeholder="Nueva respuesta secreta..."
+                placeholder={
+                  currentUser.has_security_question
+                    ? "Dejar vacío para mantener la actual"
+                    : "Nueva respuesta secreta..."
+                }
                 className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
               />
             </div>

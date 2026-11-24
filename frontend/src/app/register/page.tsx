@@ -277,8 +277,8 @@ export default function RegisterPage() {
     }
   }
 
-  async function handleVerifyEmailCode() {
-    const cleaned = emailCode.replace(/\D/g, "").slice(0, 6);
+  async function handleVerifyEmailCode(codeOverride?: string) {
+    const cleaned = (codeOverride ?? emailCode).replace(/\D/g, "").slice(0, 6);
     if (cleaned.length !== 6) {
       setEmailStatusMsg({ text: "Ingresa los 6 dígitos.", tone: "error" });
       document.getElementById("reg-email-code")?.focus();
@@ -443,7 +443,7 @@ export default function RegisterPage() {
     }, 0);
   }
 
-  function validateStep1AndNext() {
+  async function validateStep1AndNext() {
     const ok = focusInvalidField([
       ["fullName", validateField("fullName"), "reg-fullname"],
       ["email", validateField("email"), "reg-email"],
@@ -451,11 +451,39 @@ export default function RegisterPage() {
       ["taxId", validateField("taxId"), "reg-tax-id"],
     ]);
     if (!ok) return;
-    if (emailSmtpConfigured && !emailVerificationToken) {
-      const msg = "Verifica tu correo con el código de 6 dígitos.";
-      setError(msg);
-      document.getElementById(emailCodeSent ? "reg-email-code" : "reg-email")?.focus();
-      return;
+
+    if (!emailVerificationToken) {
+      if (!emailCodeSent) {
+        setEmailSendingCode(true);
+        setEmailStatusMsg(null);
+        try {
+          const res = await sendEmailVerificationCode(email);
+          setEmailSmtpConfigured(Boolean(res.smtp_configured));
+          if (res.sent) {
+            setEmailCodeSent(true);
+            setEmailCode("");
+            setEmailStatusMsg({ text: res.message, tone: "info" });
+            setError("Enviamos automáticamente un código de 6 dígitos a tu correo para verificarlo.");
+            setTimeout(() => document.getElementById("reg-email-code")?.focus(), 0);
+            return;
+          }
+          // Si SMTP no está activo en entorno dev, permite avanzar sin bloquear registro
+        } catch (err: any) {
+          setEmailStatusMsg({
+            text: err.message || "No se pudo enviar el código al correo.",
+            tone: "error",
+          });
+          setError(err.message || "Verifica tu correo antes de continuar.");
+          return;
+        } finally {
+          setEmailSendingCode(false);
+        }
+      } else if (emailSmtpConfigured) {
+        const msg = "Ingresa los 6 dígitos enviados a tu correo para verificarlo automáticamente.";
+        setError(msg);
+        document.getElementById("reg-email-code")?.focus();
+        return;
+      }
     }
     goToStep(2);
   }
@@ -971,13 +999,17 @@ export default function RegisterPage() {
                           maxLength={6}
                           value={emailCode}
                           onChange={(e) => {
-                            setEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                            const nextVal = e.target.value.replace(/\D/g, "").slice(0, 6);
+                            setEmailCode(nextVal);
                             if (emailStatusMsg?.tone === "error") setEmailStatusMsg(null);
+                            if (nextVal.length === 6 && !emailVerifying) {
+                              void handleVerifyEmailCode(nextVal);
+                            }
                           }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               e.preventDefault();
-                              handleVerifyEmailCode();
+                              void handleVerifyEmailCode();
                             }
                           }}
                           placeholder="Código 6 dígitos"
@@ -986,7 +1018,7 @@ export default function RegisterPage() {
                         />
                         <button
                           type="button"
-                          onClick={handleVerifyEmailCode}
+                          onClick={() => void handleVerifyEmailCode()}
                           disabled={emailVerifying || emailCode.length !== 6}
                           className="px-3 py-2 rounded-lg bg-primary-container/20 border border-primary-container/40 text-xs font-semibold text-primary hover:bg-primary-container/30 disabled:opacity-40 cursor-pointer shrink-0"
                         >

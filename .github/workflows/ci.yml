@@ -41,6 +41,25 @@ jobs:
       - name: Run Mypy Type Checker
         run: mypy src/ scripts/
 
+  frontend-check:
+    name: Frontend TypeScript Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies & Typecheck
+        working-directory: frontend
+        run: |
+          npm ci
+          npx tsc --noEmit
+
   tests:
     name: Unit & Integration Tests
     runs-on: ubuntu-latest

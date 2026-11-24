@@ -762,7 +762,9 @@ export type RecoveryMethod =
 export interface RecoveryProfileUpdateData {
   full_name?: string;
   tax_id?: string;
+  telegram_id?: string;
   email?: string;
+  email_verification_token?: string;
   security_question?: string;
   security_answer?: string;
   regenerate_recovery_key?: boolean;
@@ -807,6 +809,17 @@ export async function verifyEmailCode(
   return apiRequest("/api/auth/email/verify-code", {
     method: "POST",
     body: JSON.stringify({ email, code }),
+  });
+}
+
+export async function sendProfileEmailOtp(): Promise<{
+  sent: boolean;
+  smtp_configured: boolean;
+  cooldown_seconds?: number;
+  message: string;
+}> {
+  return apiRequest("/api/auth/profile/send-email-otp", {
+    method: "POST",
   });
 }
 
