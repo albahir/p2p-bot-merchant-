@@ -24,3 +24,9 @@
 ## Fase 5: Verificación Final, Auditorías y Documentación
 - [x] T24.9: Ejecutar batería completa `pytest`, `ruff check .`, `mypy src/ scripts/` y `tsc --noEmit`.
 - [x] T24.10: Ejecutar auditorías obligatorias `security-review` y `venezuela-tax-cpa` y actualizar `memory.md` (ADR 061).
+
+## Fase 6: Motor Geométrico Universal (`pdfplumber`), Multi-Formato Real y Deduplicación de Impresión Bancaria
+- [x] T24.11: Actualizar `requirements.txt`, `pyproject.toml` (`pdfplumber>=0.11.4,<0.11.11`) y mejorar `detect_bank_from_text` en `src/reporting/normalizers.py` para identificar códigos SUDEBAN enmascarados (`0102****3046`).
+- [x] T24.12: Escribir pruebas TDD en rojo (`tests/unit/test_statement_importer.py`) cubriendo formato BDV real (`Referencia | Descripción | Fecha | Mov | Débito | Crédito | Saldo`), celdas centradas verticalmente, filas partidas entre saltos de página, filas duplicadas de impresión BDV con saldo idéntico (`delta == 0`), formatos estilo Provincial/Mercantil/Banesco con doble columna de fecha o monto único + columna `Tipo`, PDFs >60 páginas y respaldo IA por lotes en PDFs escaneados.
+- [x] T24.13: Implementar motor geométrico universal con `pdfplumber` en `src/integrations/statement_importer.py` (clustering + cabeceras flexibles, ensamblado multilínea vertical/inter-página, filtro anti-duplicado matemático, límites `150 págs / 5,000 filas`, fallback IA en lotes de 4 páginas) pasando todas las pruebas en verde.
+- [x] T24.14: Validar `pytest`, `ruff`, `mypy`, `security-review`, `venezuela-tax-cpa` y documentar ADR 069 en `MEMORY.md`.

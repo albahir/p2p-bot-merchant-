@@ -17,31 +17,41 @@ from src.integrations.statement_importer import (
 from src.reporting.fiscal_reconciler import FiscalReconciler
 
 
-def _build_minimal_pdf(lines: list[str]) -> bytes:
-    """Genera un PDF vectorial válido en memoria con posicionamiento X/Y para pruebas deterministas."""
-    stream_cmds = ["BT", "/F1 9 Tf"]
-    y = 750
-    for line in lines:
-        safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        stream_cmds.append(f"1 0 0 1 36 {y} Tm ({safe}) Tj")
-        y -= 16
-    stream_cmds.append("ET")
-    stream_bytes = "\n".join(stream_cmds).encode("latin-1")
-
+def _build_positioned_pdf(pages_items: list[list[tuple[float, float, str]]]) -> bytes:
+    """Genera un PDF multipágina vectorial válido con posicionamiento cartesiano exacto (x, y, texto)."""
+    num_pages = max(1, len(pages_items))
+    # obj 1: Catalog, obj 2: Pages, obj 3: Font, then per-page: Page (4 + 2*i), Contents (5 + 2*i)
     objs: list[bytes] = [
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-        (
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
-        ),
-        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n",
-        (
-            f"5 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode("ascii")
+        b"",  # placeholder Pages
+        b"3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n",
+    ]
+    kid_refs: list[str] = []
+    for i in range(num_pages):
+        page_obj_id = 4 + 2 * i
+        content_obj_id = 5 + 2 * i
+        kid_refs.append(f"{page_obj_id} 0 R")
+        items = pages_items[i] if i < len(pages_items) else []
+        stream_cmds = ["BT", "/F1 8 Tf"]
+        for x, y, text in items:
+            safe = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            stream_cmds.append(f"1 0 0 1 {x:.1f} {y:.1f} Tm ({safe}) Tj")
+        stream_cmds.append("ET")
+        stream_bytes = "\n".join(stream_cmds).encode("latin-1", errors="replace")
+        objs.append(
+            (
+                f"{page_obj_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj_id} 0 R >>\nendobj\n"
+            ).encode("ascii")
+        )
+        objs.append(
+            f"{content_obj_id} 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode("ascii")
             + stream_bytes
             + b"\nendstream\nendobj\n"
-        ),
-    ]
+        )
+
+    kids_str = " ".join(kid_refs)
+    objs[1] = f"2 0 obj\n<< /Type /Pages /Kids [{kids_str}] /Count {num_pages} >>\nendobj\n".encode("ascii")
 
     pdf = bytearray(b"%PDF-1.4\n")
     offsets: list[int] = [0]
@@ -59,6 +69,16 @@ def _build_minimal_pdf(lines: list[str]) -> bytes:
         ).encode("ascii")
     )
     return bytes(pdf)
+
+
+def _build_minimal_pdf(lines: list[str]) -> bytes:
+    """Genera un PDF vectorial válido en memoria con posicionamiento X/Y para pruebas deterministas."""
+    items: list[tuple[float, float, str]] = []
+    y = 750.0
+    for line in lines:
+        items.append((36.0, y, line))
+        y -= 16.0
+    return _build_positioned_pdf([items])
 
 
 def _make_db():
@@ -513,3 +533,437 @@ def test_api_statement_preview_and_commit_endpoints():
         assert commit_resp.journal_entries_created == 4
     finally:
         db.close()
+
+
+def test_parse_bdv_middle_aligned_multiline_pagebreak_and_duplicate_print_bug():
+    """Debe leer formato real BDV (Fecha en col 3, celdas centradas, salto de página y duplicado 21/05)."""
+    page1: list[tuple[float, float, str]] = [
+        (220, 755, "Estado de cuenta moneda nacional"),
+        (30, 735, "Cuenta: 0102****3046"),
+        (360, 735, "Periodo: 01/05/2026 - 31/10/2026"),
+        (30, 715, "Saldo inicial: 47.091,66   Saldo final: 47.752,48"),
+        # Cabecera real BDV: Referencia | Descripcion | Fecha | Mov | Debito | Credito | Saldo
+        (24, 680, "Referencia"),
+        (100, 680, "Descripcion"),
+        (362, 680, "Fecha"),
+        (422, 680, "Mov"),
+        (454, 680, "Debito"),
+        (505, 680, "Credito"),
+        (558, 680, "Saldo"),
+        # Fila SI
+        (100, 660, "SALDO INICIAL"),
+        (362, 660, "01/05/2026"),
+        (422, 660, "SI"),
+        (460, 660, "0,00"),
+        (512, 660, "0,00"),
+        (550, 660, "47.091,66"),
+        # Mov 1: comision
+        (24, 642, "9553100002641"),
+        (100, 642, "COM BANCA MOVIL BDV"),
+        (362, 642, "01/05/2026"),
+        (422, 642, "ND"),
+        (456, 642, "-8,00"),
+        (512, 642, "0,00"),
+        (550, 642, "47.083,66"),
+        # Mov 2 + Mov 2 duplicado impreso por BDV el 21/05 con saldo identico (50.749,66)
+        (24, 624, "0677299357250"),
+        (100, 624, "OPERACION PAGOMOVIL BDV"),
+        (362, 624, "21/05/2026"),
+        (422, 624, "NC"),
+        (460, 624, "0,00"),
+        (502, 624, "3.666,00"),
+        (550, 624, "50.749,66"),
+        (24, 606, "0677299357250"),
+        (100, 606, "OPERACION PAGOMOVIL BDV"),
+        (362, 606, "21/05/2026"),
+        (422, 606, "NC"),
+        (460, 606, "0,00"),
+        (502, 606, "3.666,00"),
+        (550, 606, "50.749,66"),
+        # Mov 3: Descripcion 2 lineas y Referencia/Fecha/Montos centrados verticalmente en medio
+        (100, 588, "PAGOMOVIL TERCEROS BDV 015571046 AHISQUEL CHACON"),
+        (24, 583, "0677204387399"),
+        (362, 583, "29/09/2026"),
+        (422, 583, "ND"),
+        (448, 583, "-1.500,00"),
+        (512, 583, "0,00"),
+        (550, 583, "49.249,66"),
+        (100, 578, "CANAL 54 0424***6427"),
+        # Mov 4: Ultima fila de pagina 1 cuya continuacion salta a la pagina 2
+        (24, 100, "0677231115921"),
+        (100, 100, "PAGOMOVIL TERCEROS BDV 027293774 ENRIQUE RAMIREZ CANAL"),
+        (362, 100, "10/10/2026"),
+        (422, 100, "ND"),
+        (448, 100, "-1.483,18"),
+        (512, 100, "0,00"),
+        (550, 100, "47.766,48"),
+        (180, 45, "El Banco de Venezuela S.A Banco Universal certifica la informacion"),
+        (520, 30, "Pagina: 1/2"),
+    ]
+    page2: list[tuple[float, float, str]] = [
+        (220, 755, "Estado de cuenta moneda nacional"),
+        (30, 735, "Cuenta: 0102****3046"),
+        (30, 715, "Saldo inicial: 47.091,66   Saldo final: 47.752,48"),
+        (24, 680, "Referencia"),
+        (100, 680, "Descripcion"),
+        (362, 680, "Fecha"),
+        (422, 680, "Mov"),
+        (454, 680, "Debito"),
+        (505, 680, "Credito"),
+        (558, 680, "Saldo"),
+        # Continuacion huerfana de la fila 4 tras el salto de pagina
+        (100, 662, "54 0424***9895"),
+        # Mov 5: Comision siguiente
+        (24, 642, "0210031115921"),
+        (100, 642, "COBRO COMISION PAG MOVIL"),
+        (362, 642, "10/10/2026"),
+        (422, 642, "ND"),
+        (456, 642, "-14,00"),
+        (512, 642, "0,00"),
+        (550, 642, "47.752,48"),
+        (180, 45, "El Banco de Venezuela S.A Banco Universal certifica la informacion"),
+        (520, 30, "Pagina: 3/2"),
+    ]
+
+    pdf_bytes = _build_positioned_pdf([page1, page2])
+    importer = BankStatementImporter()
+    preview = importer.parse_bytes(file_bytes=pdf_bytes, filename="estado_cuenta_noviembre.pdf")
+
+    assert preview.bank_name == "BANCO DE VENEZUELA"
+    assert preview.total_rows == 5
+    assert preview.balance_verified is True
+    assert preview.balance_mismatch_count == 0
+    assert preview.opening_balance == pytest.approx(47091.66, abs=0.02)
+    assert preview.closing_balance == pytest.approx(47752.48, abs=0.02)
+
+    # Validar union multilinea centrada y entre paginas sin contaminar filas vecinas
+    assert "OPERACION PAGOMOVIL BDV" == preview.rows[1].concept
+    assert "AHISQUEL CHACON" in preview.rows[2].concept
+    assert "CANAL 54 0424***6427" in preview.rows[2].concept
+    assert "ENRIQUE RAMIREZ CANAL" in preview.rows[3].concept
+    assert "54 0424***9895" in preview.rows[3].concept
+    assert preview.rows[4].suggested_action == "BANK_FEE"
+    assert preview.rows[4].amount_ves == 14.00
+
+
+def test_parse_universal_bank_column_permutations_and_two_dates():
+    """Debe leer diseños tipo Provincial/Mercantil/Internacional: doble fecha, monto único + Tipo, cabecera 2 líneas."""
+    page1: list[tuple[float, float, str]] = [
+        (36, 755, "BBVA PROVINCIAL ESTADO DE CUENTA - ANO 2026"),
+        # Cabecera en 2 renglones + doble columna de fecha + monto unico + columna Tipo
+        (30, 710, "Fecha"),
+        (30, 700, "Oper"),
+        (90, 710, "Fecha"),
+        (90, 700, "Valor"),
+        (155, 705, "Concepto"),
+        (345, 705, "Referencia"),
+        (415, 705, "Tipo"),
+        (465, 705, "Monto"),
+        (540, 710, "Saldo"),
+        (540, 700, "Disponible"),
+        # Orden descendente con fechas textuales y formato internacional
+        (30, 680, "16 NOV 2026"),
+        (90, 680, "16 NOV 2026"),
+        (155, 680, "PAGO MOVIL RECIBIDO CLIENTE"),
+        (345, 680, "REF-9911"),
+        (420, 680, "CR"),
+        (460, 680, "1,250.50"),
+        (535, 680, "6,250.50"),
+        (30, 660, "15 NOV 2026"),
+        (90, 660, "15 NOV 2026"),
+        (155, 660, "CARGO COMISION INTERBANCARIA"),
+        (345, 660, "REF-9910"),
+        (420, 660, "DB"),
+        (465, 660, "50.00"),
+        (535, 660, "5,000.00"),
+    ]
+
+    pdf_bytes = _build_positioned_pdf([page1])
+    importer = BankStatementImporter()
+    preview = importer.parse_bytes(file_bytes=pdf_bytes, filename="provincial_movs.pdf")
+
+    assert preview.bank_name == "PROVINCIAL"
+    assert preview.total_rows == 2
+    assert preview.detected_order == "DESC"
+    assert preview.balance_verified is True
+
+    assert preview.rows[0].date_vet == "2026-11-16"
+    assert preview.rows[0].movement_type == "CREDIT"
+    assert preview.rows[0].amount_ves == 1250.50
+    assert preview.rows[0].reference_number == "9911"
+
+    assert preview.rows[1].date_vet == "2026-11-15"
+    assert preview.rows[1].movement_type == "DEBIT"
+    assert preview.rows[1].amount_ves == 50.00
+    assert preview.rows[1].suggested_action == "BANK_FEE"
+
+
+def test_parse_pdf_over_60_pages_not_truncated_and_chunked_ai_fallback():
+    """Debe leer PDFs >60 páginas sin truncar y dividir PDFs escaneados largos en lotes para Gemini."""
+    pages: list[list[tuple[float, float, str]]] = []
+    running = 1000.00
+    for i in range(65):
+        day = (i % 28) + 1
+        month = 5 + (i // 28)
+        running = round(running + 10.00, 2)
+        bal_str = f"{running:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        items: list[tuple[float, float, str]] = []
+        if i == 0:
+            items.append((36, 755, "BANCO MERCANTIL - CUENTA 0105****8899"))
+        items.extend(
+            [
+                (30, 710, "Referencia"),
+                (110, 710, "Fecha"),
+                (185, 710, "Descripcion"),
+                (440, 710, "Credito"),
+                (530, 710, "Saldo"),
+                (30, 685, f"8800{i:04d}"),
+                (110, 685, f"{day:02d}/{month:02d}/2026"),
+                (185, 685, f"ABONO CLIENTE PAGO {i + 1}"),
+                (440, 685, "10,00"),
+                (525, 685, bal_str),
+            ]
+        )
+        pages.append(items)
+
+    large_pdf = _build_positioned_pdf(pages)
+    importer = BankStatementImporter()
+    preview = importer.parse_bytes(file_bytes=large_pdf, filename="estado_65_paginas.pdf")
+
+    assert preview.bank_name == "MERCANTIL"
+    assert preview.total_rows == 65
+    assert preview.balance_verified is True
+    assert not any("primeras 60" in w.lower() for w in preview.warnings)
+
+    # Scanned 6-page PDF without text -> Gemini batching (4 pages + 2 pages = 2 API calls)
+    from unittest.mock import MagicMock
+
+    from src.integrations.ai_assistant import AIKeyPool
+
+    scanned_pages: list[list[tuple[float, float, str]]] = [[] for _ in range(6)]
+    scanned_pdf = _build_positioned_pdf(scanned_pages)
+
+    resp1 = MagicMock()
+    resp1.status_code = 200
+    resp1.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                '[{"date": "2026-11-01", "reference": "100001", '
+                                '"concept": "ABONO LOTE 1", "debit": 0.0, "credit": 500.0, "balance": 1500.0}]'
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    resp2 = MagicMock()
+    resp2.status_code = 200
+    resp2.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                '[{"date": "2026-11-02", "reference": "100002", '
+                                '"concept": "ABONO LOTE 2", "debit": 0.0, "credit": 250.0, "balance": 1750.0}]'
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [resp1, resp2]
+
+    ai_importer = BankStatementImporter(
+        key_pool=AIKeyPool(["AIzaFakeRealTestKey12345"]),
+        http_client=mock_client,
+    )
+    ai_preview = ai_importer.parse_bytes(
+        file_bytes=scanned_pdf,
+        filename="escaneado_6pag.pdf",
+        bank_name="Banesco",
+    )
+
+    assert ai_preview.extraction_method == "PDF_AI_FALLBACK"
+    assert ai_preview.total_rows == 2
+    assert ai_preview.balance_verified is True
+    assert mock_client.post.call_count == 2
+
+
+def test_parse_banesco_split_panel_day_only_negative_balance_and_cheques_table():
+    """Debe leer diseño real Banesco: 2 paneles lado a lado, mini-tabla CHEQUES, DIA solo dígitos y saldos negativos."""
+    page1: list[tuple[float, float, str]] = [
+        (36, 755, "Estado de cuenta"),
+        # Panel izquierdo (resumen paralelo en las mismas Y que los movimientos derechos; espaciado Courier 8pt)
+        (25, 650, "RESUMEN DE MOVIMIENTOS"),
+        (25, 638, "No. de Cuenta: 0134086698691024513"),
+        (200, 638, "Periodo: 05-2025"),
+        (30, 620, "Otros Debitos"),
+        (140, 620, "172"),
+        (210, 620, "251.883,56"),
+        (25, 595, "RESUMEN DE SALDOS"),
+        (30, 575, "Inicial"),
+        (210, 575, "12.115,76"),
+        (30, 560, "Final"),
+        (210, 560, "-1.735,37"),
+        # Panel derecho: sub-tabla CHEQUES arriba + DETALLE DE MOVIMIENTOS abajo
+        (305, 710, "CHEQUES"),
+        (312, 695, "CHEQUE"),
+        (365, 695, "DIA"),
+        (420, 695, "MONTO"),
+        (485, 695, "CHEQUE"),
+        (535, 695, "DIA"),
+        (575, 695, "MONTO"),
+        (305, 678, "DETALLE DE MOVIMIENTOS"),
+        (305, 658, "DIA"),
+        (332, 658, "REF."),
+        (392, 658, "CONCEPTO"),
+        (485, 658, "CARGOS"),
+        (532, 658, "ABONOS"),
+        (578, 658, "SALDOS"),
+        # Saldo mes anterior + movimientos con solo DIA (02, 05) y saldo negativo al final
+        (392, 642, "SALDO MES ANTERIOR"),
+        (572, 642, "12.115,76"),
+        (305, 625, "02"),
+        (332, 625, "12114000875"),
+        (392, 625, "COMPRA POS CTA"),
+        (485, 625, "1.677,45"),
+        (572, 625, "10.438,31"),
+        (305, 610, "02"),
+        (332, 610, "02681930542"),
+        (392, 610, "Banesco Pago Movil"),
+        (525, 610, "2.178,00"),
+        (572, 610, "12.616,31"),
+        # Debito grande que lleva la cuenta a saldo negativo (-1.735,24) + Comision con coma ("Com,")
+        (305, 575, "05"),
+        (332, 575, "51244171531"),
+        (392, 575, "Banesco Pago Movil"),
+        (485, 575, "14.351,55"),
+        (572, 575, "-1.735,24"),
+        (305, 560, "05"),
+        (332, 560, "51244486200"),
+        (392, 560, "Com, Pago Movil"),
+        (485, 560, "0,13"),
+        (572, 560, "-1.735,37"),
+    ]
+
+    pdf_bytes = _build_positioned_pdf([page1])
+    importer = BankStatementImporter()
+    preview = importer.parse_bytes(file_bytes=pdf_bytes, filename="edo_cuenta.pdf")
+
+    assert preview.bank_name == "BANESCO"
+    assert preview.total_rows == 4
+    assert preview.detected_order == "ASC"
+    assert preview.balance_verified is True
+    assert preview.balance_mismatch_count == 0
+    assert preview.opening_balance == pytest.approx(12115.76, abs=0.02)
+    assert preview.closing_balance == pytest.approx(-1735.37, abs=0.02)
+
+    assert preview.rows[0].date_vet == "2025-05-02"
+    assert preview.rows[0].movement_type == "DEBIT"
+    assert preview.rows[0].amount_ves == 1677.45
+
+    assert preview.rows[1].movement_type == "CREDIT"
+    assert preview.rows[1].amount_ves == 2178.00
+
+    assert preview.rows[2].date_vet == "2025-05-05"
+    assert preview.rows[2].balance_ves == pytest.approx(-1735.24, abs=0.02)
+
+    assert preview.rows[3].suggested_action == "BANK_FEE"
+    assert preview.rows[3].amount_ves == 0.13
+    assert preview.rows[3].balance_ves == pytest.approx(-1735.37, abs=0.02)
+
+
+def test_parse_bnc_debe_haber_and_mercantil_egresos_ingresos_sin_saldo():
+    """Debe leer BNC (Debe/Haber, DESC, logo imagen) y Mercantil en Línea (Egresos/Ingresos sin Saldo + SALDO FINAL)."""
+    # 1. BNC (Debe | Haber | Saldo)
+    bnc_page: list[tuple[float, float, str]] = [
+        (220, 740, "25 ULTIMOS MOVIMIENTOS HASTA EL: 05 de octubre de 2024"),
+        (30, 710, "CUENTA CORRIENTE ***2700"),
+        (30, 680, "Fecha"),
+        (110, 680, "Descripcion"),
+        (330, 680, "Referencia"),
+        (420, 680, "Debe"),
+        (485, 680, "Haber"),
+        (555, 680, "Saldo"),
+        (30, 658, "05/10/2024"),
+        (110, 658, "Comision Pago Movil - ref: 349947745"),
+        (330, 658, "349947745"),
+        (415, 658, "-0,13"),
+        (485, 658, "0,00"),
+        (555, 658, "0,98"),
+        (30, 640, "05/10/2024"),
+        (110, 640, "Cargo Pago Movil BNC - ref: 349947745"),
+        (330, 640, "349947745"),
+        (415, 640, "-5,00"),
+        (485, 640, "0,00"),
+        (555, 640, "1,11"),
+        (30, 622, "03/10/2024"),
+        (110, 622, "Abono Pago Movil BNC - ref: 204704004"),
+        (330, 622, "204704004"),
+        (420, 622, "0,00"),
+        (480, 622, "+140,00"),
+        (555, 622, "6,11"),
+    ]
+    importer = BankStatementImporter()
+    bnc_prev = importer.parse_bytes(
+        file_bytes=_build_positioned_pdf([bnc_page]),
+        filename="ultimos_movimientos.pdf",
+    )
+    assert bnc_prev.bank_name == "BNC"
+    assert bnc_prev.total_rows == 3
+    assert bnc_prev.detected_order == "DESC"
+    assert bnc_prev.balance_verified is True
+    assert bnc_prev.rows[0].suggested_action == "BANK_FEE"
+    assert bnc_prev.rows[2].movement_type == "CREDIT"
+    assert bnc_prev.rows[2].amount_ves == 140.00
+
+    # 2. Mercantil en Línea (Egresos | Ingresos sin columna Saldo + fila SALDO FINAL al inicio)
+    mercantil_page: list[tuple[float, float, str]] = [
+        (30, 755, "Mercantil en Linea"),
+        (30, 730, "Cuenta Corriente - 001636029302 - Bs"),
+        (30, 700, "Transacciones del mes de Febrero de 2024."),
+        (30, 675, "Fecha"),
+        (95, 675, "Numero de"),
+        (95, 667, "Referencia"),
+        (210, 671, "Descripcion"),
+        (450, 671, "Egresos"),
+        (535, 671, "Ingresos"),
+        # Fila trampa SALDO FINAL dentro de la tabla -> no debe contarse como ingreso!
+        (30, 650, "20/02/2024"),
+        (210, 650, "SALDO FINAL"),
+        (535, 650, "482,03"),
+        (30, 634, "20/02/2024"),
+        (95, 634, "000082553898152"),
+        (210, 634, "ND - PAGO MOVIL COMERCIAL INTERBANCARIO"),
+        (450, 634, "-102,00"),
+        (30, 618, "19/02/2024"),
+        (95, 618, "000022200000182"),
+        (210, 618, "NC - PAGO DE NOMINA"),
+        (535, 618, "814,00"),
+        (30, 602, "15/02/2024"),
+        (95, 602, "000044301478164"),
+        (210, 602, "ND - MENSUALIDAD MENSAJERIA DE TEXTO"),
+        (450, 602, "-0,50"),
+    ]
+    merc_prev = importer.parse_bytes(
+        file_bytes=_build_positioned_pdf([mercantil_page]),
+        filename="transacciones_febrero.pdf",
+    )
+    assert merc_prev.bank_name == "MERCANTIL"
+    assert merc_prev.total_rows == 3
+    assert merc_prev.detected_order == "DESC"
+    assert merc_prev.rows[0].movement_type == "DEBIT"
+    assert merc_prev.rows[0].amount_ves == 102.00
+    assert merc_prev.rows[1].movement_type == "CREDIT"
+    assert merc_prev.rows[1].amount_ves == 814.00
+    assert merc_prev.rows[2].suggested_action == "BANK_FEE"
+    assert merc_prev.rows[2].amount_ves == 0.50

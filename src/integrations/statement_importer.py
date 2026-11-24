@@ -22,8 +22,10 @@ from typing import Any, Literal, cast
 
 import httpx
 import pandas as pd
+import pdfplumber
 from fastapi import HTTPException, status
-from pypdf import PdfReader
+from pdfplumber.utils.exceptions import PdfminerException
+from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PdfReadError
 from sqlalchemy.orm import Session
 
@@ -43,9 +45,10 @@ logger = logging.getLogger("statement_importer")
 
 VET_TZ = timezone(timedelta(hours=-4))
 
-MAX_STATEMENT_BYTES = 10 * 1024 * 1024  # 10 MB anti-DoS
-MAX_STATEMENT_ROWS = 2500
-MAX_PDF_PAGES = 60
+MAX_STATEMENT_BYTES = 15 * 1024 * 1024  # 15 MB anti-DoS (soporta estados semestrales multi-página)
+MAX_STATEMENT_ROWS = 5000
+MAX_PDF_PAGES = 150
+PDF_AI_CHUNK_PAGES = 4
 
 StatementAction = Literal[
     "P2P_MATCH",
@@ -76,6 +79,7 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
         "referencia",
         "ref",
         "nro referencia",
+        "numero de referencia",
         "nro. ref",
         "nro doc",
         "documento",
@@ -105,6 +109,7 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     "debit": (
         "debito",
         "debitos",
+        "debe",
         "cargo",
         "cargos",
         "retiro",
@@ -120,6 +125,7 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     "credit": (
         "credito",
         "creditos",
+        "haber",
         "abono",
         "abonos",
         "deposito",
@@ -150,6 +156,7 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     ),
     "balance": (
         "saldo",
+        "saldos",
         "balance",
         "saldo disponible",
         "saldo contable",
@@ -162,6 +169,7 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
 _BANK_FEE_KEYWORDS: tuple[str, ...] = (
     "COMISION",
     "COM.",
+    "COM,",
     "COM ",
     "MANTENIMIENTO",
     "ITF",
@@ -189,17 +197,31 @@ _PAGO_MOVIL_KEYWORDS: tuple[str, ...] = (
 
 _NOISE_LINE_KEYWORDS: tuple[str, ...] = (
     "SALDO ANTERIOR",
+    "SALDO MES ANTERIOR",
     "SALDO INICIAL",
     "SALDO FINAL",
+    "SALDO PROMEDIO",
     "SALDO DE CIERRE",
     "TOTAL DEBITOS",
     "TOTAL CREDITOS",
     "TOTAL CARGOS",
     "TOTAL ABONOS",
+    "TOTAL TRANSACCIONES",
+    "INTERESES PAGADOS",
+    "INTERESES COBRADOS",
+    "ISLR COBRADOS",
+    "IMPUESTOS RETENIDOS",
     "RESUMEN DE MOVIMIENTOS",
+    "RESUMEN DE SALDOS",
+    "RESUMEN DE CUENTA",
     "PAGINA ",
     "PAGE ",
     "ESTADO DE CUENTA",
+    "EL BANCO DE VENEZUELA",
+    "BANCO UNIVERSAL CERTIFICA",
+    "GOBIERNO BOLIVARIANO",
+    "MINISTERIO DEL PODER",
+    "BATALLA NAVAL",
 )
 
 _MONTH_ES: dict[str, int] = {
@@ -226,6 +248,19 @@ _DATE_START_RE = re.compile(
     r"^\s*(\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?|\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})"
     r"(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?(?=\s|$)"
 )
+
+_DATE_ANY_RE = re.compile(
+    r"(?<![A-Za-z0-9/.,-])("
+    r"\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2}"
+    r"|\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}"
+    r"|\d{1,2}[\/\-]\d{1,2}"
+    r"|\d{1,2}[\s\/\-](?:ENE|JAN|FEB|MAR|ABR|APR|MAY|JUN|JUL|AGO|AUG|SEP|SET|OCT|NOV|DIC|DEC)(?:[\s\/\-]\d{2,4})?"
+    r")(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?(?![A-Za-z0-9/.,-])",
+    re.IGNORECASE,
+)
+
+_MOV_FLAG_DEBIT_RE = re.compile(r"^(?:ND|DB|DR|D|DEBITO|CARGO|RETIRO|EGRESO)$", re.IGNORECASE)
+_MOV_FLAG_CREDIT_RE = re.compile(r"^(?:NC|CR|C|CREDITO|ABONO|DEPOSITO|INGRESO)$", re.IGNORECASE)
 
 _MONEY_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9/.-])((?:[+-]\s*)?(?:\d{1,3}(?:[.,]\d{3})+|\d+)[.,]\d{2})(?:\s*(CR|DB|DR))?(?![A-Za-z0-9.,])",
@@ -342,6 +377,73 @@ def _parse_signed_amount(raw_val: Any) -> tuple[float, Literal["DEBIT", "CREDIT"
     return mag, explicit_dir
 
 
+def _parse_signed_balance(raw_val: Any) -> float:
+    """Extrae el saldo contable preservando signo negativo para sobregiros o retenciones."""
+    mag, explicit_dir = _parse_signed_amount(raw_val)
+    return -mag if explicit_dir == "DEBIT" and mag > 0.0 else mag
+
+
+_FULL_MONTH_NAMES: dict[str, int] = {
+    "ENERO": 1,
+    "JANUARY": 1,
+    "FEBRERO": 2,
+    "FEBRUARY": 2,
+    "MARZO": 3,
+    "MARCH": 3,
+    "ABRIL": 4,
+    "APRIL": 4,
+    "MAYO": 5,
+    "MAY": 5,
+    "JUNIO": 6,
+    "JUNE": 6,
+    "JULIO": 7,
+    "JULY": 7,
+    "AGOSTO": 8,
+    "AUGUST": 8,
+    "SEPTIEMBRE": 9,
+    "SETIEMBRE": 9,
+    "SEPTEMBER": 9,
+    "OCTUBRE": 10,
+    "OCTOBER": 10,
+    "NOVIEMBRE": 11,
+    "NOVEMBER": 11,
+    "DICIEMBRE": 12,
+    "DECEMBER": 12,
+}
+
+
+def _extract_period_year_month(text: str, fallback_year: int) -> tuple[int, int | None]:
+    """Infiere (año, mes) del período del documento a partir de formatos MM-YYYY, fechas o meses escritos."""
+    upper = normalize_text(text)
+    year = fallback_year
+    month: int | None = None
+
+    m_my = re.search(
+        r"(?:PERIODO|MES|DESDE|DEL|HASTA|AL)?\s*:?\s*(0?[1-9]|1[0-2])[\/\-](20\d{2})\b",
+        upper,
+    )
+    if m_my:
+        month = int(m_my.group(1))
+        year = int(m_my.group(2))
+        return year, month
+
+    for name, m_num in _FULL_MONTH_NAMES.items():
+        m_txt = re.search(rf"\b{name}\b(?:\s+DE)?\s+(20\d{{2}})\b", upper)
+        if m_txt:
+            return int(m_txt.group(1)), m_num
+
+    m_dmy = re.search(r"\b\d{1,2}[\/\-](0?[1-9]|1[0-2])[\/\-](20\d{2})\b", upper)
+    if m_dmy:
+        month = int(m_dmy.group(1))
+        year = int(m_dmy.group(2))
+        return year, month
+
+    m_yr = re.search(r"\b(20\d{2})\b", upper)
+    if m_yr:
+        year = int(m_yr.group(1))
+    return year, month
+
+
 def _parse_vet_date(raw_date: str, default_year: int) -> tuple[str, datetime] | None:
     """Convierte fecha bancaria a fecha VET (YYYY-MM-DD) y datetime UTC equivalente."""
     s = str(raw_date or "").strip()
@@ -370,6 +472,9 @@ def _parse_vet_date(raw_date: str, default_year: int) -> tuple[str, datetime] | 
     elif m_dmy:
         day = int(m_dmy.group(1))
         month = int(m_dmy.group(2))
+        if month > 12 and 1 <= day <= 12:
+            # Tolerancia automática para formato estadounidense MM/DD/YYYY (Payoneer, Mercury, etc.)
+            day, month = month, day
         if m_dmy.group(3):
             y_val = int(m_dmy.group(3))
             year = (2000 + y_val) if y_val < 80 else ((1900 + y_val) if y_val < 100 else y_val)
@@ -449,6 +554,385 @@ def _match_header_role(col_name: str) -> str | None:
             if len(alias_clean) >= 5 and alias_clean in norm_alpha:
                 return role
     return None
+
+
+@dataclass
+class _PdfWordLine:
+    """Línea visual reconstruida a partir de palabras con coordenadas PDF (x0, top, x1, bottom)."""
+
+    words: list[dict[str, Any]]
+    top: float
+    bottom: float
+    y_mid: float
+    text: str
+
+
+@dataclass
+class _PdfColAnchor:
+    """Columna detectada en cabecera PDF con banda horizontal calibrada [left, right]."""
+
+    role: str
+    hdr_x0: float
+    hdr_x1: float
+    left: float
+    right: float
+    anchor_x1: float
+    anchor_xc: float
+
+
+def _is_noise_or_footer_line(text: str) -> bool:
+    """Detecta cabeceras repetidas, resúmenes y pies de página que no son movimientos ni descripciones."""
+    upper = normalize_text(text)
+    if not upper:
+        return True
+    if any(upper.startswith(nk) or f" {nk}" in upper for nk in _NOISE_LINE_KEYWORDS):
+        return True
+    if re.match(r"^(?:PAGINA|PAGE|HOJA)\s*:?\s*\d+\s*(?:/|DE|OF)?\s*\d*$", upper):
+        return True
+    return bool(
+        re.match(
+            r"^(?:CLIENTE|DIRECCION|CUENTA|PERIODO)\s*(?::|\d{4}[*X-]+|[VEJGP]-?\d{5,}|$)",
+            upper,
+        )
+    )
+
+
+def _group_words_into_lines(words: list[dict[str, Any]], y_tol: float = 2.6) -> list[_PdfWordLine]:
+    """Agrupa palabras de pdfplumber por coordenada vertical respetando renglones multilínea cercanos."""
+    if not words:
+        return []
+    ordered = sorted(words, key=lambda w: (float(w["top"]), float(w["x0"])))
+    groups: list[list[dict[str, Any]]] = []
+    anchor_top = float(ordered[0]["top"])
+    current: list[dict[str, Any]] = []
+
+    for w in ordered:
+        w_top = float(w["top"])
+        if not current or abs(w_top - anchor_top) <= y_tol:
+            if not current:
+                anchor_top = w_top
+            current.append(w)
+        else:
+            groups.append(current)
+            current = [w]
+            anchor_top = w_top
+    if current:
+        groups.append(current)
+
+    lines: list[_PdfWordLine] = []
+    for grp in groups:
+        grp_sorted = sorted(grp, key=lambda w: float(w["x0"]))
+        top_v = min(float(w["top"]) for w in grp_sorted)
+        bot_v = max(float(w["bottom"]) for w in grp_sorted)
+        txt = " ".join(str(w["text"]).strip() for w in grp_sorted if str(w["text"]).strip())
+        if txt:
+            lines.append(
+                _PdfWordLine(
+                    words=grp_sorted,
+                    top=top_v,
+                    bottom=bot_v,
+                    y_mid=(top_v + bot_v) / 2.0,
+                    text=txt,
+                )
+            )
+    return lines
+
+
+def _cluster_header_words(words: list[dict[str, Any]]) -> list[tuple[str, float, float]]:
+    """Combina etiquetas apiladas verticalmente o compuestas en la misma columna de cabecera."""
+    if not words:
+        return []
+    sorted_w = sorted(words, key=lambda w: (float(w["x0"]), float(w["top"])))
+    clusters: list[dict[str, Any]] = []
+
+    for w in sorted_w:
+        wx0 = float(w["x0"])
+        wx1 = float(w["x1"])
+        wtop = float(w["top"])
+        wtxt = str(w["text"]).strip()
+        placed = False
+        for cl in clusters:
+            # Solapamiento horizontal (palabras apiladas verticalmente: "Fecha" / "Oper")
+            if wx0 <= cl["x1"] + 3.5 and wx1 >= cl["x0"] - 3.5 and abs(wtop - cl["last_top"]) > 2.5:
+                cl["items"].append((wtop, wx0, wtxt))
+                cl["x0"] = min(cl["x0"], wx0)
+                cl["x1"] = max(cl["x1"], wx1)
+                cl["last_top"] = wtop
+                placed = True
+                break
+        if not placed:
+            clusters.append({"x0": wx0, "x1": wx1, "last_top": wtop, "items": [(wtop, wx0, wtxt)]})
+
+    clusters.sort(key=lambda c: float(c["x0"]))
+
+    # Combinar etiquetas compuestas en el mismo renglón si su unión coincide con una columna conocida
+    merged: list[dict[str, Any]] = []
+    for cl in clusters:
+        cl_txt = " ".join(it[2] for it in sorted(cl["items"], key=lambda it: (it[0], it[1])))
+        if merged:
+            prev = merged[-1]
+            prev_txt = " ".join(it[2] for it in sorted(prev["items"], key=lambda it: (it[0], it[1])))
+            gap = float(cl["x0"]) - float(prev["x1"])
+            if gap <= 8.0 and abs(float(cl["last_top"]) - float(prev["last_top"])) <= 3.0:
+                combo = f"{prev_txt} {cl_txt}"
+                if _match_header_role(combo) is not None and _match_header_role(cl_txt) is None:
+                    prev["items"].extend(cl["items"])
+                    prev["x1"] = max(float(prev["x1"]), float(cl["x1"]))
+                    continue
+        merged.append(cl)
+
+    result: list[tuple[str, float, float]] = []
+    for cl in merged:
+        txt = " ".join(it[2] for it in sorted(cl["items"], key=lambda it: (it[0], it[1])))
+        result.append((txt, float(cl["x0"]), float(cl["x1"])))
+    return result
+
+
+def _header_quality_score(anchors: list[_PdfColAnchor]) -> int:
+    """Puntúa candidatos de cabecera priorizando tablas principales completas frente a subtablas auxiliares."""
+    roles = [a.role for a in anchors]
+    distinct = set(roles)
+    score = len(distinct) * 10
+    if "concept" in distinct:
+        score += 15
+    if "balance" in distinct:
+        score += 15
+    if "debit" in distinct and "credit" in distinct:
+        score += 10
+    if len(roles) > len(distinct) + 1:
+        score -= 10
+    return score
+
+
+def _detect_pdf_word_header(
+    wlines: list[_PdfWordLine],
+) -> tuple[int, int, list[_PdfColAnchor]] | None:
+    """Detecta la cabecera principal de tabla (1–3 renglones apilados) ignorando paneles paralelos y mini-tablas."""
+    numeric_roles = {"debit", "credit", "amount", "balance"}
+
+    def _evaluate_window(win_lines: list[_PdfWordLine]) -> list[_PdfColAnchor] | None:
+        words = [w for ln in win_lines for w in ln.words]
+        clusters = _cluster_header_words(words)
+        if len(clusters) < 3:
+            return None
+
+        anchors: list[_PdfColAnchor] = []
+        has_date = False
+        has_numeric = False
+        for txt, cx0, cx1 in clusters:
+            role = _match_header_role(txt)
+            if not role:
+                continue
+            if role == "date":
+                has_date = True
+                if any(a.role == "date" for a in anchors):
+                    role = "date_alt"
+            if role in numeric_roles:
+                has_numeric = True
+            anchors.append(
+                _PdfColAnchor(
+                    role=role,
+                    hdr_x0=cx0,
+                    hdr_x1=cx1,
+                    left=cx0,
+                    right=cx1,
+                    anchor_x1=cx1,
+                    anchor_xc=(cx0 + cx1) / 2.0,
+                )
+            )
+        if not (has_date and has_numeric and len(anchors) >= 3):
+            return None
+        anchors.sort(key=lambda a: a.hdr_x0)
+        span_left = anchors[0].hdr_x0 - 10.0
+        span_right = anchors[-1].hdr_x1 + 15.0
+        table_hdr_text = " ".join(
+            str(w["text"]).strip()
+            for w in sorted(words, key=lambda it: (float(it["top"]), float(it["x0"])))
+            if span_left <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= span_right
+        )
+        if _DATE_ANY_RE.search(table_hdr_text) or _MONEY_TOKEN_RE.search(table_hdr_text):
+            return None
+        return anchors
+
+    def _overlaps_existing_cols(line_obj: _PdfWordLine, cols: list[_PdfColAnchor]) -> bool:
+        return any(
+            float(w["x0"]) <= c.hdr_x1 + 3.0 and float(w["x1"]) >= c.hdr_x0 - 3.0
+            for w in line_obj.words
+            for c in cols
+        )
+
+    n = len(wlines)
+    scan_limit = min(n, 45)
+    best_overall: tuple[int, int, int, list[_PdfColAnchor]] | None = None
+
+    for i in range(scan_limit):
+        single = _evaluate_window([wlines[i]])
+        best_end = i + 1
+        best_cols = single
+
+        end_j = i + 1
+        while end_j < n and end_j - i < 3 and (wlines[end_j].top - wlines[i].top) <= 16.0:
+            cand = _evaluate_window(wlines[i : end_j + 1])
+            if cand is None:
+                break
+            if best_cols is None:
+                best_cols = cand
+                best_end = end_j + 1
+            else:
+                cand_roles = {a.role for a in cand}
+                best_roles = {a.role for a in best_cols}
+                if len(cand_roles) > len(best_roles) or (
+                    len(cand) >= len(best_cols) and _overlaps_existing_cols(wlines[end_j], best_cols)
+                ):
+                    best_cols = cand
+                    best_end = end_j + 1
+            end_j += 1
+
+        if best_cols is not None:
+            sc = _header_quality_score(best_cols)
+            if best_overall is None or sc > best_overall[0]:
+                best_overall = (sc, i, best_end, best_cols)
+
+    if best_overall is None:
+        return None
+    return best_overall[1], best_overall[2], best_overall[3]
+
+
+def _calibrate_pdf_column_bands(
+    anchors: list[_PdfColAnchor],
+    body_lines: list[_PdfWordLine],
+    page_width: float,
+    allow_day_only: bool = False,
+) -> list[_PdfColAnchor]:
+    """Calibra fronteras horizontales [left, right] reales usando datos de fecha y montos de la página."""
+    cols = [
+        _PdfColAnchor(
+            role=a.role,
+            hdr_x0=a.hdr_x0,
+            hdr_x1=a.hdr_x1,
+            left=a.hdr_x0,
+            right=a.hdr_x1,
+            anchor_x1=a.anchor_x1,
+            anchor_xc=a.anchor_xc,
+        )
+        for a in sorted(anchors, key=lambda x: x.hdr_x0)
+    ]
+
+    emp_x0: dict[int, list[float]] = {idx: [] for idx in range(len(cols))}
+    emp_x1: dict[int, list[float]] = {idx: [] for idx in range(len(cols))}
+    num_indices = [i for i, c in enumerate(cols) if c.role in ("debit", "credit", "amount", "balance")]
+    date_indices = [i for i, c in enumerate(cols) if c.role in ("date", "date_alt")]
+    ref_indices = [i for i, c in enumerate(cols) if c.role == "reference"]
+
+    for wl in body_lines:
+        if _is_noise_or_footer_line(wl.text):
+            continue
+        has_money = bool(_MONEY_TOKEN_RE.search(wl.text))
+        has_date = bool(_DATE_ANY_RE.search(wl.text))
+        if not has_date and allow_day_only and date_indices:
+            dc0 = cols[date_indices[0]]
+            has_date = any(
+                abs(((float(w["x0"]) + float(w["x1"])) / 2.0) - dc0.anchor_xc) <= 35.0
+                and re.fullmatch(r"0?[1-9]|[12]\d|3[01]", str(w["text"]).strip())
+                for w in wl.words
+            )
+        if not (has_date and has_money):
+            continue
+
+        for d_idx in date_indices:
+            dc = cols[d_idx]
+            near_words = [
+                w
+                for w in wl.words
+                if abs(((float(w["x0"]) + float(w["x1"])) / 2.0) - dc.anchor_xc) <= 55.0
+            ]
+            # Buscar tokens fecha contiguos cerca del centro de columna fecha
+            joined_near = " ".join(str(w["text"]) for w in near_words)
+            if _DATE_ANY_RE.search(joined_near) or (
+                allow_day_only and any(re.fullmatch(r"0?[1-9]|[12]\d|3[01]", str(w["text"]).strip()) for w in near_words)
+            ):
+                d_tokens = [
+                    w
+                    for w in near_words
+                    if _DATE_ANY_RE.search(str(w["text"]))
+                    or re.fullmatch(r"\d{1,4}|[A-Za-z]{3}", str(w["text"]))
+                ]
+                if d_tokens:
+                    emp_x0[d_idx].append(min(float(w["x0"]) for w in d_tokens))
+                    emp_x1[d_idx].append(max(float(w["x1"]) for w in d_tokens))
+
+        for r_idx in ref_indices:
+            rc = cols[r_idx]
+            for w in wl.words:
+                wxc = (float(w["x0"]) + float(w["x1"])) / 2.0
+                if abs(wxc - rc.anchor_xc) <= 45.0 and re.search(r"\d{3,}", str(w["text"])):
+                    emp_x0[r_idx].append(float(w["x0"]))
+                    emp_x1[r_idx].append(float(w["x1"]))
+                    break
+
+        money_words = [w for w in wl.words if _MONEY_TOKEN_RE.fullmatch(str(w["text"]).strip())]
+        if money_words and num_indices:
+            rem_words = list(money_words)
+            bal_i = next((i for i in num_indices if cols[i].role == "balance"), None)
+            if bal_i is not None and len(rem_words) >= 2:
+                bw = rem_words.pop(-1)
+                emp_x0[bal_i].append(float(bw["x0"]))
+                emp_x1[bal_i].append(float(bw["x1"]))
+            tx_nums = [i for i in num_indices if i != bal_i] or num_indices
+            used_cols: set[int] = set()
+            for mw in rem_words:
+                mx1 = float(mw["x1"])
+                mxc = (float(mw["x0"]) + mx1) / 2.0
+                cand_cols = [i for i in tx_nums if i not in used_cols] or tx_nums
+                best_i = min(
+                    cand_cols,
+                    key=lambda ci: min(abs(mx1 - cols[ci].hdr_x1), abs(mxc - cols[ci].anchor_xc)),
+                )
+                used_cols.add(best_i)
+                emp_x0[best_i].append(float(mw["x0"]))
+                emp_x1[best_i].append(float(mw["x1"]))
+
+    eff_x0: list[float] = []
+    eff_x1: list[float] = []
+    for idx, c in enumerate(cols):
+        x0_val = min([c.hdr_x0, *emp_x0[idx]]) if emp_x0[idx] else c.hdr_x0
+        x1_val = max([c.hdr_x1, *emp_x1[idx]]) if emp_x1[idx] else c.hdr_x1
+        eff_x0.append(x0_val)
+        eff_x1.append(x1_val)
+        if c.role in ("debit", "credit", "amount", "balance") and emp_x1[idx]:
+            sorted_r = sorted(emp_x1[idx])
+            c.anchor_x1 = sorted_r[len(sorted_r) // 2]
+            sorted_xc = sorted((a + b) / 2.0 for a, b in zip(emp_x0[idx], emp_x1[idx], strict=False))
+            c.anchor_xc = sorted_xc[len(sorted_xc) // 2]
+
+    # Ajustar fronteras [left, right] dejando que 'concept' aproveche todo el espacio hasta columnas adyacentes
+    for idx, c in enumerate(cols):
+        if idx == 0:
+            c.left = max(0.0, c.hdr_x0 - 20.0) if c.hdr_x0 >= 120.0 else 0.0
+        else:
+            prev_c = cols[idx - 1]
+            if c.role == "concept":
+                c.left = min(eff_x0[idx] - 3.0, (eff_x1[idx - 1] + eff_x0[idx]) / 2.0)
+            elif prev_c.role == "concept":
+                c.left = eff_x0[idx] - 4.0
+            else:
+                c.left = (eff_x1[idx - 1] + eff_x0[idx]) / 2.0
+
+        if idx == len(cols) - 1:
+            c.right = max(page_width, eff_x1[idx] + 40.0)
+        else:
+            next_c = cols[idx + 1]
+            if c.role == "concept":
+                c.right = eff_x0[idx + 1] - 4.0
+            elif next_c.role == "concept":
+                c.right = max(eff_x1[idx] + 3.0, (eff_x1[idx] + eff_x0[idx + 1]) / 2.0)
+            else:
+                c.right = (eff_x1[idx] + eff_x0[idx + 1]) / 2.0
+
+        if c.right < c.left:
+            c.right = c.left + 1.0
+
+    return cols
 
 
 class BankStatementImporter:
@@ -721,8 +1205,7 @@ class BankStatementImporter:
 
             bal_val: float | None = None
             if "balance" in role_map and role_map["balance"] < len(row) and row[role_map["balance"]]:
-                bal_raw, _ = _parse_signed_amount(row[role_map["balance"]])
-                bal_val = bal_raw
+                bal_val = _parse_signed_balance(row[role_map["balance"]])
 
             parsed_rows.append(
                 ParsedStatementRow(
@@ -778,41 +1261,49 @@ class BankStatementImporter:
             try:
                 res = reader.decrypt("")
                 if res == 0:
-                    raise ValueError("El PDF está protegido con contraseña. Descárgalo sin clave para importarlo.")
+                    raise ValueError(
+                        "El PDF está protegido con contraseña. Descárgalo sin clave para importarlo."
+                    )
             except (PdfReadError, ValueError) as exc:
                 raise ValueError("El PDF está protegido con contraseña.") from exc
 
-        pages = reader.pages[:MAX_PDF_PAGES]
+        total_pages = len(reader.pages)
         warnings: list[str] = []
-        if len(reader.pages) > MAX_PDF_PAGES:
+        if total_pages > MAX_PDF_PAGES:
             warnings.append(f"Se procesaron únicamente las primeras {MAX_PDF_PAGES} páginas del PDF.")
 
-        all_lines: list[str] = []
-        for page in pages:
-            try:
-                layout_txt = page.extract_text(extraction_mode="layout") or ""
-            except (PdfReadError, ValueError, KeyError, AttributeError, TypeError):
-                layout_txt = page.extract_text() or ""
-            if layout_txt.strip():
-                all_lines.extend(layout_txt.splitlines())
-
-        header_lines: list[str] = []
-        for ln in all_lines[:20]:
-            if self._detect_pdf_header_spans(ln):
-                break
-            header_lines.append(ln)
-        header_sample = "\n".join(header_lines or all_lines[:10]) + f"\n{filename}"
-        detected_bank = (
-            normalize_bank_name(bank_name_override)
-            if bank_name_override and bank_name_override.strip()
-            else (detect_bank_from_text(header_sample) or "BANCO DESCONOCIDO")
+        # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra)
+        (
+            rows,
+            detected_bank,
+            eff_year,
+            has_text_layer,
+            extra_warnings,
+        ) = self._extract_pdf_with_pdfplumber(
+            file_bytes=file_bytes,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
         )
-        m_year = re.search(r"\b(20\d{2})\b", header_sample)
-        eff_year = int(m_year.group(1)) if m_year and default_year == datetime.now(VET_TZ).year else default_year
+        warnings.extend(extra_warnings)
+        extraction_method = "PDF_PLUMBER_GEOMETRIC"
 
-        rows = self._extract_rows_from_layout_lines(all_lines, eff_year)
-        extraction_method = "PDF_LAYOUT_UNIVERSAL"
+        # 2. Respaldo pypdf por líneas si el PDF tiene texto pero sin cabeceras estándar detectadas
+        if not rows and has_text_layer:
+            all_lines: list[str] = []
+            for page in reader.pages[:MAX_PDF_PAGES]:
+                try:
+                    layout_txt = page.extract_text(extraction_mode="layout") or ""
+                except (PdfReadError, ValueError, KeyError, AttributeError, TypeError):
+                    layout_txt = page.extract_text() or ""
+                if layout_txt.strip():
+                    all_lines.extend(layout_txt.splitlines())
+            if all_lines:
+                rows = self._extract_rows_from_layout_lines(all_lines, eff_year)
+                if rows:
+                    extraction_method = "PDF_LAYOUT_UNIVERSAL"
 
+        # 3. Respaldo IA multimodal en lotes de páginas para PDFs escaneados (sin capa de texto)
         if not rows and self._has_real_ai_key():
             ai_rows = self._fallback_extract_pdf_with_ai(file_bytes, eff_year, detected_bank)
             if ai_rows:
@@ -849,6 +1340,409 @@ class BankStatementImporter:
         )
 
     @staticmethod
+    def _infer_bank_from_concepts(rows: list[ParsedStatementRow]) -> str | None:
+        """Identifica el banco emisor cuando el logo es una imagen pero los conceptos mencionan el riel propio."""
+        issuer_signatures: tuple[tuple[tuple[str, ...], str], ...] = (
+            (("PAGO MOVIL BNC", "PAGOMOVIL BNC", "PAGOMOVILBNC"), "BNC"),
+            (("BANESCO PAGO MOVIL", "PAGOMOVIL BANESCO"), "BANESCO"),
+            (("PAGOMOVIL BDV", "PAGOMOVILBDV", "BDVAPP", "BANCA MOVIL BDV"), "BANCO DE VENEZUELA"),
+            (("TPAGO", "T-PAGO", "PAGO MOVIL MERCANTIL"), "MERCANTIL"),
+            (("DINERO RAPIDO", "PROVINCIAL PAGO MOVIL"), "PROVINCIAL"),
+            (("PAGO MOVIL BANCAMIGA", "PAGOMOVIL BANCAMIGA"), "BANCAMIGA"),
+        )
+        counts: dict[str, int] = {}
+        for r in rows[:80]:
+            upper = normalize_text(r.concept)
+            for kws, official in issuer_signatures:
+                if any(kw in upper for kw in kws):
+                    counts[official] = counts.get(official, 0) + 1
+        if not counts:
+            return None
+        return max(counts, key=lambda b: counts[b])
+
+    def _extract_pdf_with_pdfplumber(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+    ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str]]:
+        """Extrae filas multi-banco de PDFs digitales usando coordenadas exactas, calibración y salto de página."""
+        warnings: list[str] = []
+        rows: list[ParsedStatementRow] = []
+        last_global_row: ParsedStatementRow | None = None
+        active_bands: list[_PdfColAnchor] | None = None
+        active_table_x_min = 0.0
+        meta_lines: list[str] = []
+        has_any_text = False
+
+        try:
+            pdf_doc = pdfplumber.open(io.BytesIO(file_bytes))
+        except (PdfminerException, OSError, ValueError, TypeError, KeyError, AttributeError):
+            fallback_bank = (
+                normalize_bank_name(bank_name_override)
+                if bank_name_override and bank_name_override.strip()
+                else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
+            )
+            return [], fallback_bank, default_year, False, warnings
+
+        with pdf_doc:
+            pages = pdf_doc.pages[:MAX_PDF_PAGES]
+            eff_year = default_year
+            eff_month: int | None = None
+            year_explicit = default_year != datetime.now(VET_TZ).year
+
+            for p_idx, page in enumerate(pages):
+                words = (
+                    page.extract_words(
+                        keep_blank_chars=False,
+                        use_text_flow=False,
+                        x_tolerance=1.8,
+                        y_tolerance=2.5,
+                    )
+                    or []
+                )
+                if not words:
+                    continue
+                has_any_text = True
+                wlines = _group_words_into_lines(words, y_tol=2.6)
+                if not wlines:
+                    continue
+
+                page_w = float(page.width or 612.0)
+                hdr = _detect_pdf_word_header(wlines)
+                if hdr is not None:
+                    hdr_start, hdr_end, anchors = hdr
+                    table_x_min = max(0.0, anchors[0].hdr_x0 - 20.0) if anchors[0].hdr_x0 >= 120.0 else 0.0
+                    active_table_x_min = table_x_min
+                    if p_idx == 0:
+                        meta_lines.extend(ln.text for ln in wlines[:hdr_start])
+                        if table_x_min > 0.0:
+                            left_words = [w for w in words if float(w["x1"]) <= table_x_min]
+                            meta_lines.extend(ln.text for ln in _group_words_into_lines(left_words, y_tol=2.6))
+
+                    if table_x_min > 0.0:
+                        hdr_bottom_v = wlines[hdr_end - 1].bottom
+                        right_words = [
+                            w
+                            for w in words
+                            if float(w["x0"]) >= table_x_min - 2.0 and float(w["top"]) > hdr_bottom_v + 1.0
+                        ]
+                        body_lines = _group_words_into_lines(right_words, y_tol=2.6)
+                    else:
+                        body_lines = wlines[hdr_end:]
+                elif active_bands is not None and p_idx > 0:
+                    anchors = active_bands
+                    if active_table_x_min > 0.0:
+                        right_words = [w for w in words if float(w["x0"]) >= active_table_x_min - 2.0]
+                        body_lines = _group_words_into_lines(right_words, y_tol=2.6)
+                    else:
+                        body_lines = wlines
+                else:
+                    if p_idx == 0:
+                        meta_lines.extend(ln.text for ln in wlines[:15])
+                    continue
+
+                if p_idx == 0:
+                    for wl in wlines[-5:]:
+                        if _is_noise_or_footer_line(wl.text):
+                            meta_lines.append(wl.text)
+                    meta_sample = "\n".join(meta_lines) + f"\n{filename}"
+                    parsed_yr, parsed_mo = _extract_period_year_month(meta_sample, eff_year)
+                    if not year_explicit:
+                        eff_year = parsed_yr
+                    if parsed_mo is not None:
+                        eff_month = parsed_mo
+
+                bands = _calibrate_pdf_column_bands(
+                    anchors,
+                    body_lines,
+                    page_w,
+                    allow_day_only=(eff_month is not None),
+                )
+                active_bands = bands
+
+                # Separar anclas transaccionales de líneas candidatas de continuación (multilínea / salto página)
+                page_anchors: list[dict[str, Any]] = []
+                cont_candidates: list[dict[str, Any]] = []
+
+                for b_idx, wl in enumerate(body_lines):
+                    if _is_noise_or_footer_line(wl.text):
+                        continue
+                    parsed = self._parse_pdf_word_line(wl, bands, eff_year, default_month=eff_month)
+                    if parsed is not None:
+                        page_anchors.append(
+                            {
+                                "line_idx": b_idx,
+                                "y_mid": wl.y_mid,
+                                "row": parsed["row"],
+                                "inline_concept": parsed["inline_concept"],
+                                "has_inline": parsed["has_inline_concept"],
+                                "top_parts": [],
+                                "bottom_parts": [],
+                            }
+                        )
+                    else:
+                        cont_txt = self._extract_continuation_text(wl, bands)
+                        if cont_txt:
+                            cont_candidates.append(
+                                {
+                                    "line_idx": b_idx,
+                                    "y_mid": wl.y_mid,
+                                    "text": cont_txt,
+                                }
+                            )
+
+                # Asociar descripciones envueltas (arriba/abajo centradas o al cruzar página)
+                cross_page_parts: list[str] = []
+                for cand in cont_candidates:
+                    c_idx = int(cand["line_idx"])
+                    c_y = float(cand["y_mid"])
+                    c_txt = str(cand["text"])
+
+                    prev_a = next(
+                        (a for a in reversed(page_anchors) if int(a["line_idx"]) < c_idx),
+                        None,
+                    )
+                    next_a = next((a for a in page_anchors if int(a["line_idx"]) > c_idx), None)
+
+                    d_prev = (c_y - float(prev_a["y_mid"])) if prev_a is not None else 9999.0
+                    d_next = (float(next_a["y_mid"]) - c_y) if next_a is not None else 9999.0
+
+                    if (
+                        next_a is not None
+                        and not next_a["has_inline"]
+                        and d_next <= 12.0
+                        and d_next < d_prev
+                    ):
+                        next_a["top_parts"].append(c_txt)
+                    elif prev_a is not None:
+                        prev_a["bottom_parts"].append(c_txt)
+                    elif last_global_row is not None:
+                        cross_page_parts.append(c_txt)
+
+                if cross_page_parts and last_global_row is not None:
+                    merged_prev = _sanitize_cell_text(
+                        f"{last_global_row.concept} {' '.join(cross_page_parts)}"
+                    )
+                    if merged_prev:
+                        last_global_row.concept = merged_prev
+                        last_global_row.payment_method = _infer_payment_method(merged_prev)
+
+                for anch in page_anchors:
+                    row_obj: ParsedStatementRow = anch["row"]
+                    parts = [
+                        *anch["top_parts"],
+                        *([anch["inline_concept"]] if anch["inline_concept"] else []),
+                        *anch["bottom_parts"],
+                    ]
+                    assembled = _sanitize_cell_text(" ".join(parts))
+                    if assembled:
+                        if row_obj.reference_number == "S/R":
+                            new_ref, new_conc = _extract_reference(assembled)
+                            row_obj.reference_number = new_ref
+                            row_obj.concept = new_conc or assembled
+                        else:
+                            row_obj.concept = assembled
+                    row_obj.payment_method = _infer_payment_method(row_obj.concept)
+                    row_obj.row_index = len(rows)
+                    rows.append(row_obj)
+                    last_global_row = row_obj
+                    if len(rows) >= MAX_STATEMENT_ROWS:
+                        warnings.append(
+                            f"Se alcanzó el límite de seguridad de {MAX_STATEMENT_ROWS} movimientos."
+                        )
+                        break
+
+                if len(rows) >= MAX_STATEMENT_ROWS:
+                    break
+
+        meta_sample_all = "\n".join(meta_lines) + f"\n{filename}"
+        detected_bank = (
+            normalize_bank_name(bank_name_override)
+            if bank_name_override and bank_name_override.strip()
+            else (detect_bank_from_text(meta_sample_all) or "BANCO DESCONOCIDO")
+        )
+        if detected_bank == "BANCO DESCONOCIDO" and rows and not (bank_name_override and bank_name_override.strip()):
+            inferred = self._infer_bank_from_concepts(rows)
+            if inferred:
+                detected_bank = inferred
+        return rows, detected_bank, eff_year, has_any_text, warnings
+
+    def _extract_continuation_text(self, wl: _PdfWordLine, bands: list[_PdfColAnchor]) -> str:
+        """Extrae texto limpio de una línea de continuación sin mezclar ruidos numéricos ni resúmenes."""
+        if _MONEY_TOKEN_RE.search(wl.text):
+            return ""
+        concept_bands = [b for b in bands if b.role == "concept"]
+        words_in = [
+            str(w["text"]).strip()
+            for w in wl.words
+            if any(
+                b.left - 4.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= b.right + 4.0
+                for b in concept_bands
+            )
+        ]
+        raw_txt = " ".join(words_in) if words_in else wl.text
+        return _sanitize_cell_text(raw_txt, max_len=140)
+
+    def _parse_pdf_word_line(
+        self,
+        wl: _PdfWordLine,
+        bands: list[_PdfColAnchor],
+        default_year: int,
+        default_month: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Evalúa una línea visual contra las columnas calibradas y construye ParsedStatementRow si es ancla."""
+        date_bands = [b for b in bands if b.role in ("date", "date_alt")]
+        if not date_bands:
+            return None
+
+        parsed_dt: tuple[str, datetime] | None = None
+        for dband in date_bands:
+            d_words = [
+                str(w["text"]).strip()
+                for w in wl.words
+                if dband.left - 4.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= dband.right + 4.0
+            ]
+            d_str = " ".join(d_words).strip()
+            m_d = _DATE_ANY_RE.search(d_str)
+            if not m_d and d_str:
+                # Rescate si una letra de Descripción quedó pegada sin espacio al inicio de la fecha
+                m_d = re.search(
+                    r"(?<![0-9/.,-])(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})",
+                    d_str,
+                )
+            if m_d:
+                cand_dt = _parse_vet_date(m_d.group(0).strip(), default_year)
+                if cand_dt is not None:
+                    parsed_dt = cand_dt
+                    break
+            elif default_month is not None and re.fullmatch(r"0?[1-9]|[12]\d|3[01]", d_str):
+                cand_dt = _parse_vet_date(
+                    f"{int(d_str):02d}/{default_month:02d}/{default_year}",
+                    default_year,
+                )
+                if cand_dt is not None:
+                    parsed_dt = cand_dt
+                    break
+        if parsed_dt is None:
+            return None
+        date_vet, dt_utc = parsed_dt
+
+        num_bands = [b for b in bands if b.role in ("debit", "credit", "amount", "balance")]
+        if not num_bands:
+            return None
+
+        num_left = min(b.left for b in num_bands) - 12.0
+        num_right = max(b.right for b in num_bands) + 12.0
+        concept_bands = [b for b in bands if b.role == "concept"]
+        ref_bands = [b for b in bands if b.role == "reference"]
+        type_bands = [b for b in bands if b.role == "type"]
+
+        # Palabras monetarias dentro de las columnas numéricas (sin capturar montos en la descripción)
+        money_words: list[dict[str, Any]] = []
+        for w in wl.words:
+            wtxt = str(w["text"]).strip()
+            if not _MONEY_TOKEN_RE.fullmatch(wtxt):
+                continue
+            wxc = (float(w["x0"]) + float(w["x1"])) / 2.0
+            in_concept = any(cb.left <= wxc <= cb.right for cb in concept_bands)
+            if not in_concept and num_left <= wxc <= num_right:
+                money_words.append(w)
+
+        if not money_words:
+            return None
+
+        assigned: dict[str, tuple[float, Literal["DEBIT", "CREDIT"] | None]] = {}
+        bal_val: float | None = None
+        rem_money = list(money_words)
+        ordered_nums = sorted(num_bands, key=lambda b: b.anchor_xc)
+        if ordered_nums[-1].role == "balance" and len(rem_money) >= 2:
+            bw = rem_money.pop(-1)
+            bal_val = _parse_signed_balance(str(bw["text"]))
+
+        tx_num_bands = [b for b in ordered_nums if b.role != "balance"] or ordered_nums
+        for mw in rem_money:
+            mx1 = float(mw["x1"])
+            mxc = (float(mw["x0"]) + mx1) / 2.0
+            avail = [b for b in tx_num_bands if b.role not in assigned] or tx_num_bands
+            best_b = min(
+                avail,
+                key=lambda b: min(abs(mx1 - b.anchor_x1), abs(mxc - b.anchor_xc)),
+            )
+            assigned[best_b.role] = _parse_signed_amount(str(mw["text"]))
+
+        type_tokens = [
+            str(w["text"]).strip()
+            for w in wl.words
+            if any(tb.left - 3.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= tb.right + 3.0 for tb in type_bands)
+        ]
+        type_str = " ".join(type_tokens).strip()
+        type_dir: Literal["DEBIT", "CREDIT"] | None = None
+        if type_str:
+            if _MOV_FLAG_DEBIT_RE.match(type_str):
+                type_dir = "DEBIT"
+            elif _MOV_FLAG_CREDIT_RE.match(type_str):
+                type_dir = "CREDIT"
+
+        debit_val = assigned["debit"][0] if "debit" in assigned else 0.0
+        credit_val = assigned["credit"][0] if "credit" in assigned else 0.0
+        if bal_val is None and "balance" in assigned:
+            bal_val = assigned["balance"][0]
+        amt_uncertain = False
+
+        if debit_val == 0.0 and credit_val == 0.0 and "amount" in assigned:
+            mag, sdir = assigned["amount"]
+            eff_dir = type_dir or sdir
+            if eff_dir == "DEBIT":
+                debit_val = mag
+            elif eff_dir == "CREDIT":
+                credit_val = mag
+            else:
+                credit_val = mag
+                amt_uncertain = True
+
+        if debit_val <= 0.0 and credit_val <= 0.0:
+            return None
+
+        mov_type: Literal["DEBIT", "CREDIT"] = "DEBIT" if debit_val > 0.0 else "CREDIT"
+        amt_val = debit_val if debit_val > 0.0 else credit_val
+
+        ref_words = [
+            str(w["text"]).strip()
+            for w in wl.words
+            if any(rb.left - 3.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= rb.right + 3.0 for rb in ref_bands)
+        ]
+        explicit_ref = " ".join(ref_words).strip() or None
+
+        concept_words = [
+            str(w["text"]).strip()
+            for w in wl.words
+            if any(cb.left - 2.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= cb.right + 2.0 for cb in concept_bands)
+        ]
+        inline_raw = " ".join(concept_words).strip()
+        has_inline_concept = bool(inline_raw)
+
+        ref_num, concept_clean = _extract_reference(inline_raw, explicit_ref=explicit_ref)
+        row_obj = ParsedStatementRow(
+            row_index=0,
+            date_vet=date_vet,
+            voucher_datetime_utc=dt_utc,
+            reference_number=ref_num,
+            concept=concept_clean or "Movimiento bancario",
+            movement_type=mov_type,
+            amount_ves=round(amt_val, 2),
+            balance_ves=bal_val,
+            payment_method=_infer_payment_method(concept_clean),
+            amount_uncertain=amt_uncertain,
+        )
+        return {
+            "row": row_obj,
+            "inline_concept": concept_clean if has_inline_concept else "",
+            "has_inline_concept": has_inline_concept,
+        }
+
+    @staticmethod
     def _strip_accents_preserve_len(text: str) -> str:
         """Elimina tildes en minúsculas preservando exactamente los índices horizontales de columna."""
         import unicodedata
@@ -860,21 +1754,47 @@ class BankStatementImporter:
     def _detect_pdf_header_spans(self, line: str) -> dict[str, tuple[int, int]] | None:
         """Detecta posiciones horizontales (start, end) preservando espacios exactos en cabecera PDF."""
         lower = self._strip_accents_preserve_len(line)
-        has_date = any(re.search(rf"(?<!\w){w}(?!\w)", lower) for w in ("fecha", "fec", "date"))
+        has_date = any(re.search(rf"(?<!\w){w}(?!\w)", lower) for w in ("fecha", "fec", "date", "dia"))
         has_amount = any(
             re.search(rf"(?<!\w){w}(?!\w)", lower)
-            for w in ("cargos", "cargo", "debitos", "debito", "retiros", "retiro", "abonos", "abono", "creditos", "credito", "depositos", "deposito", "monto", "importe", "saldo", "balance")
+            for w in (
+                "cargos",
+                "cargo",
+                "debitos",
+                "debito",
+                "debe",
+                "retiros",
+                "retiro",
+                "egresos",
+                "egreso",
+                "abonos",
+                "abono",
+                "creditos",
+                "credito",
+                "haber",
+                "depositos",
+                "deposito",
+                "ingresos",
+                "ingreso",
+                "monto",
+                "importe",
+                "saldos",
+                "saldo",
+                "balance",
+            )
         )
         if not (has_date and has_amount):
             return None
 
         spans: dict[str, tuple[int, int]] = {}
         token_roles: tuple[tuple[str, tuple[str, ...]], ...] = (
+            ("date", ("fecha oper", "fecha valor", "fecha", "fec", "date", "dia")),
             ("reference", ("referencia", "ref.", "ref", "comprobante", "serial", "documento", "movimiento")),
-            ("debit", ("debitos", "debito", "cargos", "cargo", "retiros", "retiro", "egresos", "salidas")),
-            ("credit", ("creditos", "credito", "abonos", "abono", "depositos", "deposito", "ingresos", "entradas")),
+            ("type", ("mov", "tipo", "dc", "naturaleza", "signo")),
+            ("debit", ("debitos", "debito", "debe", "cargos", "cargo", "retiros", "retiro", "egresos", "egreso", "salidas")),
+            ("credit", ("creditos", "credito", "haber", "abonos", "abono", "depositos", "deposito", "ingresos", "ingreso", "entradas")),
             ("amount", ("monto", "importe", "valor", "amount")),
-            ("balance", ("saldo disponible", "saldo actual", "saldo final", "saldo", "balance")),
+            ("balance", ("saldo disponible", "saldo actual", "saldo final", "saldos", "saldo", "balance")),
         )
         for role, kws in token_roles:
             for kw in kws:
@@ -885,6 +1805,7 @@ class BankStatementImporter:
         return spans if any(k in spans for k in ("debit", "credit", "amount", "balance")) else None
 
     def _extract_rows_from_layout_lines(self, lines: list[str], default_year: int) -> list[ParsedStatementRow]:
+        """Fallback agnóstico al orden de columnas usando pypdf layout (cuando la fecha está en cualquier posición)."""
         col_spans: dict[str, tuple[int, int]] = {}
         rows: list[ParsedStatementRow] = []
         current_row: ParsedStatementRow | None = None
@@ -901,43 +1822,59 @@ class BankStatementImporter:
                 current_row = None
                 continue
 
-            upper_line = normalize_text(stripped)
-            if any(upper_line.startswith(nk) or f" {nk}" in upper_line for nk in _NOISE_LINE_KEYWORDS):
+            if _is_noise_or_footer_line(stripped):
                 current_row = None
                 continue
 
-            m_date = _DATE_START_RE.match(line)
-            if m_date:
+            date_matches = list(_DATE_ANY_RE.finditer(line))
+            m_date = None
+            if date_matches:
+                if "date" in col_spans:
+                    ds, de = col_spans["date"]
+                    d_center = (ds + de) / 2.0
+                    m_date = min(
+                        date_matches,
+                        key=lambda m: abs(((m.start() + m.end()) / 2.0) - d_center),
+                    )
+                else:
+                    m_date = date_matches[0]
+
+            if m_date is not None:
                 parsed_dt = _parse_vet_date(m_date.group(0).strip(), default_year)
                 if not parsed_dt:
                     continue
                 date_vet, dt_utc = parsed_dt
 
-                money_matches = list(_MONEY_TOKEN_RE.finditer(line, pos=m_date.end()))
+                money_matches = list(_MONEY_TOKEN_RE.finditer(line))
                 if not money_matches:
                     continue
 
                 first_money_start = money_matches[0].start()
-                raw_mid = line[m_date.end() : first_money_start]
-                middle_text = raw_mid.strip()
+                non_date_text = (line[: m_date.start()] + " " + line[m_date.end() : first_money_start]).strip()
 
                 explicit_ref: str | None = None
                 if "reference" in col_spans:
                     rs, re_end = col_spans["reference"]
-                    # Capturar palabra que cae cerca del span de Referencia
-                    for word_m in re.finditer(r"\S+", raw_mid):
-                        w_start = m_date.end() + word_m.start()
-                        w_end = m_date.end() + word_m.end()
-                        if w_end >= rs - 3 and w_start <= re_end + 8:
+                    for word_m in re.finditer(r"\S+", line[:first_money_start]):
+                        if word_m.start() >= m_date.start() and word_m.end() <= m_date.end():
+                            continue
+                        if word_m.end() >= rs - 3 and word_m.start() <= re_end + 10:
                             cand = word_m.group(0)
                             if re.search(r"\d{4,}", cand):
                                 explicit_ref = cand
-                                middle_text = (
-                                    raw_mid[: word_m.start()] + " " + raw_mid[word_m.end() :]
+                                non_date_text = (
+                                    line[: word_m.start()]
+                                    + " "
+                                    + line[word_m.end() : first_money_start]
+                                )
+                                non_date_text = (
+                                    non_date_text[: m_date.start()] + " " + non_date_text[m_date.end() :]
+                                    if word_m.start() > m_date.end()
+                                    else non_date_text
                                 ).strip()
                                 break
 
-                ref_num, concept = _extract_reference(middle_text, explicit_ref=explicit_ref)
+                ref_num, concept = _extract_reference(non_date_text, explicit_ref=explicit_ref)
 
                 debit_val = 0.0
                 credit_val = 0.0
@@ -951,10 +1888,9 @@ class BankStatementImporter:
                     assigned: dict[str, tuple[float, Literal["DEBIT", "CREDIT"] | None]] = {}
                     remaining_matches = list(money_matches)
 
-                    # Si existe columna Saldo y hay >= 2 montos, el monto más a la derecha corresponde al Saldo
                     if "balance" in numeric_cols and len(remaining_matches) >= 2:
                         bal_mm = remaining_matches.pop(-1)
-                        assigned["balance"] = _parse_signed_amount(bal_mm.group(0))
+                        assigned["balance"] = (_parse_signed_balance(bal_mm.group(0)), None)
 
                     tx_cols: dict[str, tuple[int, int]] = {
                         k: v for k, v in numeric_cols.items() if k != "balance"
@@ -962,7 +1898,6 @@ class BankStatementImporter:
                     if not tx_cols:
                         tx_cols = numeric_cols
 
-                    # Emparejamiento 1-a-1 sin colisión por proximidad horizontal
                     for mm in remaining_matches:
                         tok_start = mm.start(1)
                         tok_end = mm.end(1)
@@ -993,15 +1928,14 @@ class BankStatementImporter:
                             credit_val = mag
                             amt_uncertain = True
                 else:
-                    # Sin cabecera posicional: heurística universal según cantidad de montos a la derecha
                     parsed_moneys = [_parse_signed_amount(mm.group(0)) for mm in money_matches]
                     if len(parsed_moneys) >= 3:
                         debit_val = parsed_moneys[-3][0]
                         credit_val = parsed_moneys[-2][0]
-                        bal_val = parsed_moneys[-1][0]
+                        bal_val = _parse_signed_balance(money_matches[-1].group(0))
                     elif len(parsed_moneys) == 2:
                         mag, sdir = parsed_moneys[0]
-                        bal_val = parsed_moneys[1][0]
+                        bal_val = _parse_signed_balance(money_matches[1].group(0))
                         if sdir == "DEBIT":
                             debit_val = mag
                         elif sdir == "CREDIT":
@@ -1042,7 +1976,6 @@ class BankStatementImporter:
                 if len(rows) >= MAX_STATEMENT_ROWS:
                     break
             elif current_row is not None and not _MONEY_TOKEN_RE.search(line):
-                # Línea de continuación del concepto (ej. BDV "DESDE EL NUMERO ...")
                 extra = _sanitize_cell_text(stripped, max_len=120)
                 if extra and len(current_row.concept) < 220:
                     merged = _sanitize_cell_text(f"{current_row.concept} {extra}")
@@ -1051,107 +1984,145 @@ class BankStatementImporter:
 
         return rows
 
-    def _fallback_extract_pdf_with_ai(
+    def _call_gemini_for_pdf_chunk(
         self,
-        file_bytes: bytes,
+        chunk_bytes: bytes,
         default_year: int,
         bank_name: str,
+        client: httpx.Client,
     ) -> list[ParsedStatementRow]:
-        """Respaldo opcional vía Gemini para PDFs escaneados sin capa de texto."""
-        if len(file_bytes) > 6 * 1024 * 1024:
+        """Solicita a Gemini la extracción JSON estructurada de un bloque acotado de páginas PDF."""
+        if len(chunk_bytes) > 6 * 1024 * 1024:
             return []
-
         prompt = (
             "Extrae TODAS las transacciones del estado de cuenta bancario adjunto. "
             "Responde UNICAMENTE con un arreglo JSON válido sin markdown ni texto adicional. "
             'Cada elemento debe tener: {"date": "YYYY-MM-DD", "reference": "...", '
             '"concept": "...", "debit": 0.0, "credit": 0.0, "balance": 0.0}.'
         )
-        encoded = base64.b64encode(file_bytes).decode("ascii")
-        client = self._client or httpx.Client(timeout=25.0)
-        close_client = self._client is None
-        try:
-            for _ in range(min(3, len(self.key_pool.keys))):
-                api_key = self.key_pool.get_next_key()
-                for model in self.GEMINI_MODELS:
-                    url = (
-                        f"https://generativelanguage.googleapis.com/v1beta/models/"
-                        f"{model}:generateContent?key={api_key}"
-                    )
-                    payload = {
-                        "contents": [
-                            {
-                                "parts": [
-                                    {"text": prompt},
-                                    {"inline_data": {"mime_type": "application/pdf", "data": encoded}},
-                                ]
-                            }
-                        ],
-                        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096},
-                    }
-                    try:
-                        resp = client.post(url, json=payload)
-                        if resp.status_code != 200:
-                            continue
-                        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                        m_arr = re.search(r"\[.*\]", raw_text, re.DOTALL)
-                        if not m_arr:
-                            continue
-                        items = json.loads(m_arr.group(0))
-                        if not isinstance(items, list):
-                            continue
-                        extracted: list[ParsedStatementRow] = []
-                        for item in items[:MAX_STATEMENT_ROWS]:
-                            if not isinstance(item, dict):
-                                continue
-                            p_dt = _parse_vet_date(str(item.get("date") or ""), default_year)
-                            if not p_dt:
-                                continue
-                            deb = parse_monetary_amount(item.get("debit"))
-                            cre = parse_monetary_amount(item.get("credit"))
-                            if deb <= 0.0 and cre <= 0.0:
-                                continue
-                            mov_t: Literal["DEBIT", "CREDIT"] = "DEBIT" if deb > 0.0 else "CREDIT"
-                            amt_v = deb if deb > 0.0 else cre
-                            bal_raw = item.get("balance")
-                            bal_v = parse_monetary_amount(bal_raw) if bal_raw is not None else None
-                            ref_v, con_v = _extract_reference(
-                                str(item.get("concept") or bank_name),
-                                explicit_ref=str(item.get("reference") or "") or None,
-                            )
-                            extracted.append(
-                                ParsedStatementRow(
-                                    row_index=len(extracted),
-                                    date_vet=p_dt[0],
-                                    voucher_datetime_utc=p_dt[1],
-                                    reference_number=ref_v,
-                                    concept=con_v or "Movimiento bancario",
-                                    movement_type=mov_t,
-                                    amount_ves=round(amt_v, 2),
-                                    balance_ves=bal_v,
-                                    payment_method=_infer_payment_method(con_v),
-                                )
-                            )
-                        return extracted
-                    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        encoded = base64.b64encode(chunk_bytes).decode("ascii")
+        for _ in range(min(3, len(self.key_pool.keys))):
+            api_key = self.key_pool.get_next_key()
+            for model in self.GEMINI_MODELS:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent?key={api_key}"
+                )
+                payload = {
+                    "contents": [
+                        {
+                            "parts": [
+                                {"text": prompt},
+                                {"inline_data": {"mime_type": "application/pdf", "data": encoded}},
+                            ]
+                        }
+                    ],
+                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16384},
+                }
+                try:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code != 200:
                         continue
+                    raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    m_arr = re.search(r"\[.*\]", raw_text, re.DOTALL)
+                    if not m_arr:
+                        continue
+                    items = json.loads(m_arr.group(0))
+                    if not isinstance(items, list):
+                        continue
+                    extracted: list[ParsedStatementRow] = []
+                    for item in items[:MAX_STATEMENT_ROWS]:
+                        if not isinstance(item, dict):
+                            continue
+                        p_dt = _parse_vet_date(str(item.get("date") or ""), default_year)
+                        if not p_dt:
+                            continue
+                        deb = parse_monetary_amount(item.get("debit"))
+                        cre = parse_monetary_amount(item.get("credit"))
+                        if deb <= 0.0 and cre <= 0.0:
+                            continue
+                        mov_t: Literal["DEBIT", "CREDIT"] = "DEBIT" if deb > 0.0 else "CREDIT"
+                        amt_v = deb if deb > 0.0 else cre
+                        bal_raw = item.get("balance")
+                        bal_v = _parse_signed_balance(bal_raw) if bal_raw is not None else None
+                        ref_v, con_v = _extract_reference(
+                            str(item.get("concept") or bank_name),
+                            explicit_ref=str(item.get("reference") or "") or None,
+                        )
+                        extracted.append(
+                            ParsedStatementRow(
+                                row_index=len(extracted),
+                                date_vet=p_dt[0],
+                                voucher_datetime_utc=p_dt[1],
+                                reference_number=ref_v,
+                                concept=con_v or "Movimiento bancario",
+                                movement_type=mov_t,
+                                amount_ves=round(amt_v, 2),
+                                balance_ves=bal_v,
+                                payment_method=_infer_payment_method(con_v),
+                            )
+                        )
+                    return extracted
+                except (httpx.HTTPError, KeyError, ValueError, TypeError):
+                    continue
+        return []
+
+    def _fallback_extract_pdf_with_ai(
+        self,
+        file_bytes: bytes,
+        default_year: int,
+        bank_name: str,
+    ) -> list[ParsedStatementRow]:
+        """Respaldo opcional vía Gemini en lotes de páginas para PDFs escaneados sin capa de texto."""
+        chunks: list[bytes] = []
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            total_p = min(len(reader.pages), MAX_PDF_PAGES)
+            if total_p <= PDF_AI_CHUNK_PAGES:
+                chunks = [file_bytes]
+            else:
+                for start in range(0, total_p, PDF_AI_CHUNK_PAGES):
+                    writer = PdfWriter()
+                    for p in reader.pages[start : start + PDF_AI_CHUNK_PAGES]:
+                        writer.add_page(p)
+                    buf = io.BytesIO()
+                    writer.write(buf)
+                    chunks.append(buf.getvalue())
+        except (PdfReadError, OSError, ValueError):
+            chunks = [file_bytes]
+
+        client = self._client or httpx.Client(timeout=45.0)
+        close_client = self._client is None
+        all_rows: list[ParsedStatementRow] = []
+        try:
+            for chunk_bytes in chunks:
+                part_rows = self._call_gemini_for_pdf_chunk(
+                    chunk_bytes=chunk_bytes,
+                    default_year=default_year,
+                    bank_name=bank_name,
+                    client=client,
+                )
+                for r in part_rows:
+                    r.row_index = len(all_rows)
+                    all_rows.append(r)
+                    if len(all_rows) >= MAX_STATEMENT_ROWS:
+                        return all_rows
         finally:
             if close_client:
                 client.close()
-        return []
+        return all_rows
 
     def _verify_and_classify_rows(self, result: StatementPreviewResult) -> None:
-        """Verifica orden cronológico (ASC vs DESC), saldo fila por fila y clasificación base."""
+        """Verifica orden cronológico (ASC vs DESC), depura impresiones duplicadas sin cambio de saldo y cuadra fila a fila."""
         rows = result.rows
         if not rows:
             result.balance_verified = False
             return
 
-        # 1. Inferir dirección en filas ambiguas (columna única sin signo) y detectar orden ASC/DESC
+        # 1. Inferir orden cronológico (ASC vs DESC)
         with_bal = [r for r in rows if r.balance_ves is not None]
         order = "ASC"
         if len(rows) >= 2 and len(with_bal) >= 2:
-            # Probar orden cronológico en sentido directo (0 -> N-1) vs inverso (N-1 -> 0)
             asc_hits = 0
             desc_hits = 0
             for i in range(1, len(rows)):
@@ -1188,8 +2159,44 @@ class BankStatementImporter:
 
         result.detected_order = order
 
+        # 1b. Depurar duplicados consecutivos de impresión bancaria (ej. BDV 21/05 manteniendo saldo idéntico)
+        chron_raw = rows if order == "ASC" else list(reversed(rows))
+        dedup_chron: list[ParsedStatementRow] = []
+        dup_print_dates: list[str] = []
+        for r in chron_raw:
+            if dedup_chron:
+                prev_r = dedup_chron[-1]
+                same_meta = (
+                    r.date_vet == prev_r.date_vet
+                    and r.reference_number != "S/R"
+                    and r.reference_number == prev_r.reference_number
+                    and r.movement_type == prev_r.movement_type
+                    and abs(r.amount_ves - prev_r.amount_ves) <= 0.02
+                )
+                if (
+                    same_meta
+                    and prev_r.balance_ves is not None
+                    and r.balance_ves is not None
+                    and abs(r.balance_ves - prev_r.balance_ves) <= 0.02
+                ):
+                    dup_print_dates.append(r.date_vet)
+                    continue
+            dedup_chron.append(r)
+
+        if dup_print_dates:
+            rows = dedup_chron if order == "ASC" else list(reversed(dedup_chron))
+            for idx, r in enumerate(rows):
+                r.row_index = idx
+            result.rows = rows
+            result.total_rows = len(rows)
+            result.warnings.append(
+                f"Se omitió automáticamente {len(dup_print_dates)} fila(s) duplicada(s) impresa(s) "
+                f"por el banco sin variación de saldo (fecha ref. {dup_print_dates[0]})."
+            )
+
         # 2. Verificar matemáticamente transición cronológica de saldo
         chron_rows = rows if order == "ASC" else list(reversed(rows))
+        with_bal = [r for r in rows if r.balance_ves is not None]
         if with_bal:
             first_bal = next((r.balance_ves for r in chron_rows if r.balance_ves is not None), None)
             last_bal = next((r.balance_ves for r in reversed(chron_rows) if r.balance_ves is not None), None)

@@ -725,9 +725,10 @@ def preview_bank_statement(
             detail="El archivo de estado de cuenta está vacío.",
         )
     if len(content) > MAX_STATEMENT_BYTES:
+        max_mb = MAX_STATEMENT_BYTES // (1024 * 1024)
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail="El archivo supera el límite máximo permitido de 10 MB.",
+            detail=f"El archivo supera el límite máximo permitido de {max_mb} MB.",
         )
 
     col_map: dict[str, str] | None = None

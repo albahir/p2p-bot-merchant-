@@ -91,12 +91,12 @@ def detect_bank_from_text(raw_text: str | None) -> str | None:
     if best_bank is not None:
         return best_bank
 
-    # Fase 2: código SUDEBAN de 4 dígitos si no apareció el nombre textual
+    # Fase 2: código SUDEBAN de 4 dígitos (cuentas con guion/espacio, enmascaradas 0102**** o CCC de 20 dígitos 0134...)
     for tokens, official_name in _BANK_PATTERNS:
         for tok in tokens:
             if not tok.isdigit():
                 continue
-            m = re.search(rf"(?<!\d){tok}(?:[-\s]|$)", t)
+            m = re.search(rf"(?<!\d){tok}(?:[-\s*X]|\d{{16}}(?!\d)|$)", t)
             if m and (best_pos is None or m.start() < best_pos):
                 best_pos = m.start()
                 best_bank = official_name
