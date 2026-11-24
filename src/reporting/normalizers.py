@@ -91,6 +91,23 @@ def detect_bank_from_text(raw_text: str | None) -> str | None:
     if best_bank is not None:
         return best_bank
 
+    # Fase 1b: tolerancia OCR cuando los espacios entre palabras desaparecen ("BANESCOESTADODECUENTA", "MERCANTILENLINEA")
+    t_compact = re.sub(r"\s+", "", t)
+    for tokens, official_name in _BANK_PATTERNS:
+        for tok in tokens:
+            if tok.isdigit():
+                continue
+            tok_compact = tok.replace(" ", "")
+            if len(tok_compact) < 7:
+                continue
+            idx = t_compact.find(tok_compact)
+            if idx != -1 and (best_pos is None or idx < best_pos):
+                best_pos = idx
+                best_bank = official_name
+
+    if best_bank is not None:
+        return best_bank
+
     # Fase 2: código SUDEBAN de 4 dígitos (cuentas con guion/espacio, enmascaradas 0102**** o CCC de 20 dígitos 0134...)
     for tokens, official_name in _BANK_PATTERNS:
         for tok in tokens:

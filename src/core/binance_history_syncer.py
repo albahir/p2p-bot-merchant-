@@ -5,6 +5,7 @@ mapear las órdenes al modelo relacional Order, insertarlas de forma estrictamen
 idempotente en la base de datos y generar reportes exportables en CSV.
 """
 
+import calendar
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -19,6 +20,13 @@ from src.core.binance_client import BinanceAuthError, BinanceWeightExceededError
 from src.core.binance_schemas import BinanceOrderMatchItem
 from src.data.models import Order
 from src.data.repositories import OrderRepository
+from src.security.file_guards import (
+    MAX_ORDERS_UPLOAD_BYTES,
+    assert_not_executable_payload,
+    parse_html_table_rows,
+    validate_xls_safety,
+    validate_xlsx_zip_safety,
+)
 
 logger = logging.getLogger("binance_history_syncer")
 
@@ -170,12 +178,25 @@ class BinanceHistorySyncer:
         trade_type: str = "ALL",
         page_size: int = 50,
         user_id: int | None = None,
+        year: int | None = None,
+        month: int | None = None,
     ) -> SyncHistoryResult:
-        """Extrae el historial de órdenes desde Binance API en ventanas de 30 días, las inserta en BD y genera el CSV."""
-        safe_days = max(1, min(days, 365))
+        """Extrae el historial de órdenes desde Binance API en ventanas <= 30 días, con tasa BCV histórica por fecha."""
         now_dt = datetime.now(UTC)
-        total_end_ms = int(now_dt.timestamp() * 1000)
-        total_start_ms = total_end_ms - (safe_days * 24 * 60 * 60 * 1000)
+        vet_tz = timezone(timedelta(hours=-4))
+        if year is not None and month is not None:
+            last_day = calendar.monthrange(year, month)[1]
+            start_vet = datetime(year, month, 1, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC)
+            end_vet = min(
+                datetime(year, month, last_day, 23, 59, 59, 999000, tzinfo=vet_tz).astimezone(UTC),
+                now_dt,
+            )
+            total_start_ms = int(start_vet.timestamp() * 1000)
+            total_end_ms = max(total_start_ms + 1000, int(end_vet.timestamp() * 1000))
+        else:
+            safe_days = max(1, min(days, 365))
+            total_end_ms = int(now_dt.timestamp() * 1000)
+            total_start_ms = total_end_ms - (safe_days * 24 * 60 * 60 * 1000)
 
         # Generar ventanas consecutivas de máximo 30 días
         window_size_ms = 30 * 24 * 60 * 60 * 1000
@@ -242,11 +263,32 @@ class BinanceHistorySyncer:
         vol_usdt = 0.0
         vol_fiat = 0.0
 
-        current_bcv_rate = self._resolve_bcv_rate(db)
+        from src.reporting.bcv_history_service import BCVHistoryService
+
+        bcv_hist = BCVHistoryService(db)
+        bcv_hist.seed_historical_rates_if_missing()
+        fallback_bcv_rate: float | None = None
+        rate_cache: dict[str, float] = {}
+
+        def _rate_for_dt(dt_obj: datetime) -> float:
+            nonlocal fallback_bcv_rate
+            vet_d = bcv_hist.to_venezuela_time(dt_obj).date()
+            k = vet_d.isoformat()
+            if k not in rate_cache:
+                resolved = bcv_hist.get_rate_for_date(vet_d)
+                if resolved > 0:
+                    rate_cache[k] = resolved
+                else:
+                    if fallback_bcv_rate is None:
+                        fallback_bcv_rate = self._resolve_bcv_rate(db)
+                    rate_cache[k] = fallback_bcv_rate
+            return rate_cache[k]
 
         try:
             for item in all_items:
-                order_entity = self._map_item_to_order(item, bcv_rate=current_bcv_rate)
+                raw_ts = getattr(item, "createTime", None) or getattr(item, "create_time", 0)
+                item_dt = datetime.fromtimestamp(float(raw_ts) / 1000.0, tz=UTC) if raw_ts else datetime.now(UTC)
+                order_entity = self._map_item_to_order(item, bcv_rate=_rate_for_dt(item_dt))
                 orders.append(order_entity)
 
                 if order_entity.trade_type == "BUY":
@@ -316,15 +358,45 @@ class BinanceHistorySyncer:
         vol_fiat = 0.0
 
         try:
-            if filename.lower().endswith((".xlsx", ".xls")):
-                df = pd.read_excel(io.BytesIO(file_bytes))
+            if len(file_bytes) > MAX_ORDERS_UPLOAD_BYTES:
+                max_mb = MAX_ORDERS_UPLOAD_BYTES // (1024 * 1024)
+                raise ValueError(f"El archivo supera el límite máximo permitido de {max_mb} MB.")
+
+            lower_name = filename.lower()
+            if lower_name.endswith(".xlsx"):
+                validate_xlsx_zip_safety(file_bytes)
+                df = pd.read_excel(
+                    io.BytesIO(file_bytes),
+                    nrows=5050,
+                    engine="openpyxl",
+                    engine_kwargs={"read_only": True, "data_only": True},
+                )
+            elif lower_name.endswith(".xls"):
+                xls_kind = validate_xls_safety(file_bytes)
+                if xls_kind == "XLSX":
+                    df = pd.read_excel(
+                        io.BytesIO(file_bytes),
+                        nrows=5050,
+                        engine="openpyxl",
+                        engine_kwargs={"read_only": True, "data_only": True},
+                    )
+                elif xls_kind == "HTML":
+                    html_rows = parse_html_table_rows(file_bytes, max_rows=5050)
+                    df = (
+                        pd.DataFrame(html_rows[1:], columns=html_rows[0])
+                        if len(html_rows) >= 2
+                        else pd.DataFrame()
+                    )
+                else:
+                    df = pd.read_excel(io.BytesIO(file_bytes), nrows=5050)
             else:
+                assert_not_executable_payload(file_bytes)
                 try:
-                    df = pd.read_csv(io.BytesIO(file_bytes), sep=",")
+                    df = pd.read_csv(io.BytesIO(file_bytes), sep=",", nrows=5050)
                     if len(df.columns) <= 1:
-                        df = pd.read_csv(io.BytesIO(file_bytes), sep=";")
+                        df = pd.read_csv(io.BytesIO(file_bytes), sep=";", nrows=5050)
                 except (ValueError, UnicodeDecodeError, OSError):
-                    df = pd.read_csv(io.BytesIO(file_bytes), sep=";")
+                    df = pd.read_csv(io.BytesIO(file_bytes), sep=";", nrows=5050)
 
 
             col_map = {str(c).strip().lower().replace("_", " "): c for c in df.columns}
@@ -336,7 +408,12 @@ class BinanceHistorySyncer:
                             return row[c_orig]
                 return None
 
+            from src.reporting.bcv_history_service import BCVHistoryService
+
+            bcv_hist = BCVHistoryService(db)
+            bcv_hist.seed_historical_rates_if_missing()
             current_bcv_rate = self._resolve_bcv_rate(db)
+            rate_cache: dict[str, float] = {}
 
             for _, row in df.iterrows():
                 order_num = _get_val(row, "order number", "order no", "número de orden", "orden", "nº de orden")
@@ -364,6 +441,11 @@ class BinanceHistorySyncer:
                 except (ValueError, TypeError, OverflowError):
                     created_dt = datetime.now(UTC)
 
+                vet_day = bcv_hist.to_venezuela_time(created_dt).date()
+                day_key = vet_day.isoformat()
+                if day_key not in rate_cache:
+                    resolved_r = bcv_hist.get_rate_for_date(vet_day)
+                    rate_cache[day_key] = resolved_r if resolved_r > 0 else current_bcv_rate
 
                 order_entity = Order(
                     order_number=order_num,
@@ -375,7 +457,7 @@ class BinanceHistorySyncer:
                     unit_price=unit_price,
                     fee_fiat=0.0,
                     fee_crypto=0.0,
-                    bcv_rate=current_bcv_rate,
+                    bcv_rate=rate_cache[day_key],
                     order_status="COMPLETED",
                     counterparty_name=counterparty,
                     created_at=created_dt,

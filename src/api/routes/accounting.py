@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_db, require_trader
-from src.data.models import BankVoucher, User
+from src.data.models import AccountingPeriodBalance, BankVoucher, FiscalPeriodSnapshot, Order, User
 from src.data.repositories import (
     BankVoucherRepository,
     JournalEntryRepository,
@@ -30,6 +30,13 @@ from src.reporting.accounting_engine import AccountingEngine
 from src.reporting.excel_reporter import ExcelReporter
 from src.reporting.pdf_reporter import PDFReporter
 from src.reporting.tax_engine import FIFOCostMethod
+from src.security.file_guards import (
+    MAX_VOUCHER_UPLOAD_BYTES,
+    image_to_clean_png_bytes,
+    read_upload_bounded,
+    sanitize_and_load_image,
+    validate_pdf_safety,
+)
 
 router = APIRouter(prefix="/api/accounting", tags=["Contabilidad y Libro Diario P2P"])
 
@@ -85,6 +92,238 @@ class BankBalanceItemResponse(BaseModel):
     inflows_ves: float
     outflows_ves: float
     theoretical_ves: float
+
+
+class PeriodConfigResponse(BaseModel):
+    period: str
+    year: int
+    month: int
+    source: Literal["saved", "carried_over", "profile_default", "empty"]
+    carried_from: str | None = None
+    is_closed: bool = False
+    is_historical_month: bool = False
+    initial_usdt: float = 0.0
+    initial_usdt_cost_ves: float = 0.0
+    initial_banks: dict[str, float] = Field(default_factory=dict)
+    actual_final_usdt: float | None = None
+    actual_final_banks: dict[str, float] | None = None
+    bcv_day1_rate: float = 0.0
+    orders_count_in_period: int = 0
+
+
+class PeriodConfigUpdateRequest(BaseModel):
+    year: int = Field(..., ge=2020, le=2100)
+    month: int = Field(..., ge=1, le=12)
+    initial_usdt: float = Field(default=0.0, ge=0.0)
+    initial_usdt_cost_ves: float = Field(default=0.0, ge=0.0)
+    initial_banks: dict[str, float] = Field(default_factory=dict)
+    actual_final_usdt: float | None = Field(default=None, ge=0.0)
+    actual_final_banks: dict[str, float] | None = Field(default=None)
+    mark_closed: bool | None = Field(default=None)
+
+
+def _prev_year_month(year: int, month: int) -> tuple[int, int]:
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def _canonicalize_bank_map(raw_map: dict[str, float] | None) -> dict[str, float]:
+    from src.core.spread_monitor import SpreadMonitor
+
+    out: dict[str, float] = {}
+    if not raw_map:
+        return out
+    for raw_k, raw_v in raw_map.items():
+        canon = SpreadMonitor.canonical_user_bank_name(str(raw_k)) or str(raw_k).strip()
+        if canon:
+            out[canon] = round(max(0.0, float(raw_v or 0.0)), 2)
+    return out
+
+
+def _get_period_balance_row(db: Session, uid: int | None, period: str) -> AccountingPeriodBalance | None:
+    q = db.query(AccountingPeriodBalance).filter(AccountingPeriodBalance.period == period)
+    if uid is not None:
+        q = q.filter(AccountingPeriodBalance.user_id == uid)
+    return q.first()
+
+
+@router.get("/period-config", response_model=PeriodConfigResponse)
+def get_period_config(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    year: Annotated[int, Query(ge=2020, le=2100)] = 2026,
+    month: Annotated[int, Query(ge=1, le=12)] = 11,
+) -> PeriodConfigResponse:
+    """Retorna apertura y arqueo final por período (YYYY-MM), con arrastre automático desde el mes anterior."""
+    from datetime import date as date_cls
+
+    from src.reporting.bcv_history_service import BCVHistoryService
+
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    period = f"{year}-{month:02d}"
+    vet_tz = timezone(timedelta(hours=-4))
+    now_vet = datetime.now(vet_tz)
+    is_historical = (year, month) < (now_vet.year, now_vet.month)
+
+    bcv_svc = BCVHistoryService(db)
+    bcv_day1 = bcv_svc.get_rate_for_date(date_cls(year, month, 1))
+
+    # Contar órdenes completadas del período en hora VET
+    _, last_day = calendar.monthrange(year, month)
+    start_utc = datetime(year, month, 1, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    end_utc = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    orders_q = db.query(Order).filter(
+        Order.order_status == "COMPLETED",
+        Order.created_at.between(start_utc, end_utc),
+    )
+    if uid is not None:
+        orders_q = orders_q.filter(Order.user_id == uid)
+    orders_count = orders_q.count()
+
+    user_prefs = list(getattr(current_user, "preferred_banks", []) or [])
+    base_banks: dict[str, float] = {b: 0.0 for b in user_prefs}
+
+    row = _get_period_balance_row(db, uid, period)
+    if row is not None:
+        banks = {**base_banks, **row.initial_banks}
+        return PeriodConfigResponse(
+            period=period,
+            year=year,
+            month=month,
+            source="saved",
+            carried_from=None,
+            is_closed=bool(row.is_closed),
+            is_historical_month=is_historical,
+            initial_usdt=round(float(row.initial_usdt or 0.0), 4),
+            initial_usdt_cost_ves=round(float(row.initial_usdt_cost_ves or 0.0), 2),
+            initial_banks=banks,
+            actual_final_usdt=round(float(row.actual_final_usdt), 4) if row.actual_final_usdt is not None else None,
+            actual_final_banks=row.actual_final_banks,
+            bcv_day1_rate=round(float(bcv_day1 or 0.0), 4),
+            orders_count_in_period=orders_count,
+        )
+
+    # Arrastre automático desde el mes inmediatamente anterior
+    prev_y, prev_m = _prev_year_month(year, month)
+    prev_period = f"{prev_y}-{prev_m:02d}"
+    prev_row = _get_period_balance_row(db, uid, prev_period)
+    if prev_row is not None and (prev_row.actual_final_usdt is not None or prev_row.actual_final_banks):
+        carried_usdt = round(float(prev_row.actual_final_usdt or 0.0), 4)
+        carried_banks = {**base_banks, **(prev_row.actual_final_banks or prev_row.initial_banks)}
+        suggested_cost = round(carried_usdt * bcv_day1, 2) if (carried_usdt > 0 and bcv_day1 > 0) else 0.0
+        return PeriodConfigResponse(
+            period=period,
+            year=year,
+            month=month,
+            source="carried_over",
+            carried_from=prev_period,
+            is_closed=False,
+            is_historical_month=is_historical,
+            initial_usdt=carried_usdt,
+            initial_usdt_cost_ves=suggested_cost,
+            initial_banks=carried_banks,
+            actual_final_usdt=None,
+            actual_final_banks=None,
+            bcv_day1_rate=round(float(bcv_day1 or 0.0), 4),
+            orders_count_in_period=orders_count,
+        )
+
+    prev_snap_q = db.query(FiscalPeriodSnapshot).filter(FiscalPeriodSnapshot.period == prev_period)
+    if uid is not None:
+        prev_snap_q = prev_snap_q.filter(FiscalPeriodSnapshot.user_id == uid)
+    prev_snap = prev_snap_q.order_by(FiscalPeriodSnapshot.id.desc()).first()
+    if prev_snap is not None:
+        carried_usdt = round(float(prev_snap.actual_final_balance or 0.0), 4)
+        profile_banks = _canonicalize_bank_map(getattr(current_user, "bank_initial_balances", {}) or {})
+        suggested_cost = round(carried_usdt * bcv_day1, 2) if (carried_usdt > 0 and bcv_day1 > 0) else 0.0
+        return PeriodConfigResponse(
+            period=period,
+            year=year,
+            month=month,
+            source="carried_over",
+            carried_from=prev_period,
+            is_closed=False,
+            is_historical_month=is_historical,
+            initial_usdt=carried_usdt,
+            initial_usdt_cost_ves=suggested_cost,
+            initial_banks={**base_banks, **profile_banks},
+            actual_final_usdt=None,
+            actual_final_banks=None,
+            bcv_day1_rate=round(float(bcv_day1 or 0.0), 4),
+            orders_count_in_period=orders_count,
+        )
+
+    # Mes 1: fallback al perfil de bancos del usuario
+    profile_banks = _canonicalize_bank_map(getattr(current_user, "bank_initial_balances", {}) or {})
+    merged_banks = {**base_banks, **profile_banks}
+    return PeriodConfigResponse(
+        period=period,
+        year=year,
+        month=month,
+        source="profile_default" if profile_banks else "empty",
+        carried_from=None,
+        is_closed=False,
+        is_historical_month=is_historical,
+        initial_usdt=0.0,
+        initial_usdt_cost_ves=0.0,
+        initial_banks=merged_banks,
+        actual_final_usdt=None,
+        actual_final_banks=None,
+        bcv_day1_rate=round(float(bcv_day1 or 0.0), 4),
+        orders_count_in_period=orders_count,
+    )
+
+
+@router.put("/period-config", response_model=PeriodConfigResponse)
+def save_period_config(
+    payload: PeriodConfigUpdateRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+) -> PeriodConfigResponse:
+    """Guarda saldos de apertura y/o arqueo final real aislados para un período YYYY-MM."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    period = f"{payload.year}-{payload.month:02d}"
+    clean_init_banks = _canonicalize_bank_map(payload.initial_banks)
+    clean_final_banks = (
+        _canonicalize_bank_map(payload.actual_final_banks)
+        if payload.actual_final_banks is not None
+        else None
+    )
+
+    row = _get_period_balance_row(db, uid, period)
+    if row is None:
+        row = AccountingPeriodBalance(
+            user_id=uid,
+            period=period,
+            initial_usdt=round(float(payload.initial_usdt), 4),
+            initial_usdt_cost_ves=round(float(payload.initial_usdt_cost_ves), 2),
+            initial_banks_json=json.dumps(clean_init_banks, ensure_ascii=False),
+            actual_final_usdt=(
+                round(float(payload.actual_final_usdt), 4)
+                if payload.actual_final_usdt is not None
+                else None
+            ),
+            actual_final_banks_json=(
+                json.dumps(clean_final_banks, ensure_ascii=False)
+                if clean_final_banks is not None
+                else None
+            ),
+            is_closed=bool(payload.mark_closed) if payload.mark_closed is not None else False,
+        )
+        db.add(row)
+    else:
+        row_obj: Any = row
+        row_obj.initial_usdt = round(float(payload.initial_usdt), 4)
+        row_obj.initial_usdt_cost_ves = round(float(payload.initial_usdt_cost_ves), 2)
+        row_obj.initial_banks_json = json.dumps(clean_init_banks, ensure_ascii=False)
+        if payload.actual_final_usdt is not None:
+            row_obj.actual_final_usdt = round(float(payload.actual_final_usdt), 4)
+        if clean_final_banks is not None:
+            row_obj.actual_final_banks_json = json.dumps(clean_final_banks, ensure_ascii=False)
+        if payload.mark_closed is not None:
+            row_obj.is_closed = bool(payload.mark_closed)
+    db.commit()
+
+    return get_period_config(year=payload.year, month=payload.month, db=db, current_user=current_user)
 
 
 class LiveBalanceResponse(BaseModel):
@@ -386,7 +625,26 @@ def _build_accounting_export_context(
     end_dt = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
 
     entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
-    ledgers = engine.get_monthly_ledger_report(year=year, month=month)
+
+    period_cfg = get_period_config(year=year, month=month, db=db, current_user=current_user)
+    initial_ves = round(sum(float(v or 0.0) for v in period_cfg.initial_banks.values()), 2)
+    initial_usdt = round(float(period_cfg.initial_usdt or 0.0), 4)
+    initial_usdt_cost_ves = round(float(period_cfg.initial_usdt_cost_ves or 0.0), 2)
+    actual_final_usdt = period_cfg.actual_final_usdt
+    actual_final_ves = (
+        round(sum(float(v or 0.0) for v in period_cfg.actual_final_banks.values()), 2)
+        if period_cfg.actual_final_banks is not None
+        else None
+    )
+
+    ledgers = engine.get_monthly_ledger_report(
+        year=year,
+        month=month,
+        initial_balances={
+            engine.ACCOUNT_BANCO_VES: initial_ves,
+            engine.ACCOUNT_USDT_ASSET: initial_usdt_cost_ves,
+        },
+    )
 
     def _to_vet_ym(dt: datetime | None) -> tuple[int, int] | None:
         if not dt:
@@ -417,10 +675,15 @@ def _build_accounting_export_context(
         "vouchers": vouchers,
         "orders": period_orders,
         "tax_results": period_tax_results,
-        "bcv_rate": bcv_rate,
+        "bcv_rate": bcv_rate or (period_cfg.bcv_day1_rate if period_cfg.bcv_day1_rate > 0 else None),
         "account_holder": holder,
         "tax_id": tax_id,
         "period": f"{year}-{month:02d}",
+        "initial_usdt": initial_usdt,
+        "initial_usdt_cost_ves": initial_usdt_cost_ves,
+        "initial_ves": initial_ves,
+        "actual_final_usdt": actual_final_usdt,
+        "actual_final_ves": actual_final_ves,
     }
 
 
@@ -431,7 +694,7 @@ def export_accounting_excel(
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
 ) -> FileResponse:
-    """Exporta el reporte contable integral del operador en 6 pestañas conformes con SENIAT (.xlsx)."""
+    """Exporta el reporte contable integral del operador en 7 pestañas conformes con SENIAT / VEN-NIF 12 (.xlsx)."""
     ctx = _build_accounting_export_context(db, current_user, year, month)
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_p2p_{year}_{month:02d}.xlsx")
@@ -447,6 +710,11 @@ def export_accounting_excel(
         rif=ctx["tax_id"],
         period=ctx["period"],
         bcv_rate=ctx["bcv_rate"],
+        initial_usdt=ctx["initial_usdt"],
+        initial_usdt_cost_ves=ctx["initial_usdt_cost_ves"],
+        initial_ves=ctx["initial_ves"],
+        actual_final_usdt=ctx["actual_final_usdt"],
+        actual_final_ves=ctx["actual_final_ves"],
     )
 
     return FileResponse(
@@ -478,7 +746,13 @@ def export_accounting_pdf(
         vouchers=ctx["vouchers"],
         output_path=file_path,
         tax_results=ctx["tax_results"],
+        orders=ctx["orders"],
         period=ctx["period"],
+        initial_usdt=ctx["initial_usdt"],
+        initial_usdt_cost_ves=ctx["initial_usdt_cost_ves"],
+        initial_ves=ctx["initial_ves"],
+        actual_final_usdt=ctx["actual_final_usdt"],
+        actual_final_ves=ctx["actual_final_ves"],
     )
 
     return FileResponse(
@@ -630,27 +904,38 @@ def create_manual_voucher(
 
 
 @router.post("/vouchers/upload")
-
-async def upload_voucher(
+def upload_voucher(
     file: Annotated[UploadFile, File()],
     db: Annotated[Session, Depends(get_db)] = None,  # type: ignore[assignment]
     current_user: Annotated[User, Depends(require_trader)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Carga un capture de comprobante bancario, ejecuta OCR multimodal y auto-concilia."""
-    content = await file.read()
-    if not content:
+    content = read_upload_bounded(file, MAX_VOUCHER_UPLOAD_BYTES)
+
+    raw_hint = (file.filename or file.content_type or "").lower()
+    is_pdf = raw_hint.endswith(".pdf") or "pdf" in raw_hint or content[:64].lstrip().startswith(b"%PDF-")
+    try:
+        if is_pdf:
+            validate_pdf_safety(content)
+            clean_bytes = content
+            clean_mime = "application/pdf"
+        else:
+            clean_img = sanitize_and_load_image(content, file.filename or (file.content_type or ""))
+            clean_bytes = image_to_clean_png_bytes(clean_img)
+            clean_mime = "image/png"
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Archivo de comprobante vacío.",
-        )
+            detail=str(exc),
+        ) from exc
 
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     ocr = BankReceiptOCR()
     try:
         voucher, matched_order = ocr.process_and_save_voucher(
-            image_bytes=content,
+            image_bytes=clean_bytes,
             db=db,
-            mime_type=file.content_type or "image/jpeg",
+            mime_type=clean_mime,
             user_id=uid,
         )
     except ValueError as exc:
@@ -717,19 +1002,8 @@ def preview_bank_statement(
     column_mapping_json: Annotated[str | None, Form()] = None,
     year_hint: Annotated[int | None, Form()] = None,
 ) -> StatementPreviewResponse:
-    """Analiza un estado de cuenta bancario (PDF/XLSX/CSV/TXT), verifica saldo y sugiere conciliación."""
-    content = file.file.read(MAX_STATEMENT_BYTES + 1)
-    if not content:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El archivo de estado de cuenta está vacío.",
-        )
-    if len(content) > MAX_STATEMENT_BYTES:
-        max_mb = MAX_STATEMENT_BYTES // (1024 * 1024)
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"El archivo supera el límite máximo permitido de {max_mb} MB.",
-        )
+    """Analiza un estado de cuenta bancario (PDF/PNG/JPG/WEBP/XLSX/XLS/CSV/TXT), verifica saldo y sugiere conciliación."""
+    content = read_upload_bounded(file, MAX_STATEMENT_BYTES)
 
     col_map: dict[str, str] | None = None
     if column_mapping_json and column_mapping_json.strip():

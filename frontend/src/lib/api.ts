@@ -687,10 +687,20 @@ export async function getOrders(params: {
   return apiRequest<OrderListResponse>(`/api/orders?${query.toString()}`);
 }
 
-export async function syncOrders(days = 30, trade_type?: string): Promise<any> {
+export async function syncOrders(
+  days = 30,
+  trade_type?: string,
+  year?: number,
+  month?: number
+): Promise<any> {
   return apiRequest("/api/orders/sync", {
     method: "POST",
-    body: JSON.stringify({ days, trade_type }),
+    body: JSON.stringify({
+      days,
+      trade_type,
+      year: year ?? undefined,
+      month: month ?? undefined,
+    }),
   });
 }
 
@@ -1427,6 +1437,50 @@ export async function matchVoucherWithOrder(voucherId: number, orderNumber: stri
   return apiRequest(`/api/accounting/vouchers/${voucherId}/match`, {
     method: "POST",
     body: JSON.stringify({ order_number: orderNumber }),
+  });
+}
+
+export interface AccountingPeriodConfig {
+  period: string;
+  year: number;
+  month: number;
+  source: "saved" | "carried_over" | "profile_default" | "empty";
+  carried_from?: string | null;
+  is_closed: boolean;
+  is_historical_month: boolean;
+  initial_usdt: number;
+  initial_usdt_cost_ves: number;
+  initial_banks: Record<string, number>;
+  actual_final_usdt: number | null;
+  actual_final_banks: Record<string, number> | null;
+  bcv_day1_rate: number;
+  orders_count_in_period: number;
+}
+
+export async function getAccountingPeriodConfig(
+  year: number,
+  month: number
+): Promise<AccountingPeriodConfig> {
+  const query = new URLSearchParams({ year: String(year), month: String(month) });
+  return apiRequest<AccountingPeriodConfig>(
+    `/api/accounting/period-config?${query.toString()}`,
+    { fresh: true }
+  );
+}
+
+export async function saveAccountingPeriodConfig(payload: {
+  year: number;
+  month: number;
+  initial_usdt: number;
+  initial_usdt_cost_ves?: number;
+  initial_banks: Record<string, number>;
+  actual_final_usdt?: number | null;
+  actual_final_banks?: Record<string, number> | null;
+  mark_closed?: boolean;
+}): Promise<AccountingPeriodConfig> {
+  return apiRequest<AccountingPeriodConfig>("/api/accounting/period-config", {
+    method: "PUT",
+    body: JSON.stringify(payload),
   });
 }
 

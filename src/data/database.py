@@ -160,6 +160,18 @@ def init_db() -> None:
                     "Verificación de columna %s.%s: %s", table_name, col_name, err
                 )
 
+    # Sembrar historial oficial BCV local (60 fechas valor) de forma idempotente
+    try:
+        from src.reporting.bcv_history_service import BCVHistoryService
+
+        seed_db = SessionLocal()
+        try:
+            BCVHistoryService(seed_db).seed_historical_rates_if_missing()
+        finally:
+            seed_db.close()
+    except (SQLAlchemyError, OSError, ValueError, ImportError) as err:
+        logging.getLogger("database").debug("Seed BCV histórico diferido: %s", err)
+
 
 _RUNTIME_BOT_PAUSED: bool = False
 _BOT_PAUSED_CACHE: dict[int, tuple[float, bool]] = {}

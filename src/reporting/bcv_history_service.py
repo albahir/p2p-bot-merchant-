@@ -3,8 +3,10 @@ Maneja conversión a huso horario venezolano (UTC-4), reglas de fin de semana (v
 y auto-población retroactiva (backfill) para órdenes históricas de Binance.
 """
 
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,6 +20,7 @@ logger = logging.getLogger("bcv_history_service")
 
 # Zona horaria oficial de Venezuela (UTC-4 permanente)
 VET_TIMEZONE = timezone(timedelta(hours=-4))
+BCV_SEED_FILE = Path(__file__).resolve().parent.parent / "data" / "bcv_rates_seed.json"
 
 
 class BCVHistoryService:
@@ -31,6 +34,60 @@ class BCVHistoryService:
         self.db = db_session
         self.repo = BCVHistoryRepository(self.db)
         self.live_service = bcv_live_service or BCVService()
+        self._seed_checked = False
+
+    def seed_historical_rates_if_missing(self) -> int:
+        """Siembra las tasas históricas oficiales del BCV desde el JSON local sin sobrescribir registros existentes."""
+        self._seed_checked = True
+        if not BCV_SEED_FILE.exists():
+            return 0
+        try:
+            raw_items = json.loads(BCV_SEED_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("No se pudo leer el seed histórico BCV (%s): %s", BCV_SEED_FILE, exc)
+            return 0
+        if not isinstance(raw_items, list):
+            return 0
+
+        existing_rows: list[Any] = self.db.query(BCVRateHistory.fecha_valor).all()
+        existing_dates: set[date] = {
+            cast(date, r[0])
+            for r in existing_rows
+            if r and r[0] is not None
+        }
+        inserted = 0
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            raw_date = str(item.get("fecha_valor") or "").strip()
+            raw_rate = float(item.get("usd_rate") or 0.0)
+            if not raw_date or raw_rate <= 0:
+                continue
+            try:
+                parsed_date = date.fromisoformat(raw_date)
+            except ValueError:
+                continue
+            if parsed_date in existing_dates:
+                continue
+            self.db.add(
+                BCVRateHistory(
+                    fecha_valor=parsed_date,
+                    usd_rate=raw_rate,
+                    source="bcv_official_seed",
+                )
+            )
+            existing_dates.add(parsed_date)
+            inserted += 1
+
+        if inserted > 0:
+            try:
+                self.db.commit()
+                logger.info("Seed BCV histórico completado: %d fechas valor oficiales cargadas.", inserted)
+            except SQLAlchemyError as exc:
+                self.db.rollback()
+                logger.warning("Error persistiendo seed histórico BCV: %s", exc)
+                return 0
+        return inserted
 
     @staticmethod
     def to_venezuela_time(dt: datetime) -> datetime:
@@ -136,6 +193,8 @@ class BCVHistoryService:
 
         # 1. Buscar en la base de datos histórica por Fecha Valor exacta
         record = self.repo.get_rate_by_date(target_date)
+        if not record and not self._seed_checked and self.seed_historical_rates_if_missing() > 0:
+            record = self.repo.get_rate_by_date(target_date)
         if record and record.usd_rate > 0:
             return float(record.usd_rate)
 

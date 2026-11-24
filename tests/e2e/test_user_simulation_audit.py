@@ -354,10 +354,12 @@ def test_orders_upload_bcv_rate_fifo_vs_avg_and_authenticated_exports(sim_env):
     assert up_res.status_code == 200
     assert up_res.json()["orders_inserted"] == 3
 
-    # Verificar que bcv_rate se guardó con la tasa oficial (897.54) y NO en 0.0
+    # Verificar que bcv_rate se guardó con la tasa histórica oficial BCV de cada fecha (y NO en 0.0)
     saved_orders = db.query(Order).order_by(Order.order_number.asc()).all()
     assert len(saved_orders) == 3
-    assert float(saved_orders[2].bcv_rate) == pytest.approx(897.54, rel=1e-3)
+    assert float(saved_orders[0].bcv_rate) == pytest.approx(889.5754, rel=1e-3)
+    assert float(saved_orders[1].bcv_rate) == pytest.approx(891.1054, rel=1e-3)
+    assert float(saved_orders[2].bcv_rate) == pytest.approx(893.2173, rel=1e-3)
 
     # Comparar FIFO vs Costo Promedio (AVG) en /api/fiscal/summary
     with patch("src.reporting.bcv_service.BCVService.fetch_current_rate", return_value=897.54):
@@ -379,13 +381,13 @@ def test_orders_upload_bcv_rate_fifo_vs_avg_and_authenticated_exports(sim_env):
     fifo_data = fifo_res.json()
     avg_data = avg_res.json()
 
-    # FIFO: vende lote 1 (100 USDT @ 1,000 = 100,000) -> ganancia = 5,000 VES (~$5.57 USD)
+    # FIFO: vende lote 1 (100 USDT @ 1,000 = 100,000) -> ganancia = 5,000 VES a tasa BCV del 04/11 (893.2173)
     assert fifo_data["net_profit_ves"] == pytest.approx(5000.0, abs=0.05)
-    assert fifo_data["net_profit_usd"] == pytest.approx(5000.0 / 897.54, abs=0.05)
+    assert fifo_data["net_profit_usd"] == pytest.approx(5000.0 / 893.2173, abs=0.05)
 
-    # AVG: costo promedio ((100,000 + 102,000) / 200 = 1,010) -> ganancia = 4,000 VES (~$4.46 USD)
+    # AVG: costo promedio ((100,000 + 102,000) / 200 = 1,010) -> ganancia = 4,000 VES a tasa BCV del 04/11 (893.2173)
     assert avg_data["net_profit_ves"] == pytest.approx(4000.0, abs=0.05)
-    assert avg_data["net_profit_usd"] == pytest.approx(4000.0 / 897.54, abs=0.05)
+    assert avg_data["net_profit_usd"] == pytest.approx(4000.0 / 893.2173, abs=0.05)
 
     # Exportación autenticada por Bearer
     exp_xlsx = _request(app, "GET", "/api/orders/export?format=xlsx", headers=headers)
@@ -475,13 +477,23 @@ def test_accounting_ocr_hash_chain_multi_bank_and_close_month_persistence(sim_en
         movement_type="DEBIT",
         date_time="2026-11-05 12:05:00",
     )
+    import io
+
+    from PIL import Image
+
+    def _make_valid_jpeg(rgb: tuple[int, int, int]) -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", (4, 4), color=rgb).save(buf, format="JPEG")
+        return buf.getvalue()
+
+    valid_jpeg_1 = _make_valid_jpeg((255, 255, 255))
     with patch("src.integrations.receipt_ocr.BankReceiptOCR.extract_from_image", return_value=ocr_buy):
         v1_res = _request(
             app,
             "POST",
             "/api/accounting/vouchers/upload",
             headers=headers,
-            files={"file": ("recibo_banesco.jpg", b"valid_img_1", "image/jpeg")},
+            files={"file": ("recibo_banesco.jpg", valid_jpeg_1, "image/jpeg")},
         )
     assert v1_res.status_code == 200
     assert v1_res.json()["verification_status"] == "MATCHED"
@@ -499,13 +511,14 @@ def test_accounting_ocr_hash_chain_multi_bank_and_close_month_persistence(sim_en
         movement_type="CREDIT",
         date_time="2026-11-05 16:05:00",
     )
+    valid_jpeg_2 = _make_valid_jpeg((240, 240, 240))
     with patch("src.integrations.receipt_ocr.BankReceiptOCR.extract_from_image", return_value=ocr_sell):
         v2_res = _request(
             app,
             "POST",
             "/api/accounting/vouchers/upload",
             headers=headers,
-            files={"file": ("recibo_mercantil.jpg", b"valid_img_2", "image/jpeg")},
+            files={"file": ("recibo_mercantil.jpg", valid_jpeg_2, "image/jpeg")},
         )
     assert v2_res.status_code == 200
     assert v2_res.json()["verification_status"] == "MATCHED"
