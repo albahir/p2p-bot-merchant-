@@ -15,6 +15,7 @@ concurrency:
 permissions:
   contents: read
   security-events: write
+  actions: read
 
 jobs:
   gitleaks:
@@ -47,12 +48,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: python
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:python"
 
@@ -77,18 +78,18 @@ jobs:
           pip-audit -r requirements.txt --format json --output pip-audit.json || {
             echo "Evaluando severidad de vulnerabilidades detectadas..."
             python -c "
-import json, sys
-try:
-    data = json.load(open('pip-audit.json'))
-    vulns = [v for pkg in data.get('dependencies', []) for v in pkg.get('vulns', [])]
-    crit = [v for v in vulns if any(fix in v.get('aliases', []) for fix in ['GHSA', 'CVE'])]
-    if crit:
-        print(f'Vulnerabilidades criticas encontradas: {len(crit)}')
-        sys.exit(1)
-except Exception as e:
-    print(f'Error procesando pip-audit: {e}')
-    sys.exit(1)
-"
+          import json, sys
+          try:
+              data = json.load(open('pip-audit.json'))
+              vulns = [v for pkg in data.get('dependencies', []) for v in pkg.get('vulns', [])]
+              crit = [v for v in vulns if any(fix in v.get('aliases', []) for fix in ['GHSA', 'CVE'])]
+              if crit:
+                  print(f'Vulnerabilidades criticas encontradas: {len(crit)}')
+                  sys.exit(1)
+          except Exception as e:
+              print(f'Error procesando pip-audit: {e}')
+              sys.exit(1)
+          "
           }
 
       - name: Upload Audit Report
@@ -97,3 +98,121 @@ except Exception as e:
         with:
           name: pip-audit-results
           path: pip-audit.json
+
+  trivy-fs-and-config:
+    name: Trivy Dependencies (Node/Python) & Docker Config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Trivy (GPG-Signed Official Repo)
+        uses: ./.github/actions/setup-trivy
+
+      - name: Scan Filesystem Dependencies (frontend/ & Python)
+        run: |
+          echo "### Trivy Filesystem Vulnerabilities (HIGH / CRITICAL, fixables)" >> "$GITHUB_STEP_SUMMARY"
+          trivy fs . --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format sarif --output trivy-fs.sarif --exit-code 0
+          trivy fs . --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format table --output trivy-fs.txt --exit-code 0
+          cat trivy-fs.txt
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat trivy-fs.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan Docker & IaC Misconfigurations (docker/ & workflows)
+        run: |
+          echo "### Trivy Misconfiguration Audit (HIGH / CRITICAL)" >> "$GITHUB_STEP_SUMMARY"
+          trivy config . --severity HIGH,CRITICAL --format sarif --output trivy-config.sarif --exit-code 0
+          trivy config . --severity HIGH,CRITICAL --format table --output trivy-config.txt --exit-code 0
+          cat trivy-config.txt
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat trivy-config.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Trivy FS SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Upload Trivy Config SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
+      - name: Upload Trivy FS & Config Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-and-config-reports
+          path: |
+            trivy-fs.sarif
+            trivy-fs.txt
+            trivy-config.sarif
+            trivy-config.txt
+
+  trivy-docker-images:
+    name: Trivy Container Images (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: docker/Dockerfile.api
+          - service: engine
+            dockerfile: docker/Dockerfile.engine
+          - service: frontend
+            dockerfile: docker/Dockerfile.frontend
+          - service: dashboard
+            dockerfile: docker/Dockerfile.dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Container Image (${{ matrix.service }})
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: p2p-${{ matrix.service }}:scan
+
+      - name: Setup Trivy (GPG-Signed Official Repo)
+        uses: ./.github/actions/setup-trivy
+
+      - name: Scan Image Vulnerabilities (HIGH / CRITICAL, fixables)
+        env:
+          SERVICE_NAME: ${{ matrix.service }}
+          DOCKERFILE_PATH: ${{ matrix.dockerfile }}
+        run: |
+          echo "### Trivy Image Scan: ${SERVICE_NAME} (${DOCKERFILE_PATH})" >> "$GITHUB_STEP_SUMMARY"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format sarif --output "trivy-image-${SERVICE_NAME}.sarif" --exit-code 0 "p2p-${SERVICE_NAME}:scan"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format table --output "trivy-image-${SERVICE_NAME}.txt" --exit-code 0 "p2p-${SERVICE_NAME}:scan"
+          cat "trivy-image-${SERVICE_NAME}.txt"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat "trivy-image-${SERVICE_NAME}.txt" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Trivy Image SARIF (${{ matrix.service }})
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image-${{ matrix.service }}.sarif
+          category: trivy-image-${{ matrix.service }}
+
+      - name: Upload Trivy Image Report (${{ matrix.service }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-${{ matrix.service }}-report
+          path: |
+            trivy-image-${{ matrix.service }}.sarif
+            trivy-image-${{ matrix.service }}.txt

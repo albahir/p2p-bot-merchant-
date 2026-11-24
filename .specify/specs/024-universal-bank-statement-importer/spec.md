@@ -36,7 +36,8 @@ Construir un **Importador Universal de Estados de Cuenta Bancarios** agnóstico 
 1. **Horario Legal VET (`UTC-4`)**: Las fechas bancarias sin hora (`DD/MM/YYYY`) se normalizan en zona `America/Caracas` (`UTC-4`) para asegurar que operaciones nocturnas del último día del mes pertenezcan al mes fiscal correcto.
 2. **Tolerancia Numérica Universal**: Soporte transparente de separadores venezolanos (`1.234.567,89`) e internacionales (`1,234,567.89`) mediante [`parse_monetary_amount`](file:///c:/p2p-bot-merchant/src/reporting/normalizers.py).
 3. **Regla Fail-Closed (Constitución #2)**:
-   - Rechazar archivos vacíos, corruptos, con extensión/magic bytes incompatibles o superiores al límite seguro (10 MB / 50 páginas / 2,000 filas).
+   - Rechazar archivos vacíos, corruptos, con extensión/magic bytes incompatibles o superiores al límite seguro (15 MB / 150 páginas / 5,000 filas).
+   - Extracción geométrica por coordenadas `(x0, y0, x1, y1)` con `pdfplumber`, agnóstica al orden de columnas, con ensamblado multilínea (incluyendo alineación vertical centrada y cruces entre páginas), detección automática de filas duplicadas de impresión bancaria mediante cuadre matemático de saldo acumulado y respaldo en lotes de páginas para PDFs escaneados.
    - Nunca asentar automáticamente movimientos no P2P como ingresos/costos de criptoactivos; requieren confirmación o quedan excluidos (`IGNORE_NON_P2P`).
    - Impedir `commit` si el período contable ya tiene snapshot cerrado, salvo que las filas pertenezcan a otro período abierto o el cierre no exista.
 4. **Seguridad y Privacidad (`security-review`)**:

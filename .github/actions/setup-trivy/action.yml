@@ -1,0 +1,21 @@
+name: Setup Trivy (GPG Verified)
+description: Instala Trivy desde el repositorio APT oficial firmado por GPG y valida versión >= 0.70.0 (Fail-Closed frente a CVE-2026-33634).
+
+runs:
+  using: composite
+  steps:
+    - name: Install Trivy from GPG-Signed Official Repo
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends wget apt-transport-https gnupg
+        wget -qO - https://get.trivy.dev/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://get.trivy.dev/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends trivy
+        TRIVY_VER="$(trivy --version | awk '/^Version:/ {gsub(/^v/, "", $2); print $2}')"
+        echo "Trivy version installed: ${TRIVY_VER}"
+        dpkg --compare-versions "${TRIVY_VER}" ge "0.70.0" || {
+          echo "FAIL-CLOSED: Versión insegura o desactualizada de Trivy (${TRIVY_VER} < 0.70.0)."
+          exit 1
+        }
