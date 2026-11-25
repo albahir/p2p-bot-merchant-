@@ -1845,11 +1845,34 @@ export async function previewBankStatement(
 
   const maxWaitMs = 12 * 60 * 1000;
   const startedAt = Date.now();
+  let consecutiveNetworkErrors = 0;
   while (Date.now() - startedAt < maxWaitMs) {
-    const job = await apiRequest<StatementPreviewJobStatusResponse>(
-      `/api/accounting/statements/preview/jobs/${encodeURIComponent(started.job_id)}`,
-      { method: "GET", fresh: true, cacheTtlMs: 0 }
-    );
+    let job: StatementPreviewJobStatusResponse;
+    try {
+      job = await apiRequest<StatementPreviewJobStatusResponse>(
+        `/api/accounting/statements/preview/jobs/${encodeURIComponent(started.job_id)}`,
+        { method: "GET", fresh: true, cacheTtlMs: 0 }
+      );
+      consecutiveNetworkErrors = 0;
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      const isTransient =
+        err instanceof TypeError ||
+        /failed to fetch|networkerror|load failed|HTTP 502|HTTP 503|HTTP 504|HTTP 524/i.test(msg);
+      consecutiveNetworkErrors += 1;
+      if (!isTransient || consecutiveNetworkErrors >= 6) {
+        throw err;
+      }
+      if (options?.onProgress) {
+        options.onProgress({
+          pagesDone: 0,
+          pagesTotal: 0,
+          stage: `Reconectando (${consecutiveNetworkErrors}/5)`,
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      continue;
+    }
     if (options?.onProgress) {
       options.onProgress({
         pagesDone: job.pages_done || 0,

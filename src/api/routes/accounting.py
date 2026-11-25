@@ -1174,7 +1174,8 @@ class StatementPreviewJobStatusResponse(BaseModel):
 _STATEMENT_PREVIEW_JOBS: dict[str, dict[str, Any]] = {}
 _STATEMENT_PREVIEW_JOBS_LOCK = threading.Lock()
 _STATEMENT_JOB_TTL_SECONDS = 900.0
-_STATEMENT_JOB_MAX_ITEMS = 32
+_STATEMENT_JOB_DELIVERED_TTL_SECONDS = 60.0
+_STATEMENT_JOB_MAX_ITEMS = 8
 
 
 def _prune_statement_preview_jobs(now_ts: float) -> None:
@@ -1183,6 +1184,10 @@ def _prune_statement_preview_jobs(now_ts: float) -> None:
         jid
         for jid, info in _STATEMENT_PREVIEW_JOBS.items()
         if (now_ts - float(info.get("updated_at", 0.0))) > _STATEMENT_JOB_TTL_SECONDS
+        or (
+            info.get("delivered_at") is not None
+            and (now_ts - float(info["delivered_at"])) > _STATEMENT_JOB_DELIVERED_TTL_SECONDS
+        )
     ]
     for jid in expired:
         _STATEMENT_PREVIEW_JOBS.pop(jid, None)
@@ -1351,6 +1356,15 @@ def start_preview_bank_statement_job(
                 progress_callback=_on_progress,
             )
             payload = _build_statement_preview_response(res)
+            import logging
+
+            logging.getLogger("accounting_route").info(
+                "Preview asíncrono completado: job=%s banco=%s filas=%d metodo=%s",
+                job_id[:8],
+                payload.bank_name,
+                payload.total_rows,
+                payload.extraction_method,
+            )
             with _STATEMENT_PREVIEW_JOBS_LOCK:
                 info = _STATEMENT_PREVIEW_JOBS.get(job_id)
                 if info is not None:
@@ -1402,6 +1416,8 @@ def get_preview_bank_statement_job(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Trabajo de análisis no encontrado o expirado.",
             )
+        if info["status"] in ("COMPLETED", "FAILED") and info.get("delivered_at") is None:
+            info["delivered_at"] = time.monotonic()
         return StatementPreviewJobStatusResponse(
             job_id=job_id,
             status=info["status"],
