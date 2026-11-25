@@ -7,7 +7,7 @@ Calcula ISLR mediante FIFOCostMethod con inventario inicial valorado a tasa BCV.
 import calendar
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import and_, or_
@@ -75,14 +75,36 @@ class FiscalReconciler:
         self.voucher_repo = BankVoucherRepository(self.db, user_id=user_id)
 
     @staticmethod
-    def _parse_period_dates(period: str) -> tuple[datetime, datetime]:
-        """Convierte una cadena YYYY-MM en tupla (start_datetime, end_datetime) UTC."""
+    def _parse_period_dates(
+        period: str,
+        cutoff_start_date: date | None = None,
+    ) -> tuple[datetime, datetime]:
+        """Convierte una cadena YYYY-MM en tupla (start_datetime, end_datetime) UTC respetando corte VET opcional."""
         parts = period.split("-")
         if len(parts) != 2:
             raise ValueError(f"Formato de período inválido '{period}'. Debe ser 'YYYY-MM'.")
         year = int(parts[0])
         month = int(parts[1])
         _, last_day = calendar.monthrange(year, month)
+
+        if (
+            cutoff_start_date is not None
+            and cutoff_start_date.year == year
+            and cutoff_start_date.month == month
+            and cutoff_start_date.day > 1
+        ):
+            vet_tz = timezone(timedelta(hours=-4))
+            start_dt = (
+                datetime(year, month, cutoff_start_date.day, 0, 0, 0, tzinfo=vet_tz)
+                .astimezone(UTC)
+                .replace(tzinfo=None)
+            )
+            end_dt = (
+                datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz)
+                .astimezone(UTC)
+                .replace(tzinfo=None)
+            )
+            return start_dt, end_dt
 
         start_dt = datetime(year, month, 1, 0, 0, 0, tzinfo=UTC)
         end_dt = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=UTC)
@@ -96,9 +118,10 @@ class FiscalReconciler:
         actual_final_balance: float | None = None,
         asset: str = "USDT",
         cost_method: str = "FIFO",
+        cutoff_start_date: date | None = None,
     ) -> FiscalReconciliationResult:
         """Calcula las 6 piezas fiscales para el período mensual especificado."""
-        start_dt, end_dt = self._parse_period_dates(period)
+        start_dt, end_dt = self._parse_period_dates(period, cutoff_start_date=cutoff_start_date)
 
         # 1. Pieza 1: Saldo Inicial
         if initial_balance is None:

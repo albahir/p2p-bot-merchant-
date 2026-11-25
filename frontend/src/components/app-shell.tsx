@@ -115,9 +115,9 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
 
   const roleBadgeStyle =
     user?.role === "ADMIN"
-      ? "bg-primary-container/15 text-primary border-primary-container/30"
+      ? "bg-primary-container/10 text-primary border-primary-container/25"
       : user?.role === "TRADER"
-      ? "bg-tertiary/15 text-tertiary border-tertiary/30"
+      ? "bg-surface-container-high text-slate-300 border-[#283140]"
       : "bg-slate-800 text-slate-400 border-slate-700";
 
   return (
@@ -339,7 +339,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
             <div className="flex-1 min-w-0 flex items-center gap-1.5 sm:gap-2 overflow-x-auto overscroll-x-contain touch-pan-x no-scrollbar py-1">
               <div className="px-2 sm:px-2.5 py-1 rounded-md bg-surface-container border border-[#1e2430] flex items-center gap-1 sm:gap-1.5 shrink-0">
                 <span className="text-[10px] font-mono uppercase text-slate-400">BCV</span>
-                <span className="text-[11px] sm:text-xs font-mono font-semibold text-secondary tabular-nums">
+                <span className="text-[11px] sm:text-xs font-mono font-semibold text-slate-100 tabular-nums">
                   {bcv?.usd ? `Bs. ${bcv.usd.toFixed(2)}` : "Bs. --"}
                 </span>
               </div>
@@ -349,11 +349,11 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                   <span className="sm:hidden">P2P</span>
                   <span className="hidden sm:inline">USDT/VES</span>
                 </span>
-                <span className="text-[11px] sm:text-xs font-mono font-semibold text-tertiary tabular-nums">
+                <span className="text-[11px] sm:text-xs font-mono font-semibold text-slate-100 tabular-nums">
                   {bcv?.p2p_usdt_ref ? `Bs. ${bcv.p2p_usdt_ref.toFixed(2)}` : "Bs. --"}
                 </span>
                 {typeof bcv?.brecha_pct === "number" && (
-                  <span className="text-[10px] font-mono text-primary hidden sm:inline tabular-nums">
+                  <span className="text-[10px] font-mono text-slate-400 hidden sm:inline tabular-nums">
                     ({bcv.brecha_pct >= 0 ? "+" : ""}
                     {bcv.brecha_pct.toFixed(1)}%)
                   </span>
@@ -387,15 +387,15 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                     : "Pausar motor"
                   : "Estado del motor"
               }
-              className={`px-2 sm:px-2.5 py-1 rounded-md border text-[11px] font-mono font-semibold flex items-center gap-1.5 transition-colors ${
+              className={`px-2 sm:px-2.5 py-1 rounded-md border text-[11px] font-mono font-medium flex items-center gap-1.5 transition-colors ${
                 isPaused
                   ? "bg-error/15 border-error/40 text-error"
-                  : "bg-tertiary/12 border-tertiary/30 text-tertiary"
-              } ${user?.role === "ADMIN" ? "cursor-pointer hover:brightness-110" : "cursor-default"}`}
+                  : "bg-surface-container border-[#1e2430] text-slate-200"
+              } ${user?.role === "ADMIN" ? "cursor-pointer hover:border-slate-600" : "cursor-default"}`}
             >
               <span
-                className={`w-2 h-2 rounded-full ${
-                  isPaused ? "bg-error" : "bg-tertiary animate-pulse"
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isPaused ? "bg-error" : "bg-tertiary"
                 }`}
               />
               <span className="hidden sm:inline">
@@ -408,7 +408,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               type="button"
               onClick={() => setTheme(theme === "dark" ? "dim" : "dark")}
               aria-label={`Cambiar tema (actual: ${theme === "dark" ? "Oscuro" : "Atenuado"})`}
-              className="sm:hidden px-2 py-1 rounded-md bg-surface-container-low border border-[#1e2430] flex items-center gap-1 text-[10px] font-mono font-bold text-primary"
+              className="sm:hidden px-2 py-1 rounded-md bg-surface-container-low border border-[#1e2430] flex items-center gap-1 text-[10px] font-mono font-semibold text-slate-200"
             >
               <span className="material-symbols-outlined text-[14px]">
                 {theme === "dark" ? "dark_mode" : "contrast"}
@@ -422,7 +422,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 onClick={() => setTheme("dark")}
                 className={`px-2 py-1 rounded-md transition-colors ${
                   theme === "dark"
-                    ? "bg-primary-container text-on-primary font-bold"
+                    ? "bg-surface-container-high text-white font-semibold"
                     : "text-slate-400 hover:text-white"
                 }`}
               >
@@ -433,7 +433,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                 onClick={() => setTheme("dim")}
                 className={`px-2 py-1 rounded-md transition-colors ${
                   theme === "dim"
-                    ? "bg-primary-container text-on-primary font-bold"
+                    ? "bg-surface-container-high text-white font-semibold"
                     : "text-slate-400 hover:text-white"
                 }`}
               >

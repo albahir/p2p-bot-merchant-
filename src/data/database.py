@@ -98,6 +98,10 @@ def init_db() -> None:
         ],
         "wallet_movements": [
             ("user_id", "INTEGER"),
+            ("note", "VARCHAR(255)"),
+        ],
+        "accounting_period_balances": [
+            ("cutoff_start_date", "DATE"),
         ],
         "app_users": [
             ("full_name", "VARCHAR(120)"),

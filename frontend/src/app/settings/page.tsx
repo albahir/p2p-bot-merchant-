@@ -85,6 +85,7 @@ export default function SettingsSecurityPage() {
   );
   const [apiKeyInput, setApiKeyInput] = useState<string>("");
   const [secretKeyInput, setSecretKeyInput] = useState<string>("");
+  const [editingBinanceKeys, setEditingBinanceKeys] = useState<boolean>(false);
 
   // Formulario Admin RBAC para pre-autorizar operador por Telegram ID
   const [newTgId, setNewTgId] = useState<string>("");
@@ -249,6 +250,7 @@ export default function SettingsSecurityPage() {
       // Limpieza inmediata de memoria del navegador (Regla Constitucional #5)
       setApiKeyInput("");
       setSecretKeyInput("");
+      setEditingBinanceKeys(false);
       setFeedback({
         type: "success",
         text:
@@ -757,10 +759,10 @@ export default function SettingsSecurityPage() {
           type="button"
           onClick={handleVerifyBinance}
           disabled={verifyingBinance}
-          className="px-3.5 py-1.5 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary text-xs font-mono font-semibold hover:bg-secondary/25 flex items-center gap-1.5"
+          className="px-3.5 py-1.5 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-slate-200 text-xs font-mono font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
         >
           <span
-            className={`material-symbols-outlined text-[16px] ${
+            className={`material-symbols-outlined text-[16px] text-slate-400 ${
               verifyingBinance ? "animate-spin" : ""
             }`}
           >
@@ -805,11 +807,11 @@ export default function SettingsSecurityPage() {
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
               <span className="truncate">Firma API</span>
-              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-tertiary shrink-0">
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-slate-500 shrink-0">
                 enhanced_encryption
               </span>
             </div>
-            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold text-tertiary truncate">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold text-white truncate">
               {binanceStatus?.key_type || keyType}
             </div>
             <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
@@ -820,7 +822,7 @@ export default function SettingsSecurityPage() {
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
               <span className="truncate">Cuota API</span>
-              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-slate-500 shrink-0">
                 speed
               </span>
             </div>
@@ -839,11 +841,11 @@ export default function SettingsSecurityPage() {
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
               <span className="truncate">Latencia</span>
-              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-secondary shrink-0">
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-slate-500 shrink-0">
                 schedule
               </span>
             </div>
-            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold text-secondary tabular-nums truncate">
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold text-white tabular-nums truncate">
               {binanceStatus ? `${binanceStatus.latency_ms} ms` : "-- ms"}
             </div>
             <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
@@ -854,16 +856,19 @@ export default function SettingsSecurityPage() {
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
               <span className="truncate">Motor</span>
-              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
+              <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-slate-500 shrink-0">
                 security
               </span>
             </div>
-            <div
-              className={`mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold truncate ${
-                isPaused ? "text-error" : "text-tertiary"
-              }`}
-            >
-              {isPaused ? "PAUSADO" : "ACTIVO"}
+            <div className="mt-1.5 sm:mt-2 text-base sm:text-lg font-mono font-bold flex items-center gap-2 truncate">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  isPaused ? "bg-error" : "bg-tertiary"
+                }`}
+              />
+              <span className={isPaused ? "text-error" : "text-white"}>
+                {isPaused ? "PAUSADO" : "ACTIVO"}
+              </span>
             </div>
             <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
               API oficial Binance P2P
@@ -877,20 +882,19 @@ export default function SettingsSecurityPage() {
           <section className="lg:col-span-7 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
             <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-[18px] text-primary">
+                <span className="material-symbols-outlined text-[18px] text-slate-400">
                   vpn_key
                 </span>
                 <h2 className="text-sm font-bold text-white">
                   API de Binance
                 </h2>
               </div>
-              <span
-                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                  binanceStatus?.is_configured
-                    ? "bg-tertiary/15 text-tertiary"
-                    : "bg-primary-container/15 text-primary"
-                }`}
-              >
+              <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-[10px] font-mono font-medium text-slate-200 flex items-center gap-1.5">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    binanceStatus?.is_configured ? "bg-tertiary" : "bg-primary"
+                  }`}
+                />
                 {binanceStatus?.is_configured ? "ACTIVA" : "SIN CONFIGURAR"}
               </span>
             </div>
@@ -912,7 +916,7 @@ export default function SettingsSecurityPage() {
                 ).map((perm) => (
                   <span
                     key={perm}
-                    className="px-2 py-0.5 rounded bg-surface-container-high border border-[#1e2430] text-[10px] font-mono text-slate-300"
+                    className="px-2 py-0.5 rounded bg-surface-container-high border border-[#283140] text-[10px] font-mono text-slate-300"
                   >
                     {perm === "READING"
                       ? "LECTURA"
@@ -924,7 +928,26 @@ export default function SettingsSecurityPage() {
               </div>
             </div>
 
+            {binanceStatus?.is_configured && !editingBinanceKeys ? (
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <span className="text-xs text-slate-400">
+                  Credenciales cifradas en bóveda AES-256-GCM.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setEditingBinanceKeys(true)}
+                  className="px-3.5 py-2 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-xs font-medium text-slate-100 transition-colors cursor-pointer shrink-0"
+                >
+                  Cambiar API
+                </button>
+              </div>
+            ) : (
             <form onSubmit={handleSaveBinanceKeys} className="space-y-3.5">
+              {binanceStatus?.is_configured && (
+                <div className="text-xs font-semibold text-slate-200 pt-0.5">
+                  Cambiar API
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
                   Tipo de clave
@@ -935,7 +958,7 @@ export default function SettingsSecurityPage() {
                     onClick={() => setKeyType("Ed25519")}
                     className={`px-3 py-1 rounded-md transition-colors ${
                       keyType === "Ed25519"
-                        ? "bg-primary-container text-on-primary font-bold"
+                        ? "bg-surface-container-high text-white font-semibold"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
@@ -946,7 +969,7 @@ export default function SettingsSecurityPage() {
                     onClick={() => setKeyType("HMAC")}
                     className={`px-3 py-1 rounded-md transition-colors ${
                       keyType === "HMAC"
-                        ? "bg-primary-container text-on-primary font-bold"
+                        ? "bg-surface-container-high text-white font-semibold"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
@@ -970,7 +993,7 @@ export default function SettingsSecurityPage() {
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
                   placeholder="Pega tu API Key"
-                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-slate-500 focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
                 />
               </div>
 
@@ -989,11 +1012,24 @@ export default function SettingsSecurityPage() {
                   value={secretKeyInput}
                   onChange={(e) => setSecretKeyInput(e.target.value)}
                   placeholder="Pega tu clave privada o secreta"
-                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
+                  className="w-full px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-slate-500 focus:outline-hidden text-xs font-mono text-white placeholder:text-slate-500"
                 />
               </div>
 
-              <div className="flex justify-end pt-1">
+              <div className="flex justify-end gap-2 pt-1">
+                {binanceStatus?.is_configured && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingBinanceKeys(false);
+                      setApiKeyInput("");
+                      setSecretKeyInput("");
+                    }}
+                    className="px-3.5 py-2 rounded-lg bg-surface-container border border-[#283140] text-xs text-slate-300 hover:text-white cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                )}
                 <button
                   type="submit"
                   disabled={savingKeys}
@@ -1003,6 +1039,7 @@ export default function SettingsSecurityPage() {
                 </button>
               </div>
             </form>
+            )}
           </section>
 
           {/* Tarjeta 2: Telegram y Seguridad */}
@@ -1010,18 +1047,17 @@ export default function SettingsSecurityPage() {
             <div className="space-y-4">
               <div className="border-b border-[#1e2430] pb-3 flex items-center justify-between">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[18px] text-secondary">
+                  <span className="material-symbols-outlined text-[18px] text-slate-400">
                     send
                   </span>
                   Telegram y seguridad
                 </h2>
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                    telegramStatus?.is_configured
-                      ? "bg-secondary/15 text-secondary"
-                      : "bg-slate-800 text-slate-400"
-                  }`}
-                >
+                <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-[10px] font-mono font-medium text-slate-200 flex items-center gap-1.5">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      telegramStatus?.is_configured ? "bg-tertiary" : "bg-slate-500"
+                    }`}
+                  />
                   {telegramStatus?.is_configured ? "CONECTADO" : "SIN TOKEN"}
                 </span>
               </div>
@@ -1029,13 +1065,13 @@ export default function SettingsSecurityPage() {
               <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430] space-y-2 text-xs font-mono">
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Bot:</span>
-                  <span className="text-white">
+                  <span className="text-slate-100">
                     {telegramStatus?.bot_token_masked || "No configurado"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Tu Telegram:</span>
-                  <span className="text-secondary">
+                  <span className="text-slate-100">
                     {telegramStatus?.linked_chat_id || currentUser.telegram_id || "Sin vincular"}
                   </span>
                 </div>
@@ -1061,8 +1097,13 @@ export default function SettingsSecurityPage() {
                     className="p-2.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center justify-between gap-2"
                   >
                     <span className="text-[11px] text-slate-300">{policy.label}</span>
-                    <span className="px-2 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-mono font-bold shrink-0">
-                      {policy.active ? "ACTIVO" : "INACTIVO"}
+                    <span className="text-[10px] font-mono text-slate-300 flex items-center gap-1.5 shrink-0">
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          policy.active ? "bg-tertiary" : "bg-slate-600"
+                        }`}
+                      />
+                      {policy.active ? "Activo" : "Inactivo"}
                     </span>
                   </div>
                 ))}
@@ -1074,9 +1115,11 @@ export default function SettingsSecurityPage() {
                 type="button"
                 onClick={handleTestTelegram}
                 disabled={testingTelegram}
-                className="w-full px-3.5 py-2 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary text-xs font-mono font-semibold hover:bg-secondary/25 text-center"
+                className={`w-full px-3.5 py-2 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-slate-200 text-xs font-medium text-center transition-colors cursor-pointer ${
+                  currentUser.role !== "ADMIN" ? "sm:col-span-2" : ""
+                }`}
               >
-                {testingTelegram ? "Enviando..." : "Enviar Alerta de Prueba"}
+                {testingTelegram ? "Enviando..." : "Enviar alerta de prueba"}
               </button>
 
               {currentUser.role === "ADMIN" && (
@@ -1084,13 +1127,13 @@ export default function SettingsSecurityPage() {
                   type="button"
                   onClick={handleToggleEmergencyPause}
                   disabled={togglingBot}
-                  className={`w-full px-3.5 py-2 rounded-lg text-xs font-bold text-center ${
+                  className={`w-full px-3.5 py-2 rounded-lg text-xs font-semibold text-center transition-colors cursor-pointer ${
                     isPaused
-                      ? "bg-tertiary text-on-tertiary"
-                      : "bg-error text-on-error"
+                      ? "bg-tertiary-container hover:brightness-110 text-white"
+                      : "bg-[#9c2f2f] hover:bg-[#b03838] text-white"
                   }`}
                 >
-                  {isPaused ? "Reanudar Motor P2P" : "Parada de Emergencia"}
+                  {isPaused ? "Reanudar motor P2P" : "Parada de emergencia"}
                 </button>
               )}
             </div>
@@ -1102,7 +1145,7 @@ export default function SettingsSecurityPage() {
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                <span className="material-symbols-outlined text-[18px] text-primary">
+                <span className="material-symbols-outlined text-[18px] text-slate-400">
                   shield_lock
                 </span>
                 Recuperación de cuenta
@@ -1112,51 +1155,41 @@ export default function SettingsSecurityPage() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-              <span
-                className={`px-2 py-0.5 rounded border ${
-                  currentUser.tax_id
-                    ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
-                    : "bg-surface-container border-[#1e2430] text-slate-400"
-                }`}
-              >
-                {currentUser.tax_id ? `● ${currentUser.tax_id}` : "○ Sin Cédula / RIF"}
+              <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-slate-300 flex items-center gap-1.5">
+                <span className={`w-1.5 h-1.5 rounded-full ${currentUser.tax_id ? "bg-tertiary" : "bg-slate-600"}`} />
+                {currentUser.tax_id ? currentUser.tax_id : "Sin Cédula / RIF"}
               </span>
-              <span
-                className={`px-2 py-0.5 rounded border ${
-                  currentUser.email_verified || recEmailVerifiedToken
-                    ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
-                    : currentUser.email
-                    ? "bg-amber-500/15 border-amber-500/30 text-amber-400"
-                    : "bg-surface-container border-[#1e2430] text-slate-400"
-                }`}
-              >
+              <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-slate-300 flex items-center gap-1.5">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    currentUser.email_verified || recEmailVerifiedToken
+                      ? "bg-tertiary"
+                      : currentUser.email
+                      ? "bg-primary"
+                      : "bg-slate-600"
+                  }`}
+                />
                 {currentUser.email_verified || recEmailVerifiedToken
-                  ? "● Correo Verificado"
+                  ? "Correo verificado"
                   : currentUser.email
-                  ? "● Correo Sin Verificar"
-                  : "○ Sin Correo"}
+                  ? "Correo sin verificar"
+                  : "Sin correo"}
               </span>
-              <span
-                className={`px-2 py-0.5 rounded border ${
-                  currentUser.has_security_question
-                    ? "bg-tertiary/15 border-tertiary/30 text-tertiary"
-                    : "bg-surface-container border-[#1e2430] text-slate-400"
-                }`}
-              >
-                {currentUser.has_security_question
-                  ? "● Pregunta Secreta Activa"
-                  : "○ Sin Pregunta Secreta"}
+              <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-slate-300 flex items-center gap-1.5">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    currentUser.has_security_question ? "bg-tertiary" : "bg-slate-600"
+                  }`}
+                />
+                {currentUser.has_security_question ? "Pregunta activa" : "Sin pregunta"}
               </span>
-              <span
-                className={`px-2 py-0.5 rounded border ${
-                  currentUser.has_recovery_key
-                    ? "bg-primary-container/15 border-primary-container/30 text-primary"
-                    : "bg-surface-container border-[#1e2430] text-slate-400"
-                }`}
-              >
-                {currentUser.has_recovery_key
-                  ? "● Llave Maestra Activa"
-                  : "○ Sin Llave Maestra"}
+              <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-slate-300 flex items-center gap-1.5">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    currentUser.has_recovery_key ? "bg-tertiary" : "bg-slate-600"
+                  }`}
+                />
+                {currentUser.has_recovery_key ? "Llave maestra" : "Sin llave maestra"}
               </span>
             </div>
           </div>

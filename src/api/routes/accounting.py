@@ -4,20 +4,31 @@ import calendar
 import json
 import os
 import tempfile
-from datetime import UTC, datetime, timedelta, timezone
+import time
+import uuid
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
-from src.api.deps import get_db, require_trader
-from src.data.models import AccountingPeriodBalance, BankVoucher, FiscalPeriodSnapshot, Order, User
+from config.settings import Settings
+from src.api.deps import get_db, get_settings, require_trader
+from src.data.models import (
+    AccountingPeriodBalance,
+    BankVoucher,
+    FiscalPeriodSnapshot,
+    Order,
+    User,
+    WalletMovement,
+)
 from src.data.repositories import (
     BankVoucherRepository,
     JournalEntryRepository,
     OrderRepository,
+    WalletMovementRepository,
 )
 from src.integrations.receipt_ocr import BankReceiptOCR
 from src.integrations.statement_importer import (
@@ -98,6 +109,7 @@ class PeriodConfigResponse(BaseModel):
     period: str
     year: int
     month: int
+    cutoff_start_date: str | None = None
     source: Literal["saved", "carried_over", "profile_default", "empty"]
     carried_from: str | None = None
     is_closed: bool = False
@@ -114,6 +126,7 @@ class PeriodConfigResponse(BaseModel):
 class PeriodConfigUpdateRequest(BaseModel):
     year: int = Field(..., ge=2020, le=2100)
     month: int = Field(..., ge=1, le=12)
+    cutoff_start_date: str | None = Field(default=None, description="Fecha opcional de inicio de corte YYYY-MM-DD")
     initial_usdt: float = Field(default=0.0, ge=0.0)
     initial_usdt_cost_ves: float = Field(default=0.0, ge=0.0)
     initial_banks: dict[str, float] = Field(default_factory=dict)
@@ -124,6 +137,49 @@ class PeriodConfigUpdateRequest(BaseModel):
 
 def _prev_year_month(year: int, month: int) -> tuple[int, int]:
     return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def _parse_cutoff_date(raw: str | date | None, year: int, month: int) -> date | None:
+    """Valida que cutoff_start_date sea una fecha válida dentro del período (year, month)."""
+    if raw is None:
+        return None
+    if isinstance(raw, date):
+        parsed = raw
+    else:
+        cleaned = str(raw).strip()
+        if not cleaned:
+            return None
+        try:
+            parsed = date.fromisoformat(cleaned)
+        except ValueError as err:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Fecha de corte inválida. Usa el formato YYYY-MM-DD.",
+            ) from err
+    if parsed.year != year or parsed.month != month:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"La fecha de corte ({parsed.isoformat()}) debe pertenecer al período {year}-{month:02d}.",
+        )
+    return parsed
+
+
+def _period_vet_bounds_utc(
+    year: int,
+    month: int,
+    cutoff_start_date: date | None = None,
+) -> tuple[datetime, datetime]:
+    """Retorna límites UTC (naive) del período en hora VET (UTC-4) respetando corte inicial."""
+    vet_tz = timezone(timedelta(hours=-4))
+    _, last_day = calendar.monthrange(year, month)
+    start_day = (
+        cutoff_start_date.day
+        if (cutoff_start_date is not None and cutoff_start_date.year == year and cutoff_start_date.month == month)
+        else 1
+    )
+    start_utc = datetime(year, month, start_day, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    end_utc = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    return start_utc, end_utc
 
 
 def _canonicalize_bank_map(raw_map: dict[str, float] | None) -> dict[str, float]:
@@ -164,13 +220,19 @@ def get_period_config(
     now_vet = datetime.now(vet_tz)
     is_historical = (year, month) < (now_vet.year, now_vet.month)
 
-    bcv_svc = BCVHistoryService(db)
-    bcv_day1 = bcv_svc.get_rate_for_date(date_cls(year, month, 1))
+    row = _get_period_balance_row(db, uid, period)
+    cutoff_date: date | None = cast(date | None, row.cutoff_start_date) if row is not None else None
+    effective_bcv_date = (
+        cutoff_date
+        if (cutoff_date is not None and cutoff_date.year == year and cutoff_date.month == month)
+        else date_cls(year, month, 1)
+    )
 
-    # Contar órdenes completadas del período en hora VET
-    _, last_day = calendar.monthrange(year, month)
-    start_utc = datetime(year, month, 1, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
-    end_utc = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    bcv_svc = BCVHistoryService(db)
+    bcv_day1 = bcv_svc.get_rate_for_date(effective_bcv_date)
+
+    # Contar órdenes completadas del período en hora VET (respetando fecha de corte)
+    start_utc, end_utc = _period_vet_bounds_utc(year, month, cutoff_date)
     orders_q = db.query(Order).filter(
         Order.order_status == "COMPLETED",
         Order.created_at.between(start_utc, end_utc),
@@ -182,13 +244,13 @@ def get_period_config(
     user_prefs = list(getattr(current_user, "preferred_banks", []) or [])
     base_banks: dict[str, float] = {b: 0.0 for b in user_prefs}
 
-    row = _get_period_balance_row(db, uid, period)
     if row is not None:
         banks = {**base_banks, **row.initial_banks}
         return PeriodConfigResponse(
             period=period,
             year=year,
             month=month,
+            cutoff_start_date=cutoff_date.isoformat() if cutoff_date is not None else None,
             source="saved",
             carried_from=None,
             is_closed=bool(row.is_closed),
@@ -282,6 +344,10 @@ def save_period_config(
     """Guarda saldos de apertura y/o arqueo final real aislados para un período YYYY-MM."""
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     period = f"{payload.year}-{payload.month:02d}"
+    clean_cutoff = _parse_cutoff_date(payload.cutoff_start_date, payload.year, payload.month)
+    # Normalizar día 1 como None (mes completo)
+    if clean_cutoff is not None and clean_cutoff.day == 1:
+        clean_cutoff = None
     clean_init_banks = _canonicalize_bank_map(payload.initial_banks)
     clean_final_banks = (
         _canonicalize_bank_map(payload.actual_final_banks)
@@ -294,6 +360,7 @@ def save_period_config(
         row = AccountingPeriodBalance(
             user_id=uid,
             period=period,
+            cutoff_start_date=clean_cutoff,
             initial_usdt=round(float(payload.initial_usdt), 4),
             initial_usdt_cost_ves=round(float(payload.initial_usdt_cost_ves), 2),
             initial_banks_json=json.dumps(clean_init_banks, ensure_ascii=False),
@@ -312,6 +379,8 @@ def save_period_config(
         db.add(row)
     else:
         row_obj: Any = row
+        if "cutoff_start_date" in payload.model_fields_set:
+            row_obj.cutoff_start_date = clean_cutoff
         row_obj.initial_usdt = round(float(payload.initial_usdt), 4)
         row_obj.initial_usdt_cost_ves = round(float(payload.initial_usdt_cost_ves), 2)
         row_obj.initial_banks_json = json.dumps(clean_init_banks, ensure_ascii=False)
@@ -332,6 +401,8 @@ class LiveBalanceResponse(BaseModel):
     initial_usdt: float
     inflow_usdt: float
     outflow_usdt: float
+    other_inflow_usdt: float = 0.0
+    other_outflow_usdt: float = 0.0
     theoretical_usdt: float
     total_initial_ves: float
     total_inflows_ves: float
@@ -475,10 +546,14 @@ def get_live_balance(
     if explicit_banks:
         init_cfg["banks"] = explicit_banks
 
+    period_row = _get_period_balance_row(db, uid, f"{year}-{month:02d}")
+    cutoff_date = cast(date | None, period_row.cutoff_start_date) if period_row is not None else None
+
     summary = engine.get_live_theoretical_balance(
         year=year,
         month=month,
         initial_balances=init_cfg,
+        cutoff_start_date=cutoff_date,
     )
 
     return LiveBalanceResponse(
@@ -487,6 +562,8 @@ def get_live_balance(
         initial_usdt=summary.initial_usdt,
         inflow_usdt=summary.inflow_usdt,
         outflow_usdt=summary.outflow_usdt,
+        other_inflow_usdt=summary.other_inflow_usdt,
+        other_outflow_usdt=summary.other_outflow_usdt,
         theoretical_usdt=summary.theoretical_usdt,
         total_initial_ves=summary.total_initial_ves,
         total_inflows_ves=summary.total_inflows_ves,
@@ -568,12 +645,15 @@ def get_ledger_summaries(
     y = int(year) if isinstance(year, int) else 2026
     m = int(month) if isinstance(month, int) else 11
     init_b = float(initial_balance) if isinstance(initial_balance, (int, float)) else 0.0
+    period_row = _get_period_balance_row(db, uid, f"{y}-{m:02d}")
+    cutoff_date = cast(date | None, period_row.cutoff_start_date) if period_row is not None else None
     if clean_code:
         summary = engine.calculate_ledger_for_account(
             account_code=clean_code,
             year=y,
             month=m,
             initial_balance=init_b,
+            cutoff_start_date=cutoff_date,
         )
         return [
             LedgerSummaryResponse(
@@ -589,7 +669,7 @@ def get_ledger_summaries(
             )
         ]
 
-    summaries = engine.get_monthly_ledger_report(year=y, month=m)
+    summaries = engine.get_monthly_ledger_report(year=y, month=m, cutoff_start_date=cutoff_date)
     return [
         LedgerSummaryResponse(
             account_code=s.account_code,
@@ -617,16 +697,15 @@ def _build_accounting_export_context(
     journal_repo = JournalEntryRepository(db, user_id=uid)
     voucher_repo = BankVoucherRepository(db, user_id=uid)
     order_repo = OrderRepository(db, user_id=uid)
+    wallet_repo = WalletMovementRepository(db, user_id=uid)
     engine = AccountingEngine(db=db, user_id=uid)
 
-    vet_tz = timezone(timedelta(hours=-4))
-    _, last_day = calendar.monthrange(year, month)
-    start_dt = datetime(year, month, 1, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
-    end_dt = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+    period_cfg = get_period_config(year=year, month=month, db=db, current_user=current_user)
+    cutoff_date = _parse_cutoff_date(period_cfg.cutoff_start_date, year, month)
+    start_dt, end_dt = _period_vet_bounds_utc(year, month, cutoff_date)
 
     entries = journal_repo.list_entries(start_date=start_dt, end_date=end_dt, user_id=uid)
 
-    period_cfg = get_period_config(year=year, month=month, db=db, current_user=current_user)
     initial_ves = round(sum(float(v or 0.0) for v in period_cfg.initial_banks.values()), 2)
     initial_usdt = round(float(period_cfg.initial_usdt or 0.0), 4)
     initial_usdt_cost_ves = round(float(period_cfg.initial_usdt_cost_ves or 0.0), 2)
@@ -644,25 +723,26 @@ def _build_accounting_export_context(
             engine.ACCOUNT_BANCO_VES: initial_ves,
             engine.ACCOUNT_USDT_ASSET: initial_usdt_cost_ves,
         },
+        cutoff_start_date=cutoff_date,
     )
 
-    def _to_vet_ym(dt: datetime | None) -> tuple[int, int] | None:
+    def _in_period_bounds(dt: datetime | None) -> bool:
         if not dt:
-            return None
-        aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
-        v = aware.astimezone(vet_tz)
-        return (v.year, v.month)
+            return False
+        naive_utc = dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo is not None else dt
+        return start_dt <= naive_utc <= end_dt
 
     vouchers = [
         v
         for v in voucher_repo.list_all(user_id=uid)
-        if v.voucher_date is None or _to_vet_ym(cast(datetime | None, v.voucher_date)) == (year, month)
+        if v.voucher_date is None or _in_period_bounds(cast(datetime | None, v.voucher_date))
     ]
 
     all_orders = order_repo.list_completed(user_id=uid)
     all_tax_results = FIFOCostMethod().process_orders(all_orders)
-    period_orders = [o for o in all_orders if _to_vet_ym(cast(datetime | None, o.created_at)) == (year, month)]
-    period_tax_results = [r for r in all_tax_results if _to_vet_ym(r.created_at) == (year, month)]
+    period_orders = [o for o in all_orders if _in_period_bounds(cast(datetime | None, o.created_at))]
+    period_tax_results = [r for r in all_tax_results if _in_period_bounds(r.created_at)]
+    wallet_movements = wallet_repo.list_by_period(start_date=start_dt, end_date=end_dt, user_id=uid)
 
     bcv_vals = [float(o.bcv_rate) for o in period_orders if float(o.bcv_rate or 0.0) > 0]
     bcv_rate = bcv_vals[-1] if bcv_vals else None
@@ -674,6 +754,7 @@ def _build_accounting_export_context(
         "ledgers": ledgers,
         "vouchers": vouchers,
         "orders": period_orders,
+        "wallet_movements": wallet_movements,
         "tax_results": period_tax_results,
         "bcv_rate": bcv_rate or (period_cfg.bcv_day1_rate if period_cfg.bcv_day1_rate > 0 else None),
         "account_holder": holder,
@@ -706,6 +787,7 @@ def export_accounting_excel(
         output_path=file_path,
         tax_results=ctx["tax_results"],
         orders=ctx["orders"],
+        wallet_movements=ctx["wallet_movements"],
         account_holder=ctx["account_holder"],
         rif=ctx["tax_id"],
         period=ctx["period"],
@@ -747,7 +829,9 @@ def export_accounting_pdf(
         output_path=file_path,
         tax_results=ctx["tax_results"],
         orders=ctx["orders"],
+        wallet_movements=ctx["wallet_movements"],
         period=ctx["period"],
+        bcv_rate=ctx["bcv_rate"],
         initial_usdt=ctx["initial_usdt"],
         initial_usdt_cost_ves=ctx["initial_usdt_cost_ves"],
         initial_ves=ctx["initial_ves"],
@@ -1120,4 +1204,286 @@ def commit_bank_statement(
         ignored_rows=res.ignored_rows,
         journal_entries_created=res.journal_entries_created,
         periods_affected=res.periods_affected,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Movimientos USDT no-P2P (Binance Pay / Binance ID / Depósitos / Retiros)
+# ---------------------------------------------------------------------------
+
+_BINANCE_PAY_SYNC_COOLDOWN: dict[int, float] = {}
+_BINANCE_PAY_COOLDOWN_SECONDS = 60.0
+
+
+class WalletMovementItemResponse(BaseModel):
+    id: int
+    movement_type: Literal["DEPOSIT", "WITHDRAWAL"]
+    asset: str
+    amount: float
+    fee: float
+    channel: str
+    counterparty: str | None = None
+    note: str | None = None
+    txid: str | None = None
+    status: str
+    date_vet: str
+
+
+class CreateWalletMovementRequest(BaseModel):
+    movement_type: Literal["DEPOSIT", "WITHDRAWAL"]
+    asset: str = Field(default="USDT", min_length=2, max_length=20)
+    amount: float = Field(..., gt=0.0, le=10_000_000.0)
+    fee: float = Field(default=0.0, ge=0.0, le=100_000.0)
+    channel: Literal["BINANCE_PAY", "BINANCE_ID", "TRC20", "BSC", "INTERNAL", "MANUAL"] = "BINANCE_PAY"
+    counterparty: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=255)
+    date_vet: str | None = Field(default=None, description="Fecha VET YYYY-MM-DD (por defecto hoy VET)")
+
+
+class SyncBinancePayRequest(BaseModel):
+    year: int = Field(..., ge=2020, le=2100)
+    month: int = Field(..., ge=1, le=12)
+
+
+class SyncBinancePayResponse(BaseModel):
+    success: bool
+    fetched: int
+    inserted: int
+    existing: int
+    message: str
+
+
+def _serialize_wallet_movement(m: WalletMovement) -> WalletMovementItemResponse:
+    vet_tz = timezone(timedelta(hours=-4))
+    ts = cast(datetime | None, m.timestamp) or datetime.now(UTC)
+    aware = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts
+    vet_str = aware.astimezone(vet_tz).strftime("%Y-%m-%d %H:%M")
+    m_type_raw = str(m.movement_type or "DEPOSIT").upper()
+    m_type: Literal["DEPOSIT", "WITHDRAWAL"] = "WITHDRAWAL" if m_type_raw == "WITHDRAWAL" else "DEPOSIT"
+    return WalletMovementItemResponse(
+        id=int(cast(int, m.id)),
+        movement_type=m_type,
+        asset=str(m.asset or "USDT").upper(),
+        amount=round(float(m.amount or 0.0), 4),
+        fee=round(float(m.fee or 0.0), 4),
+        channel=str(m.network or "MANUAL"),
+        counterparty=str(m.address) if m.address else None,
+        note=str(m.note) if m.note else None,
+        txid=str(m.txid) if m.txid else None,
+        status=str(m.status or "COMPLETED"),
+        date_vet=vet_str,
+    )
+
+
+@router.get("/wallet-movements", response_model=list[WalletMovementItemResponse])
+def list_wallet_movements(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    year: Annotated[int, Query(ge=2020, le=2100)] = 2026,
+    month: Annotated[int, Query(ge=1, le=12)] = 11,
+) -> list[WalletMovementItemResponse]:
+    """Lista entradas/salidas USDT no-P2P (Binance Pay, Binance ID, depósitos, retiros) del período."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    period_row = _get_period_balance_row(db, uid, f"{year}-{month:02d}")
+    cutoff_date = cast(date | None, period_row.cutoff_start_date) if period_row is not None else None
+    start_dt, end_dt = _period_vet_bounds_utc(year, month, cutoff_date)
+
+    repo = WalletMovementRepository(db, user_id=uid)
+    rows = repo.list_by_period(start_date=start_dt, end_date=end_dt, user_id=uid)
+    return [_serialize_wallet_movement(m) for m in rows]
+
+
+@router.post("/wallet-movements", response_model=WalletMovementItemResponse)
+def create_wallet_movement(
+    payload: CreateWalletMovementRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+) -> WalletMovementItemResponse:
+    """Registra un movimiento manual de USDT (Binance Pay / Binance ID / correo / depósito / retiro)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    vet_tz = timezone(timedelta(hours=-4))
+    if payload.date_vet and payload.date_vet.strip():
+        try:
+            d_obj = date.fromisoformat(payload.date_vet.strip())
+            ts_utc = datetime(d_obj.year, d_obj.month, d_obj.day, 12, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+        except ValueError as err:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Fecha VET inválida. Usa formato YYYY-MM-DD.",
+            ) from err
+    else:
+        ts_utc = datetime.now(UTC).replace(tzinfo=None)
+
+    txid = f"u{uid or 0}:MAN:{uuid.uuid4().hex[:16]}"
+    mov = WalletMovement(
+        user_id=uid,
+        movement_type=payload.movement_type,
+        asset=payload.asset.strip().upper()[:20],
+        amount=round(float(payload.amount), 4),
+        fee=round(float(payload.fee or 0.0), 4),
+        network=payload.channel[:30],
+        txid=txid,
+        address=(payload.counterparty or "").strip()[:128] or None,
+        note=(payload.note or "").strip()[:255] or None,
+        status="COMPLETED",
+        timestamp=ts_utc,
+    )
+    repo = WalletMovementRepository(db, user_id=uid)
+    saved = repo.create(mov)
+    return _serialize_wallet_movement(saved)
+
+
+@router.delete("/wallet-movements/{movement_id}")
+def delete_wallet_movement(
+    movement_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+) -> dict[str, Any]:
+    """Elimina un movimiento de billetera verificando estrictamente la propiedad del usuario (OWASP A01)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    q = db.query(WalletMovement).filter(WalletMovement.id == movement_id)
+    if uid is not None:
+        q = q.filter(WalletMovement.user_id == uid)
+    row = q.first()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Movimiento de billetera no encontrado.",
+        )
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "id": movement_id}
+
+
+@router.post("/wallet-movements/sync-binance-pay", response_model=SyncBinancePayResponse)
+def sync_binance_pay_movements(
+    payload: SyncBinancePayRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SyncBinancePayResponse:
+    """Sincroniza transferencias Binance Pay / Binance ID (solo lectura, con cooldown de 60s por usuario)."""
+    from src.api.routes.settings import _user_binance_key_names
+    from src.core.binance_client import (
+        BinanceAuthError,
+        BinanceP2PClient,
+        BinanceWeightExceededError,
+    )
+    from src.security.api_key_manager import ApiKeyManager
+
+    uid = int(current_user.id) if current_user and current_user.id is not None else 0
+    now_mono = time.monotonic()
+    last_ts = _BINANCE_PAY_SYNC_COOLDOWN.get(uid, 0.0)
+    remaining = _BINANCE_PAY_COOLDOWN_SECONDS - (now_mono - last_ts)
+    if last_ts > 0.0 and remaining > 0.0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Espera {int(remaining) + 1}s antes de volver a sincronizar Binance Pay (protección de cuota API).",
+        )
+
+    k_api, k_priv, _ = _user_binance_key_names(uid or None)
+    try:
+        factory = sessionmaker(bind=db.get_bind())
+        km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
+        api_key = km.get_secret(k_api) or ""
+        private_key = km.get_secret(k_priv) or ""
+    except (KeyError, ValueError, RuntimeError):
+        api_key = ""
+        private_key = ""
+
+    if not api_key or not private_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Configura primero tu API Key de Binance en Configuración.",
+        )
+
+    period_row = _get_period_balance_row(db, uid or None, f"{payload.year}-{payload.month:02d}")
+    cutoff_date = cast(date | None, period_row.cutoff_start_date) if period_row is not None else None
+    start_dt, end_dt = _period_vet_bounds_utc(payload.year, payload.month, cutoff_date)
+    now_utc = datetime.now(UTC).replace(tzinfo=None)
+    eff_end = min(end_dt, now_utc)
+    start_ms = int(start_dt.replace(tzinfo=UTC).timestamp() * 1000)
+    end_ms = max(start_ms + 1000, int(eff_end.replace(tzinfo=UTC).timestamp() * 1000))
+
+    _BINANCE_PAY_SYNC_COOLDOWN[uid] = now_mono
+    client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
+    try:
+        raw_items = client.get_pay_transactions(start_timestamp=start_ms, end_timestamp=end_ms, limit=100)
+    except (BinanceAuthError, BinanceWeightExceededError, RuntimeError, ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo consultar Binance Pay: {exc}",
+        ) from exc
+
+    repo = WalletMovementRepository(db, user_id=uid or None)
+    inserted = 0
+    existing = 0
+
+    for item in raw_items:
+        currency = str(item.get("currency") or "").strip().upper()
+        if not currency:
+            continue
+        try:
+            signed_amt = float(item.get("amount") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if abs(signed_amt) <= 0.0:
+            continue
+
+        raw_txid = str(item.get("transactionId") or item.get("orderId") or "").strip()
+        if not raw_txid:
+            continue
+        scoped_txid = f"u{uid}:PAY:{raw_txid}"[:128]
+        if repo.get_by_txid(scoped_txid, user_id=uid or None) is not None:
+            existing += 1
+            continue
+
+        mov_type = "DEPOSIT" if signed_amt > 0 else "WITHDRAWAL"
+        tx_time_ms = item.get("transactionTime")
+        try:
+            ts_utc = (
+                datetime.fromtimestamp(float(tx_time_ms) / 1000.0, tz=UTC).replace(tzinfo=None)
+                if tx_time_ms
+                else datetime.now(UTC).replace(tzinfo=None)
+            )
+        except (ValueError, TypeError, OverflowError):
+            ts_utc = datetime.now(UTC).replace(tzinfo=None)
+
+        party_info = item.get("payerInfo") if mov_type == "DEPOSIT" else item.get("receiverInfo")
+        counterparty = ""
+        if isinstance(party_info, dict):
+            p_name = str(party_info.get("name") or "").strip()
+            p_bid = str(party_info.get("binanceId") or party_info.get("accountId") or "").strip()
+            counterparty = f"{p_name} ({p_bid})".strip(" ()") if p_name or p_bid else ""
+
+        order_type = str(item.get("orderType") or "PAY").strip().upper()
+        raw_note = str(item.get("note") or "").strip()
+        note_str = f"Binance Pay {order_type}" + (f" · {raw_note}" if raw_note else "")
+
+        mov = WalletMovement(
+            user_id=uid or None,
+            movement_type=mov_type,
+            asset=currency[:20],
+            amount=round(abs(signed_amt), 4),
+            fee=0.0,
+            network="BINANCE_PAY",
+            txid=scoped_txid,
+            address=counterparty[:128] or None,
+            note=note_str[:255],
+            status="COMPLETED",
+            timestamp=ts_utc,
+        )
+        repo.create(mov)
+        inserted += 1
+
+    return SyncBinancePayResponse(
+        success=True,
+        fetched=len(raw_items),
+        inserted=inserted,
+        existing=existing,
+        message=(
+            f"Binance Pay sincronizado: {inserted} movimiento(s) nuevo(s), {existing} ya registrado(s)."
+            if raw_items
+            else "No se encontraron transferencias Binance Pay en este período."
+        ),
     )

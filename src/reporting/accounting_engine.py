@@ -8,12 +8,12 @@ así como la consolidación mensual del Libro Mayor con saldos iniciales y final
 import calendar
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
-from src.data.models import BankVoucher, JournalEntry, Order
+from src.data.models import BankVoucher, JournalEntry, Order, WalletMovement
 from src.data.repositories import JournalEntryRepository, _apply_user_scope
 
 
@@ -58,6 +58,8 @@ class LiveBalanceSummary:
     total_outflows_ves: float
     total_theoretical_ves: float
     bank_breakdown: list[BankBalanceItem]
+    other_inflow_usdt: float = 0.0
+    other_outflow_usdt: float = 0.0
 
 
 
@@ -498,17 +500,47 @@ class AccountingEngine:
 
         return created
 
+    @staticmethod
+    def _period_window(
+        year: int,
+        month: int,
+        cutoff_start_date: date | None = None,
+    ) -> tuple[datetime, datetime]:
+        """Retorna límites (start_date, end_date) respetando corte opcional en hora VET (UTC-4)."""
+        days_in_month = calendar.monthrange(year, month)[1]
+        if (
+            cutoff_start_date is not None
+            and cutoff_start_date.year == year
+            and cutoff_start_date.month == month
+            and cutoff_start_date.day > 1
+        ):
+            vet_tz = timezone(timedelta(hours=-4))
+            start_dt = (
+                datetime(year, month, cutoff_start_date.day, 0, 0, 0, tzinfo=vet_tz)
+                .astimezone(UTC)
+                .replace(tzinfo=None)
+            )
+            end_dt = (
+                datetime(year, month, days_in_month, 23, 59, 59, 999999, tzinfo=vet_tz)
+                .astimezone(UTC)
+                .replace(tzinfo=None)
+            )
+            return start_dt, end_dt
+        return (
+            datetime(year, month, 1, 0, 0, 0),
+            datetime(year, month, days_in_month, 23, 59, 59, 999999),
+        )
+
     def calculate_ledger_for_account(
         self,
         account_code: str,
         year: int,
         month: int,
         initial_balance: float = 0.0,
+        cutoff_start_date: date | None = None,
     ) -> LedgerSummary:
         """Consolida el Libro Mayor para una cuenta contable específica en el mes solicitado."""
-        _, last_day = calendar.monthrange(year, month)
-        start_date = datetime(year, month, 1, 0, 0, 0)
-        end_date = datetime(year, month, last_day, 23, 59, 59, 999999)
+        start_date, end_date = self._period_window(year, month, cutoff_start_date)
 
         entries = self.journal_repo.list_entries(
             start_date=start_date,
@@ -526,7 +558,19 @@ class AccountingEngine:
         else:
             final_balance = initial_balance + total_credit - total_debit
 
-        account_name: str = str(entries[0].account_name) if entries else f"Cuenta {account_code}"
+        default_names = {
+            self.ACCOUNT_BANCO_VES: "Banco Nacional VES",
+            self.ACCOUNT_USDT_ASSET: "Activos Criptográficos - USDT",
+            self.ACCOUNT_BANK_FEE: "Gastos Financieros - Comisiones Bancarias",
+            self.ACCOUNT_BINANCE_FEE: "Gastos Operativos - Comisiones Binance P2P",
+            self.ACCOUNT_UNMATCHED_DEBIT: "Gastos / Egresos Bancarios por Conciliar",
+            self.ACCOUNT_UNMATCHED_CREDIT: "Pasivos / Créditos Bancarios por Conciliar",
+        }
+        account_name: str = (
+            str(entries[0].account_name)
+            if entries
+            else default_names.get(account_code, f"Cuenta {account_code}")
+        )
 
         return LedgerSummary(
             account_code=account_code,
@@ -545,6 +589,7 @@ class AccountingEngine:
         year: int,
         month: int,
         initial_balances: dict[str, float] | None = None,
+        cutoff_start_date: date | None = None,
     ) -> list[LedgerSummary]:
         """Genera el reporte consolidado de Libro Mayor para las principales cuentas del negocio."""
         balances = initial_balances or {}
@@ -563,6 +608,7 @@ class AccountingEngine:
                 year=year,
                 month=month,
                 initial_balance=init_bal,
+                cutoff_start_date=cutoff_start_date,
             )
             summaries.append(summary)
 
@@ -573,6 +619,7 @@ class AccountingEngine:
         year: int,
         month: int,
         initial_balances: dict[str, Any] | None = None,
+        cutoff_start_date: date | None = None,
     ) -> LiveBalanceSummary:
         """Calcula el saldo teórico en tiempo real (Inflow - Outflow) desglosado por banco y USDT."""
         cfg = initial_balances or {}
@@ -587,9 +634,7 @@ class AccountingEngine:
         elif not banks_cfg and "1.1.01" in cfg:
             banks_cfg = {"Banco Principal": float(cfg["1.1.01"])}
 
-        days_in_month = calendar.monthrange(year, month)[1]
-        start_date = datetime(year, month, 1, 0, 0, 0)
-        end_date = datetime(year, month, days_in_month, 23, 59, 59, 999999)
+        start_date, end_date = self._period_window(year, month, cutoff_start_date)
 
         # 1. Movimientos Cripto (USDT) desde órdenes completadas aisladas por usuario
         orders_q = self.db.query(Order).filter(
@@ -608,7 +653,30 @@ class AccountingEngine:
             elif t_type == "SELL":
                 outflow_usdt += c_amount
 
-        theoretical_usdt = round(init_usdt + inflow_usdt - outflow_usdt, 2)
+        # 1b. Movimientos Cripto no-P2P (Binance Pay / Binance ID / Depósitos / Retiros)
+        wm_q = self.db.query(WalletMovement).filter(
+            WalletMovement.timestamp.between(start_date, end_date),
+        )
+        wm_rows = _apply_user_scope(self.db, wm_q, WalletMovement, self.user_id).all()
+        other_inflow_usdt = 0.0
+        other_outflow_usdt = 0.0
+        for m in wm_rows:
+            if str(m.asset or "").upper() != "USDT":
+                continue
+            if str(m.status or "").upper() not in ("COMPLETED", "SUCCESS"):
+                continue
+            m_type = str(m.movement_type or "").upper()
+            amt = float(m.amount or 0.0)
+            fee_amt = float(m.fee or 0.0)
+            if m_type == "DEPOSIT":
+                other_inflow_usdt += amt
+            elif m_type == "WITHDRAWAL":
+                other_outflow_usdt += amt + fee_amt
+
+        theoretical_usdt = round(
+            init_usdt + inflow_usdt + other_inflow_usdt - outflow_usdt - other_outflow_usdt,
+            2,
+        )
 
         # 2. Movimientos Fiat (VES) por banco desde el Libro Diario
         bank_stats: dict[str, dict[str, float]] = {}
@@ -700,5 +768,7 @@ class AccountingEngine:
             total_outflows_ves=round(tot_outflows_ves, 2),
             total_theoretical_ves=tot_theo_ves,
             bank_breakdown=bank_items,
+            other_inflow_usdt=round(other_inflow_usdt, 2),
+            other_outflow_usdt=round(other_outflow_usdt, 2),
         )
 

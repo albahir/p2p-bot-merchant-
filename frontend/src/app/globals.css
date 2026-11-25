@@ -34,7 +34,7 @@ html {
   padding: 0;
   background-color: var(--bg-canvas);
   color-scheme: dark;
-  accent-color: #f59e0b;
+  accent-color: #c98b2c;
   overflow-x: clip;
   overflow-y: scroll;
   scroll-behavior: smooth;
@@ -77,7 +77,7 @@ textarea:user-invalid {
 
 input:required:user-valid,
 select:required:user-valid {
-  border-color: rgba(16, 185, 129, 0.45);
+  border-color: rgba(94, 168, 138, 0.4);
 }
 
 /* Diferir renderizado de bloques pesados fuera de pantalla */
@@ -152,7 +152,7 @@ select:required:user-valid {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #f59e0b;
+  background: #64748b;
 }
 
 /* Eliminar spinners (flechas arriba/abajo) en cualquier input numérico */

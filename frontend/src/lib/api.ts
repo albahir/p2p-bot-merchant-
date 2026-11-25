@@ -691,7 +691,8 @@ export async function syncOrders(
   days = 30,
   trade_type?: string,
   year?: number,
-  month?: number
+  month?: number,
+  start_date?: string | null
 ): Promise<any> {
   return apiRequest("/api/orders/sync", {
     method: "POST",
@@ -700,6 +701,7 @@ export async function syncOrders(
       trade_type,
       year: year ?? undefined,
       month: month ?? undefined,
+      start_date: start_date || undefined,
     }),
   });
 }
@@ -1288,8 +1290,10 @@ export async function saveUserBanksSettings(data: {
 export interface FiscalSummary {
   period: string;
   initial_balance: number;
+  inflows_deposits?: number;
   inflows_p2p_buys: number;
   total_inflows: number;
+  outflows_withdrawals?: number;
   outflows_p2p_sells: number;
   total_outflows: number;
   volume_operated: number;
@@ -1444,6 +1448,7 @@ export interface AccountingPeriodConfig {
   period: string;
   year: number;
   month: number;
+  cutoff_start_date?: string | null;
   source: "saved" | "carried_over" | "profile_default" | "empty";
   carried_from?: string | null;
   is_closed: boolean;
@@ -1471,6 +1476,7 @@ export async function getAccountingPeriodConfig(
 export async function saveAccountingPeriodConfig(payload: {
   year: number;
   month: number;
+  cutoff_start_date?: string | null;
   initial_usdt: number;
   initial_usdt_cost_ves?: number;
   initial_banks: Record<string, number>;
@@ -1481,6 +1487,78 @@ export async function saveAccountingPeriodConfig(payload: {
   return apiRequest<AccountingPeriodConfig>("/api/accounting/period-config", {
     method: "PUT",
     body: JSON.stringify(payload),
+  });
+}
+
+export interface WalletMovementItem {
+  id: number;
+  movement_type: "DEPOSIT" | "WITHDRAWAL";
+  asset: string;
+  amount: number;
+  fee: number;
+  channel: string;
+  counterparty?: string | null;
+  note?: string | null;
+  txid?: string | null;
+  status: string;
+  date_vet: string;
+}
+
+export interface CreateWalletMovementPayload {
+  movement_type: "DEPOSIT" | "WITHDRAWAL";
+  asset?: string;
+  amount: number;
+  fee?: number;
+  channel: "BINANCE_PAY" | "BINANCE_ID" | "TRC20" | "BSC" | "INTERNAL" | "MANUAL";
+  counterparty?: string;
+  note?: string;
+  date_vet?: string;
+}
+
+export interface SyncBinancePayResponse {
+  success: boolean;
+  fetched: number;
+  inserted: number;
+  existing: number;
+  message: string;
+}
+
+export async function listWalletMovements(
+  year: number,
+  month: number
+): Promise<WalletMovementItem[]> {
+  const query = new URLSearchParams({ year: String(year), month: String(month) });
+  return apiRequest<WalletMovementItem[]>(
+    `/api/accounting/wallet-movements?${query.toString()}`,
+    { fresh: true }
+  );
+}
+
+export async function createWalletMovement(
+  payload: CreateWalletMovementPayload
+): Promise<WalletMovementItem> {
+  return apiRequest<WalletMovementItem>("/api/accounting/wallet-movements", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteWalletMovement(
+  movementId: number
+): Promise<{ deleted: boolean; id: number }> {
+  return apiRequest<{ deleted: boolean; id: number }>(
+    `/api/accounting/wallet-movements/${movementId}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function syncBinancePayMovements(
+  year: number,
+  month: number
+): Promise<SyncBinancePayResponse> {
+  return apiRequest<SyncBinancePayResponse>("/api/accounting/wallet-movements/sync-binance-pay", {
+    method: "POST",
+    body: JSON.stringify({ year, month }),
   });
 }
 

@@ -291,6 +291,7 @@ class ExcelReporter:
         output_path: str = "reporte_contable_p2p.xlsx",
         tax_results: list[TradeResult] | None = None,
         orders: list[Order] | None = None,
+        wallet_movements: list[WalletMovement] | None = None,
         account_holder: str | None = None,
         rif: str | None = None,
         period: str | None = None,
@@ -421,15 +422,63 @@ class ExcelReporter:
         init_usdt_cost = round(float(initial_usdt_cost_ves or 0.0), 2)
         if init_usdt_cost <= 0.0 and init_usdt_val > 0.0 and ref_bcv > 0.0:
             init_usdt_cost = round(init_usdt_val * ref_bcv, 2)
-        inventario_final_usdt = round(init_usdt_val + compras_usdt - ventas_usdt, 4)
-        inventario_final_ves = round(max(0.0, init_usdt_cost + compras_ves - costo_ventas_peps), 2)
+
+        wm_usdt = [
+            m
+            for m in (wallet_movements or [])
+            if str(getattr(m, "asset", "") or "").upper() == "USDT"
+            and str(getattr(m, "status", "") or "").upper() in ("COMPLETED", "SUCCESS")
+        ]
+        otros_ingresos_usdt = round(
+            sum(float(m.amount or 0.0) for m in wm_usdt if str(m.movement_type or "").upper() == "DEPOSIT"),
+            4,
+        )
+        otros_egresos_usdt = round(
+            sum(
+                float(m.amount or 0.0) + float(m.fee or 0.0)
+                for m in wm_usdt
+                if str(m.movement_type or "").upper() == "WITHDRAWAL"
+            ),
+            4,
+        )
+        otros_ingresos_ves = round(otros_ingresos_usdt * ref_bcv, 2) if ref_bcv > 0 else 0.0
+        otros_egresos_ves = round(otros_egresos_usdt * ref_bcv, 2) if ref_bcv > 0 else 0.0
+
+        inventario_final_usdt = round(
+            init_usdt_val + compras_usdt + otros_ingresos_usdt - ventas_usdt - otros_egresos_usdt,
+            4,
+        )
+        inventario_final_ves = round(
+            max(0.0, init_usdt_cost + compras_ves + otros_ingresos_ves - costo_ventas_peps - otros_egresos_ves),
+            2,
+        )
 
         kardex_rows: list[dict[str, object]] = [
             {"Concepto": "Saldo Inicial USDT", "Cantidad (USDT)": init_usdt_val, "Valor Referencial (VES)": init_usdt_cost},
             {"Concepto": "(+) Compras P2P USDT", "Cantidad (USDT)": compras_usdt, "Valor Referencial (VES)": compras_ves},
-            {"Concepto": "(-) Ventas P2P USDT", "Cantidad (USDT)": ventas_usdt, "Valor Referencial (VES)": costo_ventas_peps},
-            {"Concepto": "(=) Inventario Final USDT", "Cantidad (USDT)": inventario_final_usdt, "Valor Referencial (VES)": inventario_final_ves},
         ]
+        if otros_ingresos_usdt > 0:
+            kardex_rows.append(
+                {
+                    "Concepto": "(+) Entradas Binance Pay / Depósitos USDT",
+                    "Cantidad (USDT)": otros_ingresos_usdt,
+                    "Valor Referencial (VES)": otros_ingresos_ves,
+                }
+            )
+        kardex_rows.append(
+            {"Concepto": "(-) Ventas P2P USDT", "Cantidad (USDT)": ventas_usdt, "Valor Referencial (VES)": costo_ventas_peps}
+        )
+        if otros_egresos_usdt > 0:
+            kardex_rows.append(
+                {
+                    "Concepto": "(-) Salidas Binance Pay / Retiros USDT",
+                    "Cantidad (USDT)": otros_egresos_usdt,
+                    "Valor Referencial (VES)": otros_egresos_ves,
+                }
+            )
+        kardex_rows.append(
+            {"Concepto": "(=) Inventario Final USDT", "Cantidad (USDT)": inventario_final_usdt, "Valor Referencial (VES)": inventario_final_ves}
+        )
         if actual_final_usdt is not None:
             real_usdt = round(float(actual_final_usdt), 4)
             diff_usdt = round(real_usdt - inventario_final_usdt, 4)
