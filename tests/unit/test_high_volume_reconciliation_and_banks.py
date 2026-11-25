@@ -823,6 +823,7 @@ def test_pdfplumber_flushes_page_cache_and_reports_progress():
         (2, 4, "Leyendo PDF"),
         (3, 4, "Leyendo PDF"),
         (4, 4, "Leyendo PDF"),
+        (4, 4, "Estructurando filas"),
     ]
 
 

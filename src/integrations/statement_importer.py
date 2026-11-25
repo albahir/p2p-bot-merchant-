@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Any, Literal, cast
 
 import httpx
@@ -710,50 +711,78 @@ def _extract_reference(text: str, explicit_ref: str | None = None) -> tuple[str,
     return "S/R", _sanitize_cell_text(compact_text)
 
 
+_HEADER_EXACT_MAP: dict[str, str] = {}
+_HEADER_SUBSTR_LIST: list[tuple[str, str]] = []
+_HEADER_COMPACT_LIST: list[tuple[str, str]] = []
+for _h_role, _h_aliases in _HEADER_SYNONYMS.items():
+    for _h_alias in _h_aliases:
+        _a_clean = re.sub(r"[^a-z0-9 ]", " ", _h_alias).strip()
+        if _a_clean and _a_clean not in _HEADER_EXACT_MAP:
+            _HEADER_EXACT_MAP[_a_clean] = _h_role
+        if len(_a_clean) >= 5:
+            _HEADER_SUBSTR_LIST.append((_a_clean, _h_role))
+        _a_comp = re.sub(r"[^a-z0-9]", "", _h_alias)
+        if len(_a_comp) >= 5:
+            _HEADER_COMPACT_LIST.append((_a_comp, _h_role))
+
+_OCR_HEADER_TYPO_MAP: dict[str, str] = {
+    "ree": "reference",
+    "ref": "reference",
+    "cargs": "debit",
+    "egres0s": "debit",
+    "hgresos": "credit",
+    "ingres0s": "credit",
+    "ssaldo": "balance",
+    "sald0": "balance",
+    "sald0s": "balance",
+}
+
+
+@lru_cache(maxsize=8192)
 def _match_header_role(col_name: str) -> str | None:
+    if not col_name or len(col_name) > 48:
+        return None
     norm = normalize_text(col_name).lower()
     norm_alpha = re.sub(r"[^a-z0-9 ]", " ", norm).strip()
-    for role, aliases in _HEADER_SYNONYMS.items():
-        for alias in aliases:
-            alias_clean = re.sub(r"[^a-z0-9 ]", " ", alias).strip()
-            if norm_alpha == alias_clean or alias_clean in norm_alpha.split():
-                return role
-        # Fallback por inclusión para cabeceras compuestas
-        for alias in aliases:
-            alias_clean = re.sub(r"[^a-z0-9 ]", " ", alias).strip()
-            if len(alias_clean) >= 5 and alias_clean in norm_alpha:
-                return role
+    if not norm_alpha:
+        return None
 
-    # Tolerancia controlada a errores tipográficos leves de OCR en cabeceras (ej. "CARGS", "hgresos", "sSaldo", "Desctipeion")
-    compact = re.sub(r"\s+", "", norm_alpha)
-    if compact and not re.search(r"\d{2}", compact):
-        ocr_header_map: dict[str, str] = {
-            "ree": "reference",
-            "ref": "reference",
-            "cargs": "debit",
-            "egres0s": "debit",
-            "hgresos": "credit",
-            "ingres0s": "credit",
-            "ssaldo": "balance",
-            "sald0": "balance",
-            "sald0s": "balance",
-        }
-        if compact in ocr_header_map:
-            return ocr_header_map[compact]
-        if len(compact) >= 5:
-            best_role: str | None = None
-            best_ratio = 0.0
-            for role, aliases in _HEADER_SYNONYMS.items():
-                for alias in aliases:
-                    alias_c = re.sub(r"[^a-z0-9]", "", alias)
-                    if len(alias_c) < 5:
-                        continue
-                    ratio = SequenceMatcher(None, compact, alias_c).ratio()
-                    if ratio >= 0.80 and ratio > best_ratio:
-                        best_ratio = ratio
-                        best_role = role
-            if best_role is not None:
-                return best_role
+    exact = _HEADER_EXACT_MAP.get(norm_alpha)
+    if exact is not None:
+        return exact
+
+    tokens = norm_alpha.split()
+    for tok in tokens:
+        tok_role = _HEADER_EXACT_MAP.get(tok)
+        if tok_role is not None:
+            return tok_role
+
+    for alias_clean, role in _HEADER_SUBSTR_LIST:
+        if alias_clean in norm_alpha:
+            return role
+
+    # Descarte rápido para números/fechas/montos del cuerpo (ninguna cabecera tiene 2+ dígitos)
+    compact = "".join(tokens)
+    if not compact or re.search(r"\d{2}", compact):
+        return None
+
+    typo_role = _OCR_HEADER_TYPO_MAP.get(compact)
+    if typo_role is not None:
+        return typo_role
+
+    c_len = len(compact)
+    if 5 <= c_len <= 24:
+        best_role: str | None = None
+        best_ratio = 0.0
+        for alias_c, role in _HEADER_COMPACT_LIST:
+            if abs(c_len - len(alias_c)) > 3:
+                continue
+            ratio = SequenceMatcher(None, compact, alias_c).ratio()
+            if ratio >= 0.80 and ratio > best_ratio:
+                best_ratio = ratio
+                best_role = role
+        if best_role is not None:
+            return best_role
     return None
 
 
@@ -1024,6 +1053,10 @@ def _detect_pdf_word_header(
             sc = _header_quality_score(best_cols)
             if best_overall is None or sc > best_overall[0]:
                 best_overall = (sc, i, best_end, best_cols)
+                found_roles = {a.role for a in best_cols}
+                # Corte temprano solo con cabecera completa de movimientos (evita detenerse en mini-tablas como CHEQUES)
+                if i <= 10 and {"date", "concept", "debit", "credit"}.issubset(found_roles):
+                    break
 
     if best_overall is None:
         return None
@@ -2901,6 +2934,9 @@ class BankStatementImporter:
             )
             return [], fallback_bank, default_year, False, [], {}
 
+        if progress_callback is not None:
+            progress_callback(len(pages_words), len(pages_words), "Estructurando filas")
+
         rows, detected_bank, eff_year, warnings, cover_summary = self._extract_rows_from_word_pages(
             pages_words=pages_words,
             filename=filename,
@@ -2908,6 +2944,8 @@ class BankStatementImporter:
             default_year=default_year,
             y_tol=2.6,
         )
+        del pages_words
+        gc.collect()
         return rows, detected_bank, eff_year, True, warnings, cover_summary
 
     def _extract_continuation_text(self, wl: _PdfWordLine, bands: list[_PdfColAnchor]) -> str:
