@@ -831,7 +831,11 @@ def recover_password(
             otp=otp,
             expires_at=expires_at,
         )
-        sent_ok, err_msg = mailer.send_verification_code(to_email=str(user.email), code=otp)
+        sent_ok, err_msg = mailer.send_verification_code(
+            to_email=str(user.email),
+            code=otp,
+            purpose="recovery",
+        )
         if not sent_ok:
             return {
                 "success": False,
