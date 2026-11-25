@@ -757,3 +757,129 @@ def test_surgical_per_page_ocr_only_runs_tesseract_on_problematic_pages():
     # Tesseract NO debe haber corrido en las 4 páginas completas, solo en la zona del descuadre (<= 2 págs)
     assert 0 < len(tess_calls) < 4
     assert 2 in tess_calls
+
+
+def test_pdfplumber_flushes_page_cache_and_reports_progress():
+    """Debe purgar caché de cada página de pdfplumber (anti-OOM 4GB en PDFs largos) y reportar progreso."""
+    from unittest.mock import patch
+
+    import pdfplumber
+
+    pages: list[list[tuple[float, float, str]]] = []
+    running = 1000.0
+    for i in range(4):
+        running = round(running + 100.0, 2)
+        bal = f"{running:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        items: list[tuple[float, float, str]] = []
+        if i == 0:
+            items.append((30, 580, "Banco de Venezuela"))
+        items.extend(
+            [
+                (30, 520, "Fecha"),
+                (110, 520, "Referencia"),
+                (200, 520, "Descripcion"),
+                (450, 520, "Abonos"),
+                (550, 520, "Saldo"),
+                (30, 500, f"0{i + 1}/10/2026"),
+                (110, 500, f"70000{i}"),
+                (200, 500, f"ABONO CLIENTE {i + 1}"),
+                (450, 500, "100,00"),
+                (550, 500, bal),
+            ]
+        )
+        pages.append(items)
+
+    pdf_bytes = _build_landscape_pdf(pages)
+    flushed_pages = {"count": 0}
+    progress_events: list[tuple[int, int, str]] = []
+
+    orig_open = pdfplumber.open
+
+    def _wrapped_open(*args, **kwargs):
+        doc = orig_open(*args, **kwargs)
+        for pg in doc.pages:
+            orig_flush = pg.flush_cache
+
+            def _counting_flush(_orig=orig_flush):
+                flushed_pages["count"] += 1
+                return _orig()
+
+            pg.flush_cache = _counting_flush
+        return doc
+
+    importer = BankStatementImporter()
+    with patch("src.integrations.statement_importer.pdfplumber.open", side_effect=_wrapped_open):
+        preview = importer.parse_bytes(
+            file_bytes=pdf_bytes,
+            filename="bdv_4pags.pdf",
+            progress_callback=lambda d, t, s: progress_events.append((d, t, s)),
+        )
+
+    assert preview.total_rows == 4
+    assert preview.balance_verified is True
+    assert flushed_pages["count"] == 4
+    assert progress_events == [
+        (1, 4, "Leyendo PDF"),
+        (2, 4, "Leyendo PDF"),
+        (3, 4, "Leyendo PDF"),
+        (4, 4, "Leyendo PDF"),
+    ]
+
+
+def test_async_statement_preview_job_completes_and_enforces_user_isolation():
+    """El preview asíncrono debe completar en segundo plano y aislar estrictamente el job_id por user_id (OWASP A01)."""
+    import io as _io
+    import time as _time
+
+    from starlette.datastructures import UploadFile
+
+    from src.api.routes.accounting import (
+        get_preview_bank_statement_job,
+        start_preview_bank_statement_job,
+    )
+
+    db = _make_db()
+    try:
+        u1 = User(username="trader_async_1", password_hash="x", role="TRADER", is_active=True)
+        u2 = User(username="trader_async_2", password_hash="x", role="TRADER", is_active=True)
+        db.add_all([u1, u2])
+        db.commit()
+        db.refresh(u1)
+        db.refresh(u2)
+
+        csv_bytes = (
+            b"Fecha,Referencia,Concepto,Debito,Credito,Saldo\n"
+            b"01/10/2026,99112233,PAGO MOVIL CLIENTE,0,500.00,1500.00\n"
+            b"02/10/2026,99112244,COMISION PAGO MOVIL,1.50,0,1498.50\n"
+        )
+        up = UploadFile(filename="bdv_oct.csv", file=_io.BytesIO(csv_bytes))
+        started = start_preview_bank_statement_job(
+            file=up,
+            db=db,
+            current_user=u1,
+            bank_name="Banco de Venezuela",
+        )
+        assert started.job_id
+
+        # Otro usuario NO puede leer el job ajeno (OWASP A01)
+        with pytest.raises(HTTPException) as exc_info:
+            get_preview_bank_statement_job(job_id=started.job_id, current_user=u2)
+        assert exc_info.value.status_code == 404
+
+        # Esperar finalización del hilo de trabajo
+        final_status = None
+        for _ in range(50):
+            st = get_preview_bank_statement_job(job_id=started.job_id, current_user=u1)
+            if st.status in ("COMPLETED", "FAILED"):
+                final_status = st
+                break
+            _time.sleep(0.05)
+
+        assert final_status is not None
+        assert final_status.status == "COMPLETED"
+        assert final_status.result is not None
+        assert final_status.result.total_rows == 2
+        assert final_status.result.balance_verified is True
+        assert final_status.result.bank_fee_count == 1
+    finally:
+        db.close()

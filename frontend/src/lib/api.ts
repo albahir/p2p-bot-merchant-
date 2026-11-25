@@ -405,12 +405,25 @@ export async function apiRequest<T>(
         localStorage.removeItem("p2p_user");
         _responseCache.clear();
       }
-      let errorDetail = "Error en la petición";
+      let errorDetail = `Error en la petición (HTTP ${response.status})`;
+      if (response.status === 413) {
+        errorDetail = "El archivo supera el tamaño máximo permitido (HTTP 413).";
+      } else if (response.status === 502 || response.status === 503) {
+        errorDetail =
+          "El servidor está reiniciando o saturado temporalmente (HTTP " +
+          response.status +
+          "). Intenta nuevamente en unos segundos.";
+      } else if (response.status === 504 || response.status === 524) {
+        errorDetail =
+          "La operación excedió el tiempo de espera del servidor/proxy (HTTP " +
+          response.status +
+          ").";
+      }
       try {
         const errJson = await response.json();
         errorDetail = formatApiErrorDetail(errJson.detail, errorDetail);
       } catch {
-        // Ignorar fallo de parseo JSON
+        // Ignorar fallo de parseo JSON (ej. 502/524 HTML de proxy)
       }
       throw new Error(errorDetail);
     }
@@ -1780,12 +1793,34 @@ export interface StatementCommitResponse {
   periods_affected: string[];
 }
 
+export interface StatementPreviewProgress {
+  pagesDone: number;
+  pagesTotal: number;
+  stage: string;
+}
+
+interface StatementPreviewJobStartResponse {
+  job_id: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+}
+
+interface StatementPreviewJobStatusResponse {
+  job_id: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+  pages_done: number;
+  pages_total: number;
+  stage: string;
+  error?: string | null;
+  result?: StatementPreviewResponse | null;
+}
+
 export async function previewBankStatement(
   file: File,
   options?: {
     bank_name?: string;
     column_mapping?: Record<string, string>;
     year_hint?: number;
+    onProgress?: (progress: StatementPreviewProgress) => void;
   }
 ): Promise<StatementPreviewResponse> {
   const formData = new FormData();
@@ -1799,10 +1834,38 @@ export async function previewBankStatement(
   if (options?.year_hint) {
     formData.append("year_hint", String(options.year_hint));
   }
-  return apiRequest<StatementPreviewResponse>("/api/accounting/statements/preview", {
-    method: "POST",
-    body: formData,
-  });
+
+  const started = await apiRequest<StatementPreviewJobStartResponse>(
+    "/api/accounting/statements/preview/start",
+    {
+      method: "POST",
+      body: formData,
+    }
+  );
+
+  const maxWaitMs = 12 * 60 * 1000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    const job = await apiRequest<StatementPreviewJobStatusResponse>(
+      `/api/accounting/statements/preview/jobs/${encodeURIComponent(started.job_id)}`,
+      { method: "GET", fresh: true, cacheTtlMs: 0 }
+    );
+    if (options?.onProgress) {
+      options.onProgress({
+        pagesDone: job.pages_done || 0,
+        pagesTotal: job.pages_total || 0,
+        stage: job.stage || "Procesando",
+      });
+    }
+    if (job.status === "COMPLETED" && job.result) {
+      return job.result;
+    }
+    if (job.status === "FAILED") {
+      throw new Error(job.error || "No se pudo leer el estado de cuenta bancario.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  throw new Error("El análisis del estado bancario excedió el tiempo máximo de espera.");
 }
 
 export async function commitBankStatement(data: {

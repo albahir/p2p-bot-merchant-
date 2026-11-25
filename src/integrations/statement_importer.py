@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import copy
 import csv
+import gc
 import io
 import json
 import logging
@@ -20,6 +21,7 @@ import re
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -564,12 +566,12 @@ def _extract_cover_summary(meta_text: str) -> dict[str, float | int | None]:
 
 def _enrich_row_metadata(row: ParsedStatementRow, full_desc: str) -> None:
     """Extrae hora exacta VET, cédula/RIF, beneficiario/contraparte y banco destino desde descripciones ricas (Mercantil/BDV)."""
-    upper = normalize_text(full_desc)
+    upper = " ".join(normalize_text(full_desc).split())[:800]
     if not upper:
         return
 
     # 1. Hora exacta VET: "EL 01-10-26 A LAS 19:19:41 HORAS"
-    m_time = re.search(r"\bA\s+LAS\s+(\d{1,2}:\d{2}:\d{2})\s+HORAS?\b", upper)
+    m_time = re.search(r"\bA LAS (\d{1,2}:\d{2}:\d{2}) HORAS?\b", upper)
     if m_time:
         t_str = m_time.group(1)
         try:
@@ -582,22 +584,22 @@ def _enrich_row_metadata(row: ParsedStatementRow, full_desc: str) -> None:
             pass
 
     # 2. Cédula o RIF del beneficiario/contraparte (ej. "A V90026775", "V-19456789")
-    m_cid = re.search(r"(?<![A-Z0-9])([VEJGP])[\-\s]?(\d{6,10})(?!\d)", upper)
+    m_cid = re.search(r"(?<![A-Z0-9])([VEJGP])[\- ]?(\d{6,10})(?!\d)", upper)
     if m_cid:
         row.sender_id = f"{m_cid.group(1)}-{m_cid.group(2)}"
 
     # 3. Nombre de contraparte / beneficiario en transferencias Mercantil ("A LA CU ENTA DE JESUS FAJARDO ***8921")
     m_cp = re.search(
-        r"(?:A\s+LA|DESDE(?:\s+LA)?)\s+CU\s*ENTA\s+DE\s+([A-Z][A-Z\s]{2,55}?)(?=\s*(?:\*{2,}|\d{3,}|POR\s+BS|REALIZADA|EL\s+\d{2}|$))",
+        r"(?:A LA|DESDE(?: LA)?) CU ?ENTA DE ([A-Z][A-Z ]{2,55}?)(?= ?(?:\*{2,}|\d{3,}|POR BS|REALIZADA|EL \d{2}|$))",
         upper,
     )
     if m_cp:
-        cand_name = re.sub(r"\s+", " ", m_cp.group(1)).strip()
+        cand_name = m_cp.group(1).strip()
         if len(cand_name) >= 3 and cand_name not in ("TERCEROS", "TERCERO"):
             row.counterparty_name = cand_name[:120]
 
     # 4. Banco destino en T-Pago / Crédito Inmediato ("EN BANCAMIGA BANCO UNIVERSAL", "EN BANCO NACIONAL DE CREDITO")
-    m_dbank = re.search(r"\bEN\s+([A-Z0-9\s.,]{3,45}?)(?=\s*(?:POR\s+BS|POR\s+CONCEPTO|EL\s+\d{2}|$))", upper)
+    m_dbank = re.search(r"\bEN ([A-Z0-9 .,]{3,45}?)(?= ?(?:POR BS|POR CONCEPTO|EL \d{2}|$))", upper)
     if m_dbank:
         detected_dest = detect_bank_from_text(m_dbank.group(1))
         if detected_dest:
@@ -683,27 +685,29 @@ def _extract_reference(text: str, explicit_ref: str | None = None) -> tuple[str,
         if ref_clean != "S/R":
             return ref_clean[:50], _sanitize_cell_text(text)
 
+    # Colapsar espacios y acotar longitud para garantizar complejidad lineal O(n) anti-ReDoS (CodeQL)
+    compact_text = " ".join((text or "").split())[:600]
     m_explicit = re.search(
-        r"(?:REF(?:ERENCIA)?\.?|NRO\.?|DOC\.?|SERIAL|#)\s*[:#-]?\s*([A-Za-z0-9]{4,20})",
-        text,
+        r"(?:REF(?:ERENCIA)?\.?|NRO\.?|DOC\.?|SERIAL|#)(?: ?[:#-] ?| ?)([A-Za-z0-9]{4,20})",
+        compact_text,
         re.IGNORECASE,
     )
     if m_explicit:
         ref_val = m_explicit.group(1).strip()
-        cleaned = (text[: m_explicit.start()] + " " + text[m_explicit.end() :]).strip()
-        return ref_val[:50], _sanitize_cell_text(cleaned or text)
+        cleaned = (compact_text[: m_explicit.start()] + " " + compact_text[m_explicit.end() :]).strip()
+        return ref_val[:50], _sanitize_cell_text(cleaned or compact_text)
 
     # Evitar confundir fechas ("EL 01-10-26"), cédulas ("V90026775") o horas ("19:19:41") con números de referencia
-    scrubbed = re.sub(r"\bEL\s+\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b", " ", text, flags=re.IGNORECASE)
+    scrubbed = re.sub(r"\bEL \d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b", " ", compact_text, flags=re.IGNORECASE)
     scrubbed = re.sub(r"\b\d{1,2}:\d{2}:\d{2}\b", " ", scrubbed)
     scrubbed = re.sub(r"\b[VEJGP]-?\d{6,10}\b", " ", scrubbed, flags=re.IGNORECASE)
     m_digits = re.search(r"(?<![\/\.-])\b(\d{5,16})\b(?![\/\.-])", scrubbed)
     if m_digits:
         ref_val = m_digits.group(1)
-        cleaned = re.sub(rf"\b{re.escape(ref_val)}\b", "", text, count=1).strip()
-        return ref_val[:50], _sanitize_cell_text(cleaned or text)
+        cleaned = re.sub(rf"\b{re.escape(ref_val)}\b", "", compact_text, count=1).strip()
+        return ref_val[:50], _sanitize_cell_text(cleaned or compact_text)
 
-    return "S/R", _sanitize_cell_text(text)
+    return "S/R", _sanitize_cell_text(compact_text)
 
 
 def _match_header_role(col_name: str) -> str | None:
@@ -1607,6 +1611,7 @@ class BankStatementImporter:
         bank_name: str | None = None,
         column_mapping: dict[str, str] | None = None,
         year_hint: int | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult:
         """Extrae movimientos bancarios desde PDF, Imagen, Excel o CSV y valida su cuadre matemático."""
         file_type = self._validate_upload(file_bytes, filename)
@@ -1635,6 +1640,7 @@ class BankStatementImporter:
                 filename=filename,
                 bank_name_override=bank_name,
                 default_year=default_year,
+                progress_callback=progress_callback,
             )
 
         if not result.extraction_method.startswith(("PDF_OCR_", "IMAGE_OCR_")):
@@ -1921,6 +1927,7 @@ class BankStatementImporter:
         filename: str,
         bank_name_override: str | None,
         default_year: int,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult:
         try:
             reader = PdfReader(io.BytesIO(file_bytes))
@@ -1946,7 +1953,7 @@ class BankStatementImporter:
         # evita recorrer miles de curvas Bezier en pdfplumber antes de saltar al OCR local.
         has_native_fonts = self._pdf_reader_has_fonts(reader)
         if has_native_fonts:
-            # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra)
+            # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra, RAM acotada)
             (
                 rows,
                 detected_bank,
@@ -1959,6 +1966,7 @@ class BankStatementImporter:
                 filename=filename,
                 bank_name_override=bank_name_override,
                 default_year=default_year,
+                progress_callback=progress_callback,
             )
             warnings.extend(extra_warnings)
             extraction_method = "PDF_PLUMBER_GEOMETRIC"
@@ -1989,6 +1997,9 @@ class BankStatementImporter:
                 if rows:
                     extraction_method = "PDF_LAYOUT_UNIVERSAL"
 
+        # Liberar árbol pypdf antes de pasar a OCR si aplica
+        del reader
+
         # 3. OCR local gratuito y privado en streaming página-por-página (RAM constante + Tesseract quirúrgico)
         if not rows and not has_text_layer:
             ocr_res = self._extract_pdf_with_streaming_dual_ocr(
@@ -1997,6 +2008,7 @@ class BankStatementImporter:
                 bank_name_override=bank_name_override,
                 default_year=eff_year,
                 extra_warnings=warnings,
+                progress_callback=progress_callback,
             )
             if ocr_res is not None and ocr_res.rows:
                 return ocr_res
@@ -2164,6 +2176,7 @@ class BankStatementImporter:
         bank_name_override: str | None,
         default_year: int,
         extra_warnings: list[str],
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult | None:
         """Ejecuta OCR local en streaming página-por-página (RAM constante) con respaldo Tesseract quirúrgico."""
         try:
@@ -2184,6 +2197,8 @@ class BankStatementImporter:
             rapid_pages: list[tuple[list[dict[str, Any]], float]] = []
             rapid_confs: list[float] = []
             for p_idx in range(total_pages):
+                if progress_callback is not None:
+                    progress_callback(p_idx + 1, total_pages, "OCR local")
                 img = _render_single_pdf_page(pdf_doc, p_idx)
                 if img is None:
                     rapid_pages.append(([], 612.0))
@@ -2195,6 +2210,8 @@ class BankStatementImporter:
                     img.close()
                 rapid_pages.append((words, 612.0))
                 rapid_confs.append(float(conf))
+                if (p_idx + 1) % 10 == 0:
+                    gc.collect()
 
             rapid_res, rapid_conf = self._build_ocr_preview_from_pages(
                 pages_words=rapid_pages,
@@ -2821,8 +2838,9 @@ class BankStatementImporter:
         filename: str,
         bank_name_override: str | None,
         default_year: int,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str], dict[str, float | int | None]]:
-        """Extrae palabras vectoriales con pdfplumber y delega al motor geométrico universal."""
+        """Extrae palabras vectoriales con pdfplumber liberando caché por página (evita OOM en PDFs de 250+ págs.)."""
         try:
             pdf_doc = pdfplumber.open(io.BytesIO(file_bytes))
         except (PdfminerException, OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -2837,8 +2855,11 @@ class BankStatementImporter:
         has_any_text = False
         with pdf_doc:
             page_slice = pdf_doc.pages[:MAX_PDF_PAGES]
+            total_pages = len(page_slice)
             for p_idx, page in enumerate(page_slice):
-                words = (
+                if progress_callback is not None:
+                    progress_callback(p_idx + 1, total_pages, "Leyendo PDF")
+                raw_words = (
                     page.extract_words(
                         keep_blank_chars=False,
                         use_text_flow=False,
@@ -2847,11 +2868,29 @@ class BankStatementImporter:
                     )
                     or []
                 )
-                if words:
+                page_w = float(page.width or 612.0)
+                # Conservar únicamente las 5 coordenadas necesarias y purgar caché interna de pdfplumber/pdfminer
+                compact_words = [
+                    {
+                        "text": str(w.get("text", "")),
+                        "x0": float(w.get("x0", 0.0)),
+                        "x1": float(w.get("x1", 0.0)),
+                        "top": float(w.get("top", 0.0)),
+                        "bottom": float(w.get("bottom", 0.0)),
+                    }
+                    for w in raw_words
+                ]
+                if hasattr(page, "flush_cache"):
+                    page.flush_cache()
+                if hasattr(page, "get_textmap") and hasattr(page.get_textmap, "cache_clear"):
+                    page.get_textmap.cache_clear()
+                if compact_words:
                     has_any_text = True
-                pages_words.append((words, float(page.width or 612.0)))
+                pages_words.append((compact_words, page_w))
+                if (p_idx + 1) % 20 == 0:
+                    gc.collect()
                 # Corte temprano si las primeras 5 páginas de un PDF largo no tienen capa de texto
-                if not has_any_text and p_idx >= 4 and len(page_slice) > 10:
+                if not has_any_text and p_idx >= 4 and total_pages > 10:
                     break
 
         if not has_any_text:
@@ -3674,6 +3713,7 @@ class BankStatementImporter:
         bank_name: str | None = None,
         column_mapping: dict[str, str] | None = None,
         year_hint: int | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult:
         """Parsea el estado de cuenta y lo cruza contra órdenes P2P y comprobantes previos del usuario en O(1)."""
         preview = self.parse_bytes(
@@ -3682,9 +3722,12 @@ class BankStatementImporter:
             bank_name=bank_name,
             column_mapping=column_mapping,
             year_hint=year_hint,
+            progress_callback=progress_callback,
         )
         if not preview.rows:
             return preview
+        if progress_callback is not None:
+            progress_callback(1, 1, "Conciliando órdenes P2P")
 
         voucher_repo = BankVoucherRepository(db, user_id=user_id)
         order_repo = OrderRepository(db, user_id=user_id)

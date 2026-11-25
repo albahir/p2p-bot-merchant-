@@ -449,6 +449,16 @@ export default function SheetsSyncPage() {
                   </div>
                 </div>
 
+                {/* Aviso de Uso Limitado de APIs de Google */}
+                <p className="text-[11px] leading-relaxed text-slate-400">
+                  Solo creamos o actualizamos la hoja de Google Sheets que indiques aquí. El uso de
+                  datos de Google cumple con la{" "}
+                  <Link href="/privacy" className="text-primary hover:underline">
+                    Política de Privacidad y Uso Limitado (Limited Use)
+                  </Link>
+                  ; nunca compartimos datos de Google con terceros ni modelos de IA.
+                </p>
+
                 {/* Configuración opcional de API OAuth desde la UI */}
                 <div className="flex items-center justify-between text-[11px]">
                   <span className="text-slate-400 font-mono">

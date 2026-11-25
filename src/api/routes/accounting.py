@@ -3,7 +3,9 @@
 import calendar
 import json
 import os
+import secrets
 import tempfile
+import threading
 import time
 import uuid
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -1154,48 +1156,61 @@ def upload_voucher(
     }
 
 
-@router.post("/statements/preview", response_model=StatementPreviewResponse)
-def preview_bank_statement(
-    file: Annotated[UploadFile, File()],
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_trader)],
-    bank_name: Annotated[str | None, Form()] = None,
-    column_mapping_json: Annotated[str | None, Form()] = None,
-    year_hint: Annotated[int | None, Form()] = None,
-) -> StatementPreviewResponse:
-    """Analiza un estado de cuenta bancario (PDF/PNG/JPG/WEBP/XLSX/XLS/CSV/TXT), verifica saldo y sugiere conciliación."""
-    content = read_upload_bounded(file, MAX_STATEMENT_BYTES)
+class StatementPreviewJobStartResponse(BaseModel):
+    job_id: str
+    status: Literal["PENDING", "RUNNING", "COMPLETED", "FAILED"]
 
-    col_map: dict[str, str] | None = None
-    if column_mapping_json and column_mapping_json.strip():
-        try:
-            raw_map = json.loads(column_mapping_json)
-            if isinstance(raw_map, dict):
-                col_map = {str(k): str(v) for k, v in raw_map.items() if v}
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Formato inválido en mapeo de columnas JSON.",
-            ) from exc
 
-    uid = int(current_user.id) if current_user and current_user.id is not None else None
-    importer = BankStatementImporter()
-    try:
-        res = importer.preview_from_bytes(
-            file_bytes=content,
-            filename=file.filename or "estado_cuenta.pdf",
-            db=db,
-            user_id=uid,
-            bank_name=bank_name,
-            column_mapping=col_map,
-            year_hint=year_hint,
+class StatementPreviewJobStatusResponse(BaseModel):
+    job_id: str
+    status: Literal["PENDING", "RUNNING", "COMPLETED", "FAILED"]
+    pages_done: int = 0
+    pages_total: int = 0
+    stage: str = "Iniciando"
+    error: str | None = None
+    result: StatementPreviewResponse | None = None
+
+
+_STATEMENT_PREVIEW_JOBS: dict[str, dict[str, Any]] = {}
+_STATEMENT_PREVIEW_JOBS_LOCK = threading.Lock()
+_STATEMENT_JOB_TTL_SECONDS = 900.0
+_STATEMENT_JOB_MAX_ITEMS = 32
+
+
+def _prune_statement_preview_jobs(now_ts: float) -> None:
+    """Depura trabajos de preview vencidos o excedentes para mantener memoria acotada."""
+    expired = [
+        jid
+        for jid, info in _STATEMENT_PREVIEW_JOBS.items()
+        if (now_ts - float(info.get("updated_at", 0.0))) > _STATEMENT_JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        _STATEMENT_PREVIEW_JOBS.pop(jid, None)
+    if len(_STATEMENT_PREVIEW_JOBS) > _STATEMENT_JOB_MAX_ITEMS:
+        ordered = sorted(
+            _STATEMENT_PREVIEW_JOBS.items(),
+            key=lambda kv: float(kv[1].get("updated_at", 0.0)),
         )
+        for jid, _ in ordered[: len(_STATEMENT_PREVIEW_JOBS) - _STATEMENT_JOB_MAX_ITEMS]:
+            _STATEMENT_PREVIEW_JOBS.pop(jid, None)
+
+
+def _parse_column_mapping_json(column_mapping_json: str | None) -> dict[str, str] | None:
+    if not (column_mapping_json and column_mapping_json.strip()):
+        return None
+    try:
+        raw_map = json.loads(column_mapping_json)
+        if isinstance(raw_map, dict):
+            return {str(k): str(v) for k, v in raw_map.items() if v}
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Formato inválido en mapeo de columnas JSON.",
         ) from exc
+    return None
 
+
+def _build_statement_preview_response(res: Any) -> StatementPreviewResponse:
     return StatementPreviewResponse(
         bank_name=res.bank_name,
         file_type=res.file_type,
@@ -1238,6 +1253,164 @@ def preview_bank_statement(
         warnings=res.warnings,
         available_orders=[StatementAvailableOrderResponse(**o) for o in res.available_orders],
     )
+
+
+@router.post("/statements/preview", response_model=StatementPreviewResponse)
+def preview_bank_statement(
+    file: Annotated[UploadFile, File()],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    bank_name: Annotated[str | None, Form()] = None,
+    column_mapping_json: Annotated[str | None, Form()] = None,
+    year_hint: Annotated[int | None, Form()] = None,
+) -> StatementPreviewResponse:
+    """Analiza un estado de cuenta bancario (PDF/PNG/JPG/WEBP/XLSX/XLS/CSV/TXT), verifica saldo y sugiere conciliación."""
+    content = read_upload_bounded(file, MAX_STATEMENT_BYTES)
+    col_map = _parse_column_mapping_json(column_mapping_json)
+
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    importer = BankStatementImporter()
+    try:
+        res = importer.preview_from_bytes(
+            file_bytes=content,
+            filename=file.filename or "estado_cuenta.pdf",
+            db=db,
+            user_id=uid,
+            bank_name=bank_name,
+            column_mapping=col_map,
+            year_hint=year_hint,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return _build_statement_preview_response(res)
+
+
+@router.post("/statements/preview/start", response_model=StatementPreviewJobStartResponse)
+def start_preview_bank_statement_job(
+    file: Annotated[UploadFile, File()],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_trader)],
+    bank_name: Annotated[str | None, Form()] = None,
+    column_mapping_json: Annotated[str | None, Form()] = None,
+    year_hint: Annotated[int | None, Form()] = None,
+) -> StatementPreviewJobStartResponse:
+    """Inicia el análisis de un estado bancario grande en segundo plano (inmune al timeout de 100s de Cloudflare)."""
+    content = read_upload_bounded(file, MAX_STATEMENT_BYTES)
+    col_map = _parse_column_mapping_json(column_mapping_json)
+    filename = file.filename or "estado_cuenta.pdf"
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    job_id = secrets.token_urlsafe(16)
+    now_ts = time.monotonic()
+
+    with _STATEMENT_PREVIEW_JOBS_LOCK:
+        _prune_statement_preview_jobs(now_ts)
+        _STATEMENT_PREVIEW_JOBS[job_id] = {
+            "user_id": uid,
+            "status": "PENDING",
+            "pages_done": 0,
+            "pages_total": 0,
+            "stage": "Validando archivo",
+            "error": None,
+            "result": None,
+            "updated_at": now_ts,
+        }
+
+    bind = db.get_bind()
+    session_factory = sessionmaker(bind=bind, autocommit=False, autoflush=False)
+
+    def _worker() -> None:
+        bg_db = session_factory()
+        try:
+            with _STATEMENT_PREVIEW_JOBS_LOCK:
+                if job_id in _STATEMENT_PREVIEW_JOBS:
+                    _STATEMENT_PREVIEW_JOBS[job_id]["status"] = "RUNNING"
+                    _STATEMENT_PREVIEW_JOBS[job_id]["updated_at"] = time.monotonic()
+
+            def _on_progress(done: int, total: int, stage: str) -> None:
+                with _STATEMENT_PREVIEW_JOBS_LOCK:
+                    info = _STATEMENT_PREVIEW_JOBS.get(job_id)
+                    if info is not None:
+                        info["pages_done"] = int(done)
+                        info["pages_total"] = int(total)
+                        info["stage"] = str(stage)[:64]
+                        info["updated_at"] = time.monotonic()
+
+            importer = BankStatementImporter()
+            res = importer.preview_from_bytes(
+                file_bytes=content,
+                filename=filename,
+                db=bg_db,
+                user_id=uid,
+                bank_name=bank_name,
+                column_mapping=col_map,
+                year_hint=year_hint,
+                progress_callback=_on_progress,
+            )
+            payload = _build_statement_preview_response(res)
+            with _STATEMENT_PREVIEW_JOBS_LOCK:
+                info = _STATEMENT_PREVIEW_JOBS.get(job_id)
+                if info is not None:
+                    info["status"] = "COMPLETED"
+                    info["stage"] = "Completado"
+                    info["result"] = payload
+                    info["updated_at"] = time.monotonic()
+        except ValueError as exc:
+            with _STATEMENT_PREVIEW_JOBS_LOCK:
+                info = _STATEMENT_PREVIEW_JOBS.get(job_id)
+                if info is not None:
+                    info["status"] = "FAILED"
+                    info["stage"] = "Error"
+                    info["error"] = str(exc)
+                    info["updated_at"] = time.monotonic()
+        except Exception as exc:  # noqa: BLE001 - aislamiento Fail-Closed del hilo de trabajo
+            import logging
+
+            logging.getLogger("accounting_route").error(
+                "Error interno en preview asíncrono (%s): %s",
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            with _STATEMENT_PREVIEW_JOBS_LOCK:
+                info = _STATEMENT_PREVIEW_JOBS.get(job_id)
+                if info is not None:
+                    info["status"] = "FAILED"
+                    info["stage"] = "Error"
+                    info["error"] = "No se pudo procesar el estado de cuenta bancario. Verifica el formato del archivo."
+                    info["updated_at"] = time.monotonic()
+        finally:
+            bg_db.close()
+
+    threading.Thread(target=_worker, name=f"stmt-preview-{job_id[:8]}", daemon=True).start()
+    return StatementPreviewJobStartResponse(job_id=job_id, status="PENDING")
+
+
+@router.get("/statements/preview/jobs/{job_id}", response_model=StatementPreviewJobStatusResponse)
+def get_preview_bank_statement_job(
+    job_id: str,
+    current_user: Annotated[User, Depends(require_trader)],
+) -> StatementPreviewJobStatusResponse:
+    """Consulta el progreso o resultado de un trabajo de análisis de estado bancario (aislado por usuario)."""
+    uid = int(current_user.id) if current_user and current_user.id is not None else None
+    with _STATEMENT_PREVIEW_JOBS_LOCK:
+        info = _STATEMENT_PREVIEW_JOBS.get(job_id)
+        if info is None or info.get("user_id") != uid:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Trabajo de análisis no encontrado o expirado.",
+            )
+        return StatementPreviewJobStatusResponse(
+            job_id=job_id,
+            status=info["status"],
+            pages_done=int(info.get("pages_done", 0)),
+            pages_total=int(info.get("pages_total", 0)),
+            stage=str(info.get("stage", "Procesando")),
+            error=info.get("error"),
+            result=info.get("result"),
+        )
 
 
 @router.post("/statements/commit", response_model=StatementCommitResponse)

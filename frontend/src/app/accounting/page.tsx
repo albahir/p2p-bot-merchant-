@@ -176,6 +176,7 @@ export default function AccountingPage() {
   const [loading, setLoading] = useState<boolean>(!initialJournal && !initialBalance);
   const [uploadingOcr, setUploadingOcr] = useState<boolean>(false);
   const [uploadingStatement, setUploadingStatement] = useState<boolean>(false);
+  const [statementProgress, setStatementProgress] = useState<string | null>(null);
   const [statementPreview, setStatementPreview] = useState<StatementPreviewResponse | null>(null);
   const [statementSourceFile, setStatementSourceFile] = useState<File | null>(null);
   const [reconciling, setReconciling] = useState<boolean>(false);
@@ -689,8 +690,17 @@ export default function AccountingPage() {
     }
     setFeedback(null);
     setUploadingStatement(true);
+    setStatementProgress("Subiendo archivo...");
     try {
-      const previewRes = await previewBankStatement(file);
+      const previewRes = await previewBankStatement(file, {
+        onProgress: (p) => {
+          if (p.pagesTotal > 1 && p.pagesDone > 0) {
+            setStatementProgress(`${p.stage}: ${p.pagesDone}/${p.pagesTotal}`);
+          } else {
+            setStatementProgress(`${p.stage}...`);
+          }
+        },
+      });
       setStatementSourceFile(file);
       setStatementPreview(previewRes);
     } catch (err: any) {
@@ -700,6 +710,7 @@ export default function AccountingPage() {
       });
     } finally {
       setUploadingStatement(false);
+      setStatementProgress(null);
       if (statementInputRef.current) statementInputRef.current.value = "";
     }
   }
@@ -1288,7 +1299,9 @@ export default function AccountingPage() {
                 <span className="material-symbols-outlined text-[16px]">
                   account_balance
                 </span>
-                <span>{uploadingStatement ? "Analizando..." : "Estado bancario"}</span>
+                <span className="truncate">
+                  {uploadingStatement ? statementProgress || "Analizando..." : "Estado bancario"}
+                </span>
               </button>
 
               <button
