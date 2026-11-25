@@ -14,12 +14,12 @@ import {
   triggerMarketCollect,
 } from "@/lib/api";
 
-const SIDE_MODES: Array<{ id: MarketSideMode; label: string; desc: string }> = [
-  { id: "sell", label: "USDT · Venta", desc: "Tasa al vender USDT a bolívares" },
-  { id: "buy", label: "USDT · Compra", desc: "Tasa al comprar USDT con bolívares" },
-  { id: "bank", label: "Por Banco & Monto", desc: "Curva filtrada por banco específico" },
-  { id: "evolucion", label: "Evolución P2P vs BCV", desc: "Brecha visual sobre mismo eje" },
-  { id: "brecha", label: "Brecha (%)", desc: "Porcentaje sobre dólar oficial BCV" },
+const SIDE_MODES: Array<{ id: MarketSideMode; label: string; shortLabel: string; desc: string }> = [
+  { id: "sell", label: "USDT · Venta", shortLabel: "USDT · Venta", desc: "Tasa al vender USDT a bolívares" },
+  { id: "buy", label: "USDT · Compra", shortLabel: "USDT · Compra", desc: "Tasa al comprar USDT con bolívares" },
+  { id: "bank", label: "Por Banco & Monto", shortLabel: "Por Banco", desc: "Curva filtrada por banco específico" },
+  { id: "evolucion", label: "Evolución P2P vs BCV", shortLabel: "P2P vs BCV", desc: "Brecha visual sobre mismo eje" },
+  { id: "brecha", label: "Brecha (%)", shortLabel: "Brecha (%)", desc: "Porcentaje sobre dólar oficial BCV" },
 ];
 
 const TIMEFRAMES: MarketTimeframe[] = ["1m", "5m", "15m", "1h", "4h", "1D"];
@@ -364,34 +364,37 @@ export default function MarketPage() {
 
         {/* Controles de Modo, Temporalidad, Banco y Ticket */}
         <section className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            {/* 5 Modos estilo Terminal */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              {SIDE_MODES.map((m) => (
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            {/* 5 Modos en 2 filas limpias en móvil (2 arriba + 3 abajo) */}
+            <div className="grid grid-cols-6 sm:flex sm:flex-wrap items-center gap-1.5 w-full lg:w-auto">
+              {SIDE_MODES.map((m, idx) => (
                 <button
                   key={m.id}
                   type="button"
                   title={m.desc}
                   onClick={() => setSide(m.id)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                  className={`${
+                    idx < 2 ? "col-span-3" : "col-span-2"
+                  } sm:col-auto px-2 sm:px-3 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold text-center whitespace-nowrap transition-colors ${
                     side === m.id
                       ? "bg-amber-500 text-slate-950"
                       : "bg-[#0a0e13] border border-slate-800 text-slate-300 hover:border-slate-700"
                   }`}
                 >
-                  {m.label}
+                  <span className="sm:hidden">{m.shortLabel}</span>
+                  <span className="hidden sm:inline">{m.label}</span>
                 </button>
               ))}
             </div>
 
-            {/* Temporalidades */}
-            <div className="flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-[#0a0e13] p-1">
+            {/* Temporalidades distribuidas simétricamente */}
+            <div className="grid grid-cols-6 sm:flex items-center gap-1 rounded-lg border border-slate-800 bg-[#0a0e13] p-1 w-full lg:w-auto">
               {TIMEFRAMES.map((tf) => (
                 <button
                   key={tf}
                   type="button"
                   onClick={() => setTimeframe(tf)}
-                  className={`px-2.5 py-1 rounded text-xs font-mono font-semibold transition-colors ${
+                  className={`px-2 sm:px-2.5 py-1 rounded text-xs font-mono font-semibold text-center transition-colors ${
                     timeframe === tf
                       ? "bg-slate-800 text-amber-400"
                       : "text-slate-400 hover:text-slate-200"
@@ -403,10 +406,10 @@ export default function MarketPage() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/70">
-            {/* Tipo de gráfico + Overlays */}
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="inline-flex rounded-lg border border-slate-800 bg-[#0a0e13] p-0.5 text-xs">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 pt-2 border-t border-slate-800/70">
+            {/* Tipo de gráfico + Overlays agrupados en 2 filas ordenadas en móvil */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full lg:w-auto">
+              <div className="grid grid-cols-3 sm:inline-flex rounded-lg border border-slate-800 bg-[#0a0e13] p-0.5 text-xs w-full sm:w-auto">
                 {(
                   [
                     { id: "candles", label: "Velas" },
@@ -419,7 +422,7 @@ export default function MarketPage() {
                     type="button"
                     disabled={side === "evolucion"}
                     onClick={() => setChartMode(t.id)}
-                    className={`px-2.5 py-1 rounded font-medium disabled:opacity-40 ${
+                    className={`px-2.5 py-1 rounded font-medium text-center disabled:opacity-40 ${
                       chartMode === t.id
                         ? "bg-slate-800 text-slate-100"
                         : "text-slate-400 hover:text-slate-200"
@@ -430,41 +433,43 @@ export default function MarketPage() {
                 ))}
               </div>
 
-              <button
-                type="button"
-                title="Líneas promedio de tendencia corta y media (EMA 9 y 21)"
-                onClick={() => setShowEma((v) => !v)}
-                disabled={side === "evolucion"}
-                className={`px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors disabled:opacity-40 ${
-                  showEma
-                    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                    : "border-slate-800 bg-[#0a0e13] text-slate-400"
-                }`}
-              >
-                Medias móviles
-              </button>
-              <button
-                type="button"
-                title="Indicador de fuerza entre compradores y vendedores (RSI 14)"
-                onClick={() => setShowRsi((v) => !v)}
-                disabled={side === "evolucion"}
-                className={`px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors disabled:opacity-40 ${
-                  showRsi
-                    ? "border-violet-500/40 bg-violet-500/10 text-violet-300"
-                    : "border-slate-800 bg-[#0a0e13] text-slate-400"
-                }`}
-              >
-                Fuerza (RSI)
-              </button>
+              <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  title="Líneas promedio de tendencia corta y media (EMA 9 y 21)"
+                  onClick={() => setShowEma((v) => !v)}
+                  disabled={side === "evolucion"}
+                  className={`px-2.5 py-1.5 sm:py-1 rounded-lg border text-xs font-medium text-center whitespace-nowrap transition-colors disabled:opacity-40 ${
+                    showEma
+                      ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                      : "border-slate-800 bg-[#0a0e13] text-slate-400"
+                  }`}
+                >
+                  Medias móviles
+                </button>
+                <button
+                  type="button"
+                  title="Indicador de fuerza entre compradores y vendedores (RSI 14)"
+                  onClick={() => setShowRsi((v) => !v)}
+                  disabled={side === "evolucion"}
+                  className={`px-2.5 py-1.5 sm:py-1 rounded-lg border text-xs font-medium text-center whitespace-nowrap transition-colors disabled:opacity-40 ${
+                    showRsi
+                      ? "border-violet-500/40 bg-violet-500/10 text-violet-300"
+                      : "border-slate-800 bg-[#0a0e13] text-slate-400"
+                  }`}
+                >
+                  Fuerza (RSI)
+                </button>
+              </div>
             </div>
 
             {/* Banco + Ticket VWAP */}
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full lg:w-auto">
               <select
                 value={bank}
                 onChange={(e) => setBank(e.target.value)}
                 aria-label="Filtrar por banco"
-                className="rounded-lg border border-slate-700 bg-[#0a0e13] px-2.5 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none"
+                className="w-full sm:w-auto rounded-lg border border-slate-700 bg-[#0a0e13] px-2.5 py-1.5 text-xs text-slate-200 focus:border-amber-500 focus:outline-none"
               >
                 {bankOptions.map((b) => (
                   <option key={b} value={b}>
@@ -473,7 +478,7 @@ export default function MarketPage() {
                 ))}
               </select>
 
-              <div className="flex flex-wrap items-center gap-1">
+              <div className="grid grid-cols-5 sm:flex items-center gap-1 w-full sm:w-auto">
                 {TICKET_PRESETS.map((p) => (
                   <button
                     key={p.ves}
@@ -482,7 +487,7 @@ export default function MarketPage() {
                       setTicketVes(p.ves);
                       setTicketInput(String(p.ves));
                     }}
-                    className={`px-2 py-1 rounded text-[11px] font-mono tabular-nums transition-colors ${
+                    className={`px-1 sm:px-2 py-1 rounded text-[10px] sm:text-[11px] font-mono text-center whitespace-nowrap tabular-nums transition-colors ${
                       ticketVes === p.ves
                         ? "bg-amber-500/20 border border-amber-500/50 text-amber-300"
                         : "bg-[#0a0e13] border border-slate-800 text-slate-400 hover:text-slate-200"
@@ -493,18 +498,18 @@ export default function MarketPage() {
                 ))}
               </div>
 
-              <form onSubmit={handleApplyTicket} className="flex items-center gap-1">
+              <form onSubmit={handleApplyTicket} className="flex items-center gap-1.5 w-full sm:w-auto">
                 <input
                   type="text"
                   value={ticketInput}
                   onChange={(e) => setTicketInput(e.target.value)}
                   aria-label="Monto ticket en bolívares"
-                  className="w-28 rounded-lg border border-slate-700 bg-[#0a0e13] px-2.5 py-1 text-xs font-mono text-slate-100 tabular-nums focus:border-amber-500 focus:outline-none"
+                  className="flex-1 min-w-0 sm:w-28 rounded-lg border border-slate-700 bg-[#0a0e13] px-2.5 py-1.5 sm:py-1 text-xs font-mono text-slate-100 tabular-nums focus:border-amber-500 focus:outline-none"
                   placeholder="Ticket Bs"
                 />
                 <button
                   type="submit"
-                  className="px-2.5 py-1 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200"
+                  className="px-3 py-1.5 sm:py-1 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 shrink-0 whitespace-nowrap"
                 >
                   Calcular monto
                 </button>
@@ -732,21 +737,71 @@ export default function MarketPage() {
             )}
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs font-mono tabular-nums">
+          {/* Vista en tarjetas para móvil sin recorte ni solapamiento */}
+          <div className="md:hidden space-y-2">
+            {(analytics?.banks_snapshot ?? []).length === 0 ? (
+              <div className="py-4 text-center text-xs font-mono text-slate-500">
+                Sin desglose bancario activo todavía.
+              </div>
+            ) : (
+              analytics?.banks_snapshot.map((row) => (
+                <button
+                  key={`mob-${row.bank}`}
+                  type="button"
+                  onClick={() => {
+                    setBank(row.bank);
+                    setSide("bank");
+                  }}
+                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                    bank === row.bank
+                      ? "border-amber-500/50 bg-amber-500/10"
+                      : "border-slate-800 bg-[#0a0e13]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-xs font-bold text-slate-100 truncate">
+                      {row.bank}
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0">
+                      Liq: {fmtNum(row.vol_buy + row.vol_sell, 0)} USDT
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
+                    <div>
+                      <div className="text-[9px] text-slate-500 uppercase">Vendes</div>
+                      <div className="text-emerald-400 font-semibold">{fmtNum(row.sell_best)} Bs</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-slate-500 uppercase">Techo 1h</div>
+                      <div className="text-amber-400 font-semibold">
+                        {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[9px] text-slate-500 uppercase">Compras</div>
+                      <div className="text-sky-400 font-semibold">{fmtNum(row.buy_best)} Bs</div>
+                    </div>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full min-w-[640px] text-xs font-mono tabular-nums">
               <thead>
-                <tr className="text-slate-400 border-b border-slate-800">
-                  <th className="py-2 text-left font-medium">Banco / Método</th>
-                  <th className="py-2 text-right font-medium">Si vendes USDT</th>
-                  <th className="py-2 text-right font-medium">Promedio Venta</th>
+                <tr className="text-slate-400 border-b border-slate-800 whitespace-nowrap">
+                  <th className="py-2 pr-3 text-left font-medium">Banco / Método</th>
+                  <th className="py-2 px-2 text-right font-medium">Si vendes USDT</th>
+                  <th className="py-2 px-2 text-right font-medium">Promedio Venta</th>
                   <th
                     title="Precio más alto confirmado en al menos 2 lecturas seguidas dentro de la hora (sin picos falsos)"
-                    className="py-2 text-right font-medium"
+                    className="py-2 px-2 text-right font-medium"
                   >
                     Techo firme (1h)
                   </th>
-                  <th className="py-2 text-right font-medium">Si compras USDT</th>
-                  <th className="py-2 text-right font-medium">Liquidez USDT</th>
+                  <th className="py-2 px-2 text-right font-medium">Si compras USDT</th>
+                  <th className="py-2 pl-2 text-right font-medium">Liquidez USDT</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
@@ -764,18 +819,18 @@ export default function MarketPage() {
                         setBank(row.bank);
                         setSide("bank");
                       }}
-                      className={`cursor-pointer transition-colors hover:bg-slate-800/40 ${
+                      className={`cursor-pointer transition-colors hover:bg-slate-800/40 whitespace-nowrap ${
                         bank === row.bank ? "bg-amber-500/10" : ""
                       }`}
                     >
-                      <td className="py-2 font-sans font-semibold text-slate-200">{row.bank}</td>
-                      <td className="py-2 text-right text-emerald-400">{fmtNum(row.sell_best)} Bs</td>
-                      <td className="py-2 text-right text-slate-300">{fmtNum(row.sell_avg)} Bs</td>
-                      <td className="py-2 text-right text-amber-400">
+                      <td className="py-2 pr-3 font-sans font-semibold text-slate-200">{row.bank}</td>
+                      <td className="py-2 px-2 text-right text-emerald-400">{fmtNum(row.sell_best)} Bs</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{fmtNum(row.sell_avg)} Bs</td>
+                      <td className="py-2 px-2 text-right text-amber-400">
                         {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
                       </td>
-                      <td className="py-2 text-right text-sky-400">{fmtNum(row.buy_best)} Bs</td>
-                      <td className="py-2 text-right text-slate-300">
+                      <td className="py-2 px-2 text-right text-sky-400">{fmtNum(row.buy_best)} Bs</td>
+                      <td className="py-2 pl-2 text-right text-slate-300">
                         {fmtNum(row.vol_buy + row.vol_sell, 0)}
                       </td>
                     </tr>

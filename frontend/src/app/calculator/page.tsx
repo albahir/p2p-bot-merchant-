@@ -234,7 +234,8 @@ function CalculatorContent() {
           {/* KPI 1 */}
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span className="truncate">Capital Total Requerido</span>
+              <span className="truncate sm:hidden">Capital req.</span>
+              <span className="truncate hidden sm:inline">Capital Total Requerido</span>
               <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-secondary shrink-0">
                 account_balance_wallet
               </span>
@@ -242,7 +243,7 @@ function CalculatorContent() {
             <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-white tabular-nums truncate">
               Bs. {simulation.totalVesInvested.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
-            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums leading-tight break-words">
               Base: {capitalUsdt} USDT • Com: Bs. {simulation.bankFeeVes.toFixed(2)}
             </div>
           </div>
@@ -333,28 +334,30 @@ function CalculatorContent() {
               >
                 Monto (USDT)
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                 <BankAmountInput
                   id="calc-capital-usdt"
                   value={capitalUsdt}
                   onChange={setCapitalUsdt}
                   ariaLabel="Volumen Operativo por Ciclo (USDT)"
-                  className="flex-1 px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm font-mono font-bold text-white tabular-nums"
+                  className="w-full sm:flex-1 min-w-0 px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm font-mono font-bold text-white tabular-nums"
                 />
-                {[100, 250, 500, 1000].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => setCapitalUsdt(preset)}
-                    className={`px-2.5 py-2 rounded-lg text-xs font-mono border transition-colors ${
-                      capitalUsdt === preset
-                        ? "bg-primary-container text-on-primary font-bold border-primary-container"
-                        : "bg-surface-container border-[#1e2430] text-slate-300 hover:text-white"
-                    }`}
-                  >
-                    {preset}
-                  </button>
-                ))}
+                <div className="grid grid-cols-4 sm:flex items-center gap-1.5 shrink-0">
+                  {[100, 250, 500, 1000].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setCapitalUsdt(preset)}
+                      className={`px-2 py-2 rounded-lg text-xs font-mono border text-center transition-colors ${
+                        capitalUsdt === preset
+                          ? "bg-primary-container text-on-primary font-bold border-primary-container"
+                          : "bg-surface-container border-[#1e2430] text-slate-300 hover:text-white"
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -659,13 +662,13 @@ function CalculatorContent() {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
+                <div className="grid grid-cols-4 sm:flex items-center gap-1 w-full sm:w-auto bg-surface-container p-1 rounded-lg border border-[#1e2430]">
                   {[1, 3, 5, 8].map((n) => (
                     <button
                       key={n}
                       type="button"
                       onClick={() => setCyclesPerDay(n)}
-                      className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
+                      className={`px-1.5 sm:px-2.5 py-1 rounded text-[11px] sm:text-xs font-mono text-center whitespace-nowrap transition-colors ${
                         cyclesPerDay === n
                           ? "bg-primary-container text-on-primary font-bold"
                           : "text-slate-400 hover:text-white"
