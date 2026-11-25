@@ -855,6 +855,15 @@ export default function LoginPage() {
             </form>
           )}
         </div>
+        <footer className="mt-5 flex items-center justify-center gap-4 text-[11px] font-mono text-slate-500">
+          <Link href="/privacy" className="hover:text-slate-300 transition-colors">
+            Política de Privacidad
+          </Link>
+          <span aria-hidden="true">·</span>
+          <Link href="/terms" className="hover:text-slate-300 transition-colors">
+            Condiciones del Servicio
+          </Link>
+        </footer>
       </main>
     </div>
   );

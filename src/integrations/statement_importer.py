@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import copy
 import csv
+import gc
 import io
 import json
 import logging
@@ -20,6 +21,7 @@ import re
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -1607,6 +1609,7 @@ class BankStatementImporter:
         bank_name: str | None = None,
         column_mapping: dict[str, str] | None = None,
         year_hint: int | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult:
         """Extrae movimientos bancarios desde PDF, Imagen, Excel o CSV y valida su cuadre matemático."""
         file_type = self._validate_upload(file_bytes, filename)
@@ -1635,6 +1638,7 @@ class BankStatementImporter:
                 filename=filename,
                 bank_name_override=bank_name,
                 default_year=default_year,
+                progress_callback=progress_callback,
             )
 
         if not result.extraction_method.startswith(("PDF_OCR_", "IMAGE_OCR_")):
@@ -1921,6 +1925,7 @@ class BankStatementImporter:
         filename: str,
         bank_name_override: str | None,
         default_year: int,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult:
         try:
             reader = PdfReader(io.BytesIO(file_bytes))
@@ -1946,7 +1951,7 @@ class BankStatementImporter:
         # evita recorrer miles de curvas Bezier en pdfplumber antes de saltar al OCR local.
         has_native_fonts = self._pdf_reader_has_fonts(reader)
         if has_native_fonts:
-            # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra)
+            # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra, RAM acotada)
             (
                 rows,
                 detected_bank,
@@ -1959,6 +1964,7 @@ class BankStatementImporter:
                 filename=filename,
                 bank_name_override=bank_name_override,
                 default_year=default_year,
+                progress_callback=progress_callback,
             )
             warnings.extend(extra_warnings)
             extraction_method = "PDF_PLUMBER_GEOMETRIC"
@@ -1989,6 +1995,9 @@ class BankStatementImporter:
                 if rows:
                     extraction_method = "PDF_LAYOUT_UNIVERSAL"
 
+        # Liberar árbol pypdf antes de pasar a OCR si aplica
+        del reader
+
         # 3. OCR local gratuito y privado en streaming página-por-página (RAM constante + Tesseract quirúrgico)
         if not rows and not has_text_layer:
             ocr_res = self._extract_pdf_with_streaming_dual_ocr(
@@ -1997,6 +2006,7 @@ class BankStatementImporter:
                 bank_name_override=bank_name_override,
                 default_year=eff_year,
                 extra_warnings=warnings,
+                progress_callback=progress_callback,
             )
             if ocr_res is not None and ocr_res.rows:
                 return ocr_res
@@ -2164,6 +2174,7 @@ class BankStatementImporter:
         bank_name_override: str | None,
         default_year: int,
         extra_warnings: list[str],
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult | None:
         """Ejecuta OCR local en streaming página-por-página (RAM constante) con respaldo Tesseract quirúrgico."""
         try:
@@ -2184,6 +2195,8 @@ class BankStatementImporter:
             rapid_pages: list[tuple[list[dict[str, Any]], float]] = []
             rapid_confs: list[float] = []
             for p_idx in range(total_pages):
+                if progress_callback is not None:
+                    progress_callback(p_idx + 1, total_pages, "OCR local")
                 img = _render_single_pdf_page(pdf_doc, p_idx)
                 if img is None:
                     rapid_pages.append(([], 612.0))
@@ -2195,6 +2208,8 @@ class BankStatementImporter:
                     img.close()
                 rapid_pages.append((words, 612.0))
                 rapid_confs.append(float(conf))
+                if (p_idx + 1) % 10 == 0:
+                    gc.collect()
 
             rapid_res, rapid_conf = self._build_ocr_preview_from_pages(
                 pages_words=rapid_pages,
@@ -2821,8 +2836,9 @@ class BankStatementImporter:
         filename: str,
         bank_name_override: str | None,
         default_year: int,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str], dict[str, float | int | None]]:
-        """Extrae palabras vectoriales con pdfplumber y delega al motor geométrico universal."""
+        """Extrae palabras vectoriales con pdfplumber liberando caché por página (evita OOM en PDFs de 250+ págs.)."""
         try:
             pdf_doc = pdfplumber.open(io.BytesIO(file_bytes))
         except (PdfminerException, OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -2837,8 +2853,11 @@ class BankStatementImporter:
         has_any_text = False
         with pdf_doc:
             page_slice = pdf_doc.pages[:MAX_PDF_PAGES]
+            total_pages = len(page_slice)
             for p_idx, page in enumerate(page_slice):
-                words = (
+                if progress_callback is not None:
+                    progress_callback(p_idx + 1, total_pages, "Leyendo PDF")
+                raw_words = (
                     page.extract_words(
                         keep_blank_chars=False,
                         use_text_flow=False,
@@ -2847,11 +2866,29 @@ class BankStatementImporter:
                     )
                     or []
                 )
-                if words:
+                page_w = float(page.width or 612.0)
+                # Conservar únicamente las 5 coordenadas necesarias y purgar caché interna de pdfplumber/pdfminer
+                compact_words = [
+                    {
+                        "text": str(w.get("text", "")),
+                        "x0": float(w.get("x0", 0.0)),
+                        "x1": float(w.get("x1", 0.0)),
+                        "top": float(w.get("top", 0.0)),
+                        "bottom": float(w.get("bottom", 0.0)),
+                    }
+                    for w in raw_words
+                ]
+                if hasattr(page, "flush_cache"):
+                    page.flush_cache()
+                if hasattr(page, "get_textmap") and hasattr(page.get_textmap, "cache_clear"):
+                    page.get_textmap.cache_clear()
+                if compact_words:
                     has_any_text = True
-                pages_words.append((words, float(page.width or 612.0)))
+                pages_words.append((compact_words, page_w))
+                if (p_idx + 1) % 20 == 0:
+                    gc.collect()
                 # Corte temprano si las primeras 5 páginas de un PDF largo no tienen capa de texto
-                if not has_any_text and p_idx >= 4 and len(page_slice) > 10:
+                if not has_any_text and p_idx >= 4 and total_pages > 10:
                     break
 
         if not has_any_text:
@@ -3674,6 +3711,7 @@ class BankStatementImporter:
         bank_name: str | None = None,
         column_mapping: dict[str, str] | None = None,
         year_hint: int | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> StatementPreviewResult:
         """Parsea el estado de cuenta y lo cruza contra órdenes P2P y comprobantes previos del usuario en O(1)."""
         preview = self.parse_bytes(
@@ -3682,9 +3720,12 @@ class BankStatementImporter:
             bank_name=bank_name,
             column_mapping=column_mapping,
             year_hint=year_hint,
+            progress_callback=progress_callback,
         )
         if not preview.rows:
             return preview
+        if progress_callback is not None:
+            progress_callback(1, 1, "Conciliando órdenes P2P")
 
         voucher_repo = BankVoucherRepository(db, user_id=user_id)
         order_repo = OrderRepository(db, user_id=user_id)
