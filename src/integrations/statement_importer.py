@@ -566,12 +566,12 @@ def _extract_cover_summary(meta_text: str) -> dict[str, float | int | None]:
 
 def _enrich_row_metadata(row: ParsedStatementRow, full_desc: str) -> None:
     """Extrae hora exacta VET, cédula/RIF, beneficiario/contraparte y banco destino desde descripciones ricas (Mercantil/BDV)."""
-    upper = normalize_text(full_desc)
+    upper = " ".join(normalize_text(full_desc).split())[:800]
     if not upper:
         return
 
     # 1. Hora exacta VET: "EL 01-10-26 A LAS 19:19:41 HORAS"
-    m_time = re.search(r"\bA\s+LAS\s+(\d{1,2}:\d{2}:\d{2})\s+HORAS?\b", upper)
+    m_time = re.search(r"\bA LAS (\d{1,2}:\d{2}:\d{2}) HORAS?\b", upper)
     if m_time:
         t_str = m_time.group(1)
         try:
@@ -584,22 +584,22 @@ def _enrich_row_metadata(row: ParsedStatementRow, full_desc: str) -> None:
             pass
 
     # 2. Cédula o RIF del beneficiario/contraparte (ej. "A V90026775", "V-19456789")
-    m_cid = re.search(r"(?<![A-Z0-9])([VEJGP])[\-\s]?(\d{6,10})(?!\d)", upper)
+    m_cid = re.search(r"(?<![A-Z0-9])([VEJGP])[\- ]?(\d{6,10})(?!\d)", upper)
     if m_cid:
         row.sender_id = f"{m_cid.group(1)}-{m_cid.group(2)}"
 
     # 3. Nombre de contraparte / beneficiario en transferencias Mercantil ("A LA CU ENTA DE JESUS FAJARDO ***8921")
     m_cp = re.search(
-        r"(?:A\s+LA|DESDE(?:\s+LA)?)\s+CU\s*ENTA\s+DE\s+([A-Z][A-Z\s]{2,55}?)(?=\s*(?:\*{2,}|\d{3,}|POR\s+BS|REALIZADA|EL\s+\d{2}|$))",
+        r"(?:A LA|DESDE(?: LA)?) CU ?ENTA DE ([A-Z][A-Z ]{2,55}?)(?= ?(?:\*{2,}|\d{3,}|POR BS|REALIZADA|EL \d{2}|$))",
         upper,
     )
     if m_cp:
-        cand_name = re.sub(r"\s+", " ", m_cp.group(1)).strip()
+        cand_name = m_cp.group(1).strip()
         if len(cand_name) >= 3 and cand_name not in ("TERCEROS", "TERCERO"):
             row.counterparty_name = cand_name[:120]
 
     # 4. Banco destino en T-Pago / Crédito Inmediato ("EN BANCAMIGA BANCO UNIVERSAL", "EN BANCO NACIONAL DE CREDITO")
-    m_dbank = re.search(r"\bEN\s+([A-Z0-9\s.,]{3,45}?)(?=\s*(?:POR\s+BS|POR\s+CONCEPTO|EL\s+\d{2}|$))", upper)
+    m_dbank = re.search(r"\bEN ([A-Z0-9 .,]{3,45}?)(?= ?(?:POR BS|POR CONCEPTO|EL \d{2}|$))", upper)
     if m_dbank:
         detected_dest = detect_bank_from_text(m_dbank.group(1))
         if detected_dest:
@@ -685,27 +685,29 @@ def _extract_reference(text: str, explicit_ref: str | None = None) -> tuple[str,
         if ref_clean != "S/R":
             return ref_clean[:50], _sanitize_cell_text(text)
 
+    # Colapsar espacios y acotar longitud para garantizar complejidad lineal O(n) anti-ReDoS (CodeQL)
+    compact_text = " ".join((text or "").split())[:600]
     m_explicit = re.search(
-        r"(?:REF(?:ERENCIA)?\.?|NRO\.?|DOC\.?|SERIAL|#)\s*[:#-]?\s*([A-Za-z0-9]{4,20})",
-        text,
+        r"(?:REF(?:ERENCIA)?\.?|NRO\.?|DOC\.?|SERIAL|#)(?: ?[:#-] ?| ?)([A-Za-z0-9]{4,20})",
+        compact_text,
         re.IGNORECASE,
     )
     if m_explicit:
         ref_val = m_explicit.group(1).strip()
-        cleaned = (text[: m_explicit.start()] + " " + text[m_explicit.end() :]).strip()
-        return ref_val[:50], _sanitize_cell_text(cleaned or text)
+        cleaned = (compact_text[: m_explicit.start()] + " " + compact_text[m_explicit.end() :]).strip()
+        return ref_val[:50], _sanitize_cell_text(cleaned or compact_text)
 
     # Evitar confundir fechas ("EL 01-10-26"), cédulas ("V90026775") o horas ("19:19:41") con números de referencia
-    scrubbed = re.sub(r"\bEL\s+\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b", " ", text, flags=re.IGNORECASE)
+    scrubbed = re.sub(r"\bEL \d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b", " ", compact_text, flags=re.IGNORECASE)
     scrubbed = re.sub(r"\b\d{1,2}:\d{2}:\d{2}\b", " ", scrubbed)
     scrubbed = re.sub(r"\b[VEJGP]-?\d{6,10}\b", " ", scrubbed, flags=re.IGNORECASE)
     m_digits = re.search(r"(?<![\/\.-])\b(\d{5,16})\b(?![\/\.-])", scrubbed)
     if m_digits:
         ref_val = m_digits.group(1)
-        cleaned = re.sub(rf"\b{re.escape(ref_val)}\b", "", text, count=1).strip()
-        return ref_val[:50], _sanitize_cell_text(cleaned or text)
+        cleaned = re.sub(rf"\b{re.escape(ref_val)}\b", "", compact_text, count=1).strip()
+        return ref_val[:50], _sanitize_cell_text(cleaned or compact_text)
 
-    return "S/R", _sanitize_cell_text(text)
+    return "S/R", _sanitize_cell_text(compact_text)
 
 
 def _match_header_role(col_name: str) -> str | None:
