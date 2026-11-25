@@ -1180,6 +1180,16 @@ def _calibrate_pdf_column_bands(
     num_indices = [i for i, c in enumerate(cols) if c.role in ("debit", "credit", "amount", "balance")]
     date_indices = [i for i, c in enumerate(cols) if c.role in ("date", "date_alt")]
     ref_indices = [i for i, c in enumerate(cols) if c.role == "reference"]
+    concept_indices = [i for i, c in enumerate(cols) if c.role == "concept"]
+
+    # Límites estrictos por carril basados en la cabecera (evitan que montos o fechas dentro de DESCRIPCION contaminen columnas)
+    first_num_hdr_x0 = min((cols[i].hdr_x0 for i in num_indices), default=page_width)
+    concept_hdr_x0 = min((cols[i].hdr_x0 for i in concept_indices), default=first_num_hdr_x0)
+    money_zone_min_x = (
+        max(concept_hdr_x0 + 18.0, first_num_hdr_x0 - 28.0)
+        if concept_indices and concept_hdr_x0 < first_num_hdr_x0
+        else max(0.0, first_num_hdr_x0 - 28.0)
+    )
 
     for wl in body_lines:
         if _is_noise_or_footer_line(wl.text):
@@ -1189,7 +1199,7 @@ def _calibrate_pdf_column_bands(
         if not has_date and allow_day_only and date_indices:
             dc0 = cols[date_indices[0]]
             has_date = any(
-                abs(((float(w["x0"]) + float(w["x1"])) / 2.0) - dc0.anchor_xc) <= 35.0
+                abs(((float(w["x0"]) + float(w["x1"])) / 2.0) - dc0.anchor_xc) <= 25.0
                 and re.fullmatch(r"0?[1-9]|[12]\d|3[01]", str(w["text"]).strip())
                 for w in wl.words
             )
@@ -1198,12 +1208,15 @@ def _calibrate_pdf_column_bands(
 
         for d_idx in date_indices:
             dc = cols[d_idx]
+            prev_edge = (cols[d_idx - 1].hdr_x1 + 1.0) if d_idx > 0 else 0.0
+            next_edge = (cols[d_idx + 1].hdr_x0 - 2.0) if d_idx + 1 < len(cols) else page_width
+            lane_l = max(prev_edge, dc.hdr_x0 - 18.0)
+            lane_r = min(next_edge, dc.hdr_x1 + 24.0)
             near_words = [
                 w
                 for w in wl.words
-                if abs(((float(w["x0"]) + float(w["x1"])) / 2.0) - dc.anchor_xc) <= 55.0
+                if lane_l <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= lane_r
             ]
-            # Buscar tokens fecha contiguos cerca del centro de columna fecha
             joined_near = " ".join(str(w["text"]) for w in near_words)
             if _DATE_ANY_RE.search(joined_near) or (
                 allow_day_only and any(re.fullmatch(r"0?[1-9]|[12]\d|3[01]", str(w["text"]).strip()) for w in near_words)
@@ -1212,7 +1225,7 @@ def _calibrate_pdf_column_bands(
                     w
                     for w in near_words
                     if _DATE_ANY_RE.search(str(w["text"]))
-                    or re.fullmatch(r"\d{1,4}|[A-Za-z]{3}", str(w["text"]))
+                    or re.fullmatch(r"0?[1-9]|[12]\d|3[01]|20\d{2}|[A-Za-z]{3}", str(w["text"]))
                 ]
                 if d_tokens:
                     emp_x0[d_idx].append(min(float(w["x0"]) for w in d_tokens))
@@ -1220,14 +1233,24 @@ def _calibrate_pdf_column_bands(
 
         for r_idx in ref_indices:
             rc = cols[r_idx]
+            prev_edge = (cols[r_idx - 1].hdr_x1 + 1.0) if r_idx > 0 else 0.0
+            next_edge = (cols[r_idx + 1].hdr_x0 - 2.0) if r_idx + 1 < len(cols) else page_width
+            lane_l = max(prev_edge, rc.hdr_x0 - 12.0)
+            lane_r = min(next_edge, rc.hdr_x1 + 22.0)
             for w in wl.words:
                 wxc = (float(w["x0"]) + float(w["x1"])) / 2.0
-                if abs(wxc - rc.anchor_xc) <= 45.0 and re.search(r"\d{3,}", str(w["text"])):
+                if lane_l <= wxc <= lane_r and re.search(r"\d{3,}", str(w["text"])):
                     emp_x0[r_idx].append(float(w["x0"]))
                     emp_x1[r_idx].append(float(w["x1"]))
                     break
 
-        money_words = [w for w in wl.words if _MONEY_TOKEN_RE.fullmatch(str(w["text"]).strip())]
+        # Solo considerar palabras monetarias dentro de la zona numérica (ignora "POR BS. 20.000,00" dentro de DESCRIPCION)
+        money_words = [
+            w
+            for w in wl.words
+            if _MONEY_TOKEN_RE.fullmatch(str(w["text"]).strip())
+            and ((float(w["x0"]) + float(w["x1"])) / 2.0) >= money_zone_min_x
+        ]
         if money_words and num_indices:
             rem_words = list(money_words)
             bal_i = next((i for i in num_indices if cols[i].role == "balance"), None)
@@ -1252,8 +1275,22 @@ def _calibrate_pdf_column_bands(
     eff_x0: list[float] = []
     eff_x1: list[float] = []
     for idx, c in enumerate(cols):
-        x0_val = min([c.hdr_x0, *emp_x0[idx]]) if emp_x0[idx] else c.hdr_x0
-        x1_val = max([c.hdr_x1, *emp_x1[idx]]) if emp_x1[idx] else c.hdr_x1
+        # Percentiles robustos (p10/p90) para que 1 palabra atípica nunca colapse DESCRIPCION ni invada otra columna
+        if emp_x0[idx]:
+            s0 = sorted(emp_x0[idx])
+            s1 = sorted(emp_x1[idx])
+            p10 = s0[max(0, int(len(s0) * 0.10))]
+            p90 = s1[min(len(s1) - 1, int(len(s1) * 0.90))]
+            x0_val = min(c.hdr_x0, p10)
+            x1_val = max(c.hdr_x1, p90)
+        else:
+            x0_val = c.hdr_x0
+            x1_val = c.hdr_x1
+        # Evitar solapamiento con la cabecera vecina
+        if idx > 0 and c.role in ("debit", "credit", "amount", "balance") and cols[idx - 1].role == "concept":
+            x0_val = max(x0_val, cols[idx - 1].hdr_x0 + 24.0)
+        if idx + 1 < len(cols) and c.role in ("date", "date_alt", "reference"):
+            x1_val = min(x1_val, cols[idx + 1].hdr_x0 - 1.5)
         eff_x0.append(x0_val)
         eff_x1.append(x1_val)
         if c.role in ("debit", "credit", "amount", "balance") and emp_x1[idx]:
@@ -1983,10 +2020,10 @@ class BankStatementImporter:
             warnings.append(f"Se procesaron únicamente las primeras {MAX_PDF_PAGES} páginas del PDF.")
 
         # Atajo crítico para PDFs escaneados o con texto trazado en curvas (ej. Banesco/Mercantil sin /Font):
-        # evita recorrer miles de curvas Bezier en pdfplumber antes de saltar al OCR local.
+        # evita recorrer miles de curvas Bezier antes de saltar al OCR local.
         has_native_fonts = self._pdf_reader_has_fonts(reader)
         if has_native_fonts:
-            # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra, RAM acotada)
+            # 1a. Extractor nativo C++ PDFium (mismo motor de PDFgear/Chrome: ~2s para 400 págs. y <40 MB RAM)
             (
                 rows,
                 detected_bank,
@@ -1994,15 +2031,32 @@ class BankStatementImporter:
                 has_text_layer,
                 extra_warnings,
                 cover_summary,
-            ) = self._extract_pdf_with_pdfplumber(
+            ) = self._extract_pdf_with_pypdfium(
                 file_bytes=file_bytes,
                 filename=filename,
                 bank_name_override=bank_name_override,
                 default_year=default_year,
                 progress_callback=progress_callback,
             )
+            extraction_method = "PDF_PDFIUM_GEOMETRIC"
+            # 1b. Respaldo geométrico pdfplumber si PDFium no devolvió filas
+            if not rows:
+                (
+                    rows,
+                    detected_bank,
+                    eff_year,
+                    has_text_layer,
+                    extra_warnings,
+                    cover_summary,
+                ) = self._extract_pdf_with_pdfplumber(
+                    file_bytes=file_bytes,
+                    filename=filename,
+                    bank_name_override=bank_name_override,
+                    default_year=default_year,
+                    progress_callback=progress_callback,
+                )
+                extraction_method = "PDF_PLUMBER_GEOMETRIC"
             warnings.extend(extra_warnings)
-            extraction_method = "PDF_PLUMBER_GEOMETRIC"
         else:
             rows = []
             detected_bank = (
@@ -2865,6 +2919,159 @@ class BankStatementImporter:
                 detected_bank = inferred
         return rows, detected_bank, eff_year, warnings, cover_summary
 
+    @staticmethod
+    def _extract_words_from_pdfium_textpage(tp: Any, page_h: float) -> list[dict[str, Any]]:
+        """Agrupa caracteres nativos de un PDFium textpage en palabras con coordenadas top-down."""
+        n_chars = int(tp.count_chars())
+        if n_chars <= 0:
+            return []
+        raw_txt = tp.get_text_range(0, n_chars)
+        words: list[dict[str, Any]] = []
+        w_chars: list[str] = []
+        wx0 = 0.0
+        wx1 = 0.0
+        wtop = 0.0
+        wbot = 0.0
+        prev_cx1 = 0.0
+        prev_cy_mid = 0.0
+
+        for c_idx, ch in enumerate(raw_txt):
+            if ch.isspace() or ord(ch) < 32:
+                if w_chars:
+                    tok = "".join(w_chars).strip()
+                    if tok:
+                        words.append(
+                            {
+                                "text": tok,
+                                "x0": wx0,
+                                "x1": max(wx0 + 0.5, wx1),
+                                "top": wtop,
+                                "bottom": max(wtop + 1.0, wbot),
+                            }
+                        )
+                    w_chars = []
+                continue
+            try:
+                c_left, c_bottom, c_right, c_top = tp.get_charbox(c_idx)
+            except (RuntimeError, ValueError, TypeError, OSError):
+                continue
+            if c_right <= c_left and c_top <= c_bottom:
+                continue
+            y_top = page_h - float(c_top)
+            y_bot = page_h - float(c_bottom)
+            y_mid = (y_top + y_bot) / 2.0
+            col_gap_thresh = max(6.0, (y_bot - y_top) * 0.85)
+            if w_chars and (
+                abs(y_mid - prev_cy_mid) > 3.5
+                or float(c_left) < prev_cx1 - 2.0
+                or (float(c_left) - prev_cx1) > col_gap_thresh
+            ):
+                tok = "".join(w_chars).strip()
+                if tok:
+                    words.append(
+                        {
+                            "text": tok,
+                            "x0": wx0,
+                            "x1": max(wx0 + 0.5, wx1),
+                            "top": wtop,
+                            "bottom": max(wtop + 1.0, wbot),
+                        }
+                    )
+                w_chars = []
+            if not w_chars:
+                wx0 = float(c_left)
+                wx1 = float(c_right)
+                wtop = y_top
+                wbot = y_bot
+            else:
+                wx0 = min(wx0, float(c_left))
+                wx1 = max(wx1, float(c_right))
+                wtop = min(wtop, y_top)
+                wbot = max(wbot, y_bot)
+            w_chars.append(ch)
+            prev_cx1 = float(c_right)
+            prev_cy_mid = y_mid
+
+        if w_chars:
+            tok = "".join(w_chars).strip()
+            if tok:
+                words.append(
+                    {
+                        "text": tok,
+                        "x0": wx0,
+                        "x1": max(wx0 + 0.5, wx1),
+                        "top": wtop,
+                        "bottom": max(wtop + 1.0, wbot),
+                    }
+                )
+        return words
+
+    def _extract_pdf_with_pypdfium(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str], dict[str, float | int | None]]:
+        """Extrae palabras nativas vía PDFium C++ (mismo motor que PDFgear/Chrome: ~2s en 400 págs., RAM <40 MB)."""
+        fallback_bank = (
+            normalize_bank_name(bank_name_override)
+            if bank_name_override and bank_name_override.strip()
+            else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
+        )
+        try:
+            import pypdfium2 as pdfium
+        except ImportError:
+            return [], fallback_bank, default_year, False, [], {}
+
+        try:
+            doc = pdfium.PdfDocument(file_bytes)
+        except Exception:  # noqa: BLE001 - aislamiento Fail-Closed ante PDFs anómalos en PDFium
+            return [], fallback_bank, default_year, False, [], {}
+
+        pages_words: list[tuple[list[dict[str, Any]], float]] = []
+        has_any_text = False
+        try:
+            total_pages = min(len(doc), MAX_PDF_PAGES)
+            for p_idx in range(total_pages):
+                if progress_callback is not None and (p_idx == 0 or (p_idx + 1) % 5 == 0 or p_idx + 1 == total_pages):
+                    progress_callback(p_idx + 1, total_pages, "Leyendo PDF")
+                page = doc[p_idx]
+                try:
+                    page_w, page_h = page.get_size()
+                    tp = page.get_textpage()
+                    try:
+                        words = self._extract_words_from_pdfium_textpage(tp, float(page_h))
+                        if words:
+                            has_any_text = True
+                        pages_words.append((words, float(page_w or 612.0)))
+                    finally:
+                        tp.close()
+                finally:
+                    page.close()
+                if not has_any_text and p_idx >= 4 and total_pages > 10:
+                    break
+        finally:
+            doc.close()
+
+        if not has_any_text:
+            return [], fallback_bank, default_year, False, [], {}
+
+        if progress_callback is not None:
+            progress_callback(len(pages_words), len(pages_words), "Estructurando filas")
+
+        rows, detected_bank, eff_year, warnings, cover_summary = self._extract_rows_from_word_pages(
+            pages_words=pages_words,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+            y_tol=2.6,
+        )
+        del pages_words
+        gc.collect()
+        return rows, detected_bank, eff_year, True, warnings, cover_summary
+
     def _extract_pdf_with_pdfplumber(
         self,
         file_bytes: bytes,
@@ -2998,31 +3205,42 @@ class BankStatementImporter:
         if not num_bands:
             return None
 
-        num_left = min(b.left for b in num_bands) - 12.0
+        num_left = min(b.left for b in num_bands) - 4.0
         num_right = max(b.right for b in num_bands) + 12.0
         concept_bands = [b for b in bands if b.role == "concept"]
         ref_bands = [b for b in bands if b.role == "reference"]
         type_bands = [b for b in bands if b.role == "type"]
 
-        # Palabras monetarias dentro de las columnas numéricas (sin capturar montos en la descripción)
+        # Palabras monetarias dentro de las columnas numéricas (nunca capturar "POR BS. X" dentro de la descripción)
         money_words: list[dict[str, Any]] = []
         for w in wl.words:
             wtxt = str(w["text"]).strip()
             if not _MONEY_TOKEN_RE.fullmatch(wtxt):
                 continue
             wxc = (float(w["x0"]) + float(w["x1"])) / 2.0
-            in_concept = any(cb.left <= wxc <= cb.right for cb in concept_bands)
+            in_concept = any(cb.left - 2.0 <= wxc <= cb.right + 2.0 for cb in concept_bands)
             if not in_concept and num_left <= wxc <= num_right:
                 money_words.append(w)
 
         if not money_words:
             return None
 
+        # Excluir falsos positivos en líneas de continuación: si la columna FECHA está al inicio, exigir token cerca de FECHA
+        first_date_b = date_bands[0]
+        if (
+            wl.words
+            and first_date_b.left < 40.0
+            and float(wl.words[0]["x0"]) > first_date_b.right + 12.0
+            and (default_month is None or len(money_words) < 2)
+        ):
+            return None
+
         ref_words = [
             str(w["text"]).strip()
             for w in wl.words
-            if any(rb.left - 4.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= rb.right + 3.0 for rb in ref_bands)
+            if any(rb.left - 3.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= rb.right + 3.0 for rb in ref_bands)
             and re.search(r"\d", str(w["text"]))
+            and not str(w["text"]).strip().startswith("*")
         ]
         explicit_ref = " ".join(ref_words).strip() or None
 
@@ -3541,6 +3759,12 @@ class BankStatementImporter:
 
         # 1. Inferir orden cronológico (ASC vs DESC)
         with_bal = [r for r in rows if r.balance_ves is not None]
+        # Si <5% de filas en un extracto grande traen saldo (ej. Mercantil donde SALDO viene vacío salvo ruido aislado),
+        # limpiar ese ruido para evitar falsos descuadres y preservar los saldos oficiales de portada.
+        if len(rows) >= 20 and 0 < len(with_bal) < max(3, int(len(rows) * 0.05)):
+            for r in with_bal:
+                r.balance_ves = None
+            with_bal = []
         order = "ASC"
         if len(rows) >= 2 and len(with_bal) >= 2:
             asc_hits = 0
