@@ -621,14 +621,14 @@ export default function AccountingPage() {
       badge={periodClosed ? "CERRADO" : undefined}
       subtitle="Libros, saldos y conciliación de pagos."
       actions={
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
           {/* Selector de Período Mes / Año */}
-          <div className="flex items-center gap-1 bg-surface-container px-2 py-1 rounded-lg border border-[#1e2430] text-xs font-mono">
+          <div className="flex items-center justify-between sm:justify-start gap-2 bg-surface-container px-3 sm:px-2 py-1.5 sm:py-1 rounded-lg border border-[#1e2430] text-xs font-mono w-full sm:w-auto">
             <select
               aria-label="Seleccionar mes contable"
               value={month}
               onChange={(e) => setMonth(Number(e.target.value))}
-              className="bg-transparent text-white focus:outline-hidden"
+              className="bg-transparent text-white focus:outline-hidden flex-1 sm:flex-initial"
             >
               {MONTHS.map((m) => (
                 <option key={m.value} value={m.value} className="bg-[#141920]">
@@ -650,70 +650,72 @@ export default function AccountingPage() {
             </select>
           </div>
 
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await downloadAccountingExcel(year, month);
-              } catch (err: any) {
-                setFeedback({
-                  type: "error",
-                  text: err.message || "Error al descargar el libro contable en Excel.",
-                });
-              }
-            }}
-            className="px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[15px]">grid_on</span>
-            <span>Excel</span>
-          </button>
+          <div className="grid grid-cols-3 sm:flex items-center gap-2 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await downloadAccountingExcel(year, month);
+                } catch (err: any) {
+                  setFeedback({
+                    type: "error",
+                    text: err.message || "Error al descargar el libro contable en Excel.",
+                  });
+                }
+              }}
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px]">grid_on</span>
+              <span>Excel</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await downloadAccountingPdf(year, month);
-              } catch (err: any) {
-                setFeedback({
-                  type: "error",
-                  text: err.message || "Error al descargar el informe contable en PDF.",
-                });
-              }
-            }}
-            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-slate-200 text-xs font-mono flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[15px] text-secondary">
-              picture_as_pdf
-            </span>
-            <span>PDF</span>
-          </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await downloadAccountingPdf(year, month);
+                } catch (err: any) {
+                  setFeedback({
+                    type: "error",
+                    text: err.message || "Error al descargar el informe contable en PDF.",
+                  });
+                }
+              }}
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-slate-200 text-xs font-mono flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px] text-secondary">
+                picture_as_pdf
+              </span>
+              <span>PDF</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              const initActualBanks: Record<string, number> = {};
-              for (const b of bankBoxes) {
-                initActualBanks[b.bank_name] =
-                  periodConfig?.actual_final_banks?.[b.bank_name] ??
-                  Number(b.theoretical_ves.toFixed(2));
-              }
-              setCloseActualBanks(initActualBanks);
-              setCloseActualUsdt(
-                periodConfig?.actual_final_usdt ??
-                  Number(
-                    (
-                      fiscalSummary?.calculated_final_balance ??
-                      displayedTheoreticalUsdt
-                    ).toFixed(4)
-                  )
-              );
-              setShowCloseModal(true);
-            }}
-            className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 flex items-center gap-1 whitespace-nowrap cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[15px]">lock_clock</span>
-            <span>Cerrar mes</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                const initActualBanks: Record<string, number> = {};
+                for (const b of bankBoxes) {
+                  initActualBanks[b.bank_name] =
+                    periodConfig?.actual_final_banks?.[b.bank_name] ??
+                    Number(b.theoretical_ves.toFixed(2));
+                }
+                setCloseActualBanks(initActualBanks);
+                setCloseActualUsdt(
+                  periodConfig?.actual_final_usdt ??
+                    Number(
+                      (
+                        fiscalSummary?.calculated_final_balance ??
+                        displayedTheoreticalUsdt
+                      ).toFixed(4)
+                    )
+                );
+                setShowCloseModal(true);
+              }}
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px]">lock_clock</span>
+              <span>Cerrar mes</span>
+            </button>
+          </div>
         </div>
       }
     >
@@ -907,7 +909,7 @@ export default function AccountingPage() {
             )}
 
             {/* Subcajas por Banco con su propio campo de Saldo Inicial VES */}
-            <div className="grid grid-cols-2 sm:grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {bankBoxes.map((b) => {
                 const inputId = `bank-init-${b.bank_name.replace(/\s+/g, "-").toLowerCase()}`;
                 return (
@@ -1010,7 +1012,7 @@ export default function AccountingPage() {
             </div>
 
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Sube capturas, estados de cuenta bancarios (.pdf/.xlsx/.csv) o registra pagos manuales.
+              Sube capturas (.png/.jpg), estados de cuenta (.pdf/.xlsx/.csv) o registra pagos manuales.
             </p>
 
             <input

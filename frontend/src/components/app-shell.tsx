@@ -321,34 +321,35 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
         <header
           className={`sticky ${
             isPaused ? "top-9" : "top-0"
-          } z-30 h-16 bg-surface/95 backdrop-blur-md border-b border-[#1e2430] px-4 lg:px-6 flex items-center justify-between gap-3`}
+          } z-30 h-16 bg-surface/95 backdrop-blur-md border-b border-[#1e2430] px-3 sm:px-4 lg:px-6 flex items-center justify-between gap-2 sm:gap-3`}
         >
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex-1 flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
               aria-expanded={mobileMenuOpen}
               aria-controls="primary-navigation-drawer"
-              className="lg:hidden p-1.5 rounded-lg bg-surface-container border border-[#1e2430] text-slate-300 hover:text-white"
+              className="lg:hidden p-1.5 rounded-lg bg-surface-container border border-[#1e2430] text-slate-300 hover:text-white shrink-0"
               aria-label="Abrir navegación"
             >
               <span className="material-symbols-outlined text-[20px]">menu</span>
             </button>
 
             {/* Telemetría BCV, USDT/VES y Weight */}
-            <div className="flex items-center gap-2 overflow-x-auto overscroll-x-contain touch-pan-x no-scrollbar py-1">
-              <div className="px-2.5 py-1 rounded-md bg-surface-container border border-[#1e2430] flex items-center gap-1.5 shrink-0">
+            <div className="flex-1 min-w-0 flex items-center gap-1.5 sm:gap-2 overflow-x-auto overscroll-x-contain touch-pan-x no-scrollbar py-1">
+              <div className="px-2 sm:px-2.5 py-1 rounded-md bg-surface-container border border-[#1e2430] flex items-center gap-1 sm:gap-1.5 shrink-0">
                 <span className="text-[10px] font-mono uppercase text-slate-400">BCV</span>
-                <span className="text-xs font-mono font-semibold text-secondary tabular-nums">
+                <span className="text-[11px] sm:text-xs font-mono font-semibold text-secondary tabular-nums">
                   {bcv?.usd ? `Bs. ${bcv.usd.toFixed(2)}` : "Bs. --"}
                 </span>
               </div>
 
-              <div className="px-2.5 py-1 rounded-md bg-surface-container border border-[#1e2430] flex items-center gap-1.5 shrink-0">
+              <div className="px-2 sm:px-2.5 py-1 rounded-md bg-surface-container border border-[#1e2430] flex items-center gap-1 sm:gap-1.5 shrink-0">
                 <span className="text-[10px] font-mono uppercase text-slate-400">
-                  USDT/VES
+                  <span className="sm:hidden">P2P</span>
+                  <span className="hidden sm:inline">USDT/VES</span>
                 </span>
-                <span className="text-xs font-mono font-semibold text-tertiary tabular-nums">
+                <span className="text-[11px] sm:text-xs font-mono font-semibold text-tertiary tabular-nums">
                   {bcv?.p2p_usdt_ref ? `Bs. ${bcv.p2p_usdt_ref.toFixed(2)}` : "Bs. --"}
                 </span>
                 {typeof bcv?.brecha_pct === "number" && (
@@ -374,7 +375,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
           </div>
 
           {/* Controles Derechos: Estado del Motor + Tema [OSCURO | ATENUADO] */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
             <button
               type="button"
               onClick={handleToggleBot}
@@ -386,7 +387,7 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
                     : "Pausar motor"
                   : "Estado del motor"
               }
-              className={`px-2.5 py-1 rounded-md border text-[11px] font-mono font-semibold flex items-center gap-1.5 transition-colors ${
+              className={`px-2 sm:px-2.5 py-1 rounded-md border text-[11px] font-mono font-semibold flex items-center gap-1.5 transition-colors ${
                 isPaused
                   ? "bg-error/15 border-error/40 text-error"
                   : "bg-tertiary/12 border-tertiary/30 text-tertiary"
@@ -402,8 +403,20 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               </span>
             </button>
 
-            {/* Conmutador unificado [OSCURO | ATENUADO] */}
-            <div className="p-0.5 rounded-lg bg-surface-container-low border border-[#1e2430] flex items-center text-[10px] font-mono">
+            {/* Conmutador compacto en móvil + completo en escritorio */}
+            <button
+              type="button"
+              onClick={() => setTheme(theme === "dark" ? "dim" : "dark")}
+              aria-label={`Cambiar tema (actual: ${theme === "dark" ? "Oscuro" : "Atenuado"})`}
+              className="sm:hidden px-2 py-1 rounded-md bg-surface-container-low border border-[#1e2430] flex items-center gap-1 text-[10px] font-mono font-bold text-primary"
+            >
+              <span className="material-symbols-outlined text-[14px]">
+                {theme === "dark" ? "dark_mode" : "contrast"}
+              </span>
+              <span>{theme === "dark" ? "OSC" : "ATN"}</span>
+            </button>
+
+            <div className="hidden sm:flex p-0.5 rounded-lg bg-surface-container-low border border-[#1e2430] items-center text-[10px] font-mono">
               <button
                 type="button"
                 onClick={() => setTheme("dark")}
@@ -448,12 +461,12 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
               </div>
               {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
             </div>
-            {actions && <div className="flex items-center gap-2 flex-wrap">{actions}</div>}
+            {actions && <div className="w-full sm:w-auto flex items-center gap-2 flex-wrap">{actions}</div>}
           </div>
         )}
 
         {/* Área de Contenido Denso */}
-        <main className="flex-1 px-4 lg:px-6 py-4 pb-20 lg:pb-8">{children}</main>
+        <main className="flex-1 px-4 lg:px-6 py-4 pb-24 lg:pb-8">{children}</main>
 
         {/* Barra Táctica Móvil Simplificada (Calculadora + Confirmación de Fondos + Matriz + Menú) */}
         <nav

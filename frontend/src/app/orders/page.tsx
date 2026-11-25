@@ -379,68 +379,72 @@ export default function OrdersPage() {
         </section>
 
         {/* Barra de sincronización e importación */}
-        <section className="p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold text-white mr-1">
-              Binance:
-            </span>
-            <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
-              {SYNC_WINDOWS.map((w) => (
-                <button
-                  key={w.days}
-                  type="button"
-                  onClick={() => setSyncDays(w.days)}
-                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
-                    syncDays === w.days
-                      ? "bg-primary-container text-on-primary font-bold"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  {w.label}
-                </button>
-              ))}
+        <section className="p-3.5 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full xl:w-auto">
+            <div className="flex items-center justify-between sm:justify-start gap-2 w-full sm:w-auto">
+              <span className="text-xs font-semibold text-white shrink-0">
+                Binance:
+              </span>
+              <div className="flex-1 sm:flex-initial grid grid-cols-5 sm:flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
+                {SYNC_WINDOWS.map((w) => (
+                  <button
+                    key={w.days}
+                    type="button"
+                    onClick={() => setSyncDays(w.days)}
+                    className={`px-1.5 sm:px-2 py-1 sm:py-0.5 rounded text-[11px] font-mono text-center transition-colors ${
+                      syncDays === w.days
+                        ? "bg-primary-container text-on-primary font-bold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {w.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={handleSyncBinance}
-              disabled={isSyncing}
-              className="px-3.5 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 transition-all flex items-center gap-1.5"
-            >
-              <span className="material-symbols-outlined text-[16px]">cloud_sync</span>
-              <span>{isSyncing ? "Sincronizando..." : `Sincronizar (${syncDays}d)`}</span>
-            </button>
-          </div>
 
-          {/* Carga Manual de Histórico CSV / XLSX */}
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,.xlsx,.xls"
-              onChange={handleFileChange}
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading}
-              className="px-3.5 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-slate-200 flex items-center gap-1.5 transition-colors"
-            >
-              <span className="material-symbols-outlined text-[16px] text-primary">
-                upload_file
-              </span>
-              <span>
-                {isUploading ? "Importando..." : "Importar (.csv / .xlsx)"}
-              </span>
-            </button>
+            <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto">
+              <button
+                type="button"
+                onClick={handleSyncBinance}
+                disabled={isSyncing}
+                className="px-3 py-2 sm:py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 transition-all flex items-center justify-center gap-1.5 whitespace-nowrap"
+              >
+                <span className="material-symbols-outlined text-[16px]">cloud_sync</span>
+                <span>{isSyncing ? "Sincronizando..." : `Sincronizar (${syncDays}d)`}</span>
+              </button>
+
+              {/* Carga Manual de Histórico CSV / XLSX */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                onChange={handleFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading}
+                className="px-3 py-2 sm:py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-slate-200 flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
+              >
+                <span className="material-symbols-outlined text-[16px] text-primary">
+                  upload_file
+                </span>
+                <span>
+                  <span className="sm:hidden">{isUploading ? "Importando..." : "Importar"}</span>
+                  <span className="hidden sm:inline">{isUploading ? "Importando..." : "Importar (.csv / .xlsx)"}</span>
+                </span>
+              </button>
+            </div>
           </div>
         </section>
 
         {/* Controles Restaurados: Búsqueda + Filtro COMPRA/VENTA + Método Costo FIFO/Promedio */}
-        <section className="p-3.5 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 flex-wrap">
+        <section className="p-3.5 rounded-xl bg-surface-container-low border border-[#1e2430] flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 sm:gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full lg:w-auto">
             {/* Filtro Tipo Operación */}
-            <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center text-xs font-mono">
+            <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] grid grid-cols-3 sm:flex items-center text-xs font-mono w-full sm:w-auto">
               {(
                 [
                   { id: "ALL", label: "TODAS" },
@@ -455,7 +459,7 @@ export default function OrdersPage() {
                     setPage(1);
                     setTradeFilter(tab.id);
                   }}
-                  className={`px-2.5 py-1 rounded-md transition-colors ${
+                  className={`px-2.5 py-1 rounded-md text-center transition-colors ${
                     tradeFilter === tab.id
                       ? "bg-primary-container text-on-primary font-bold"
                       : "text-slate-400 hover:text-white"
@@ -467,11 +471,11 @@ export default function OrdersPage() {
             </div>
 
             {/* Selector Método Fiscal PEPS / Costo Promedio */}
-            <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center text-xs font-mono">
+            <div className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] grid grid-cols-2 sm:flex items-center text-xs font-mono w-full sm:w-auto">
               <button
                 type="button"
                 onClick={() => setCostMethod("FIFO")}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
+                className={`px-2.5 py-1 rounded-md text-center transition-colors ${
                   costMethod === "FIFO"
                     ? "bg-secondary text-on-secondary font-bold"
                     : "text-slate-400 hover:text-white"
@@ -482,7 +486,7 @@ export default function OrdersPage() {
               <button
                 type="button"
                 onClick={() => setCostMethod("AVERAGE")}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
+                className={`px-2.5 py-1 rounded-md text-center transition-colors ${
                   costMethod === "AVERAGE"
                     ? "bg-secondary text-on-secondary font-bold"
                     : "text-slate-400 hover:text-white"
@@ -513,9 +517,99 @@ export default function OrdersPage() {
           </div>
         </section>
 
-        {/* Tabla Densa Paginada de Órdenes */}
+        {/* Lista Compacta en Móvil + Tabla Densa en Escritorio */}
         <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden defer-render">
-          <div className="overflow-x-auto overscroll-x-contain">
+          <div className="md:hidden divide-y divide-[#1e2430]/70 text-xs">
+            {loading ? (
+              <div className="py-10 text-center text-slate-400 font-mono">
+                Cargando libro de órdenes P2P...
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="py-10 px-4 text-center text-slate-400 font-mono">
+                No se encontraron órdenes. Usa &ldquo;Sincronizar&rdquo; o importa tu CSV/Excel de Binance.
+              </div>
+            ) : (
+              orders.map((o) => {
+                const isBuy = o.trade_type === "BUY";
+                const statusTxt =
+                  o.order_status === "COMPLETED"
+                    ? "COMPLETADA"
+                    : o.order_status === "CANCELLED"
+                    ? "CANCELADA"
+                    : o.order_status === "PENDING"
+                    ? "PENDIENTE"
+                    : o.order_status;
+                return (
+                  <div key={`mob-${o.order_number}`} className="p-3.5 space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-mono font-bold text-white">
+                            #{o.order_number.slice(-8)}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold uppercase ${
+                              isBuy
+                                ? "bg-tertiary/15 text-tertiary border border-tertiary/30"
+                                : "bg-primary-container/15 text-primary border border-primary-container/30"
+                            }`}
+                          >
+                            {isBuy ? "COMPRA" : "VENTA"}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-300 truncate mt-0.5">
+                          {o.counterparty_name || "Contraparte P2P"}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="px-2 py-0.5 rounded bg-surface-container-high text-[9px] font-mono text-slate-300">
+                          {statusTxt}
+                        </span>
+                        <div className="text-[10px] font-mono text-slate-500 mt-1">
+                          {o.created_at?.slice(0, 16).replace("T", " ")}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 pt-1 border-t border-[#1e2430]/50 font-mono tabular-nums text-[11px]">
+                      <div>
+                        <div className="text-[9px] text-slate-500 uppercase">Cantidad</div>
+                        <div className="text-white font-semibold">
+                          {o.crypto_amount.toFixed(2)} {o.asset}
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          @ Bs. {o.unit_price.toFixed(2)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-slate-500 uppercase">Total VES</div>
+                        <div className="text-white font-semibold">
+                          Bs.{" "}
+                          {o.fiat_amount.toLocaleString("es-VE", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </div>
+                        <div className="text-[10px] text-secondary">
+                          BCV {o.bcv_rate > 0 ? o.bcv_rate.toFixed(2) : "--"}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[9px] text-slate-500 uppercase">Comisión</div>
+                        <div className="text-slate-300">
+                          {o.fee_crypto > 0
+                            ? `${o.fee_crypto.toFixed(3)} ${o.asset}`
+                            : `Bs. ${o.fee_fiat.toFixed(2)}`}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto overscroll-x-contain">
             <table className="w-full text-left border-collapse">
               <thead className="sticky top-0 z-10 bg-surface-container">
                 <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">

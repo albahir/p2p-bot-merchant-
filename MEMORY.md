@@ -944,6 +944,19 @@
     - **Verificación Post-Edición**:
       - **`73 passed in 48.25s`** en la suite offline de 14 archivos (incluyendo `7/7` en [`tests/unit/test_file_security_guards.py`](file:///c:/p2p-bot-merchant/tests/unit/test_file_security_guards.py) y validado sin falsos positivos sobre los 4 PDFs y 3 JPGs bancarios reales del usuario), `ruff check .` (`0` errores), `mypy src/ scripts/` (`88` archivos sin errores), `tsc --noEmit` (`0` errores), `pip check` limpio y escaneo estático de 1,505 líneas sin secretos ni *sinks* inseguros.
 
+73. **Rediseño Responsivo Móvil y Simplificación Táctica de Controles (ADR 073)**:
+    - **Header Global y Scrollbars ([`globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css), [`app-shell.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/app-shell.tsx))**:
+      - Definida utilidad `.no-scrollbar` en CSS global para suprimir barras horizontales fantasma bajo los chips `BCV` / `USDT/VES`.
+      - Compactado el encabezado móvil (`P2P` + botón compacto `OSC`/`ATN` bajo `<640 px`) evitando el recorte horizontal en `USDT/VES`, y ampliado margen inferior `pb-24` sobre la barra táctica fija.
+    - **Vistas Móviles Ordenadas Sin Desbordes ni Solapamientos**:
+      - **Velas / Mercado ([`market/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/market/page.tsx))**: Botones de modo en 2 filas simétricas (`2 + 3`), temporalidades (`grid-cols-6`), controles (`Velas/Línea/Área` + `Medias móviles` / `Fuerza (RSI)` en `grid-cols-2`), presets `grid-cols-5`, y tarjetas móviles (`md:hidden`) para **Tasas y Liquidez por Banco** evitando colisión de columnas y cortes derechos.
+      - **Calculadora ([`calculator/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/calculator/page.tsx))**: Eliminado desbordamiento de presets `[100][250][500][1000]` mediante `flex-col sm:flex-row` + `grid-cols-4`, ajuste de texto `Capital req.` y barra simétrica `grid-cols-4` para rotación diaria.
+      - **Órdenes ([`orders/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/orders/page.tsx))**: Sincronización/Importar alineados en `grid-cols-2`, filtros separados simétricamente (`grid-cols-3` + `grid-cols-2`) y tarjetas móviles `md:hidden` sin cortes laterales.
+      - **Contabilidad ([`accounting/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/accounting/page.tsx))**: Acciones de cabecera en 2 filas balanceadas (período arriba + `Excel | PDF | Cerrar mes` en `grid-cols-3` abajo) y subcajas bancarias `grid-cols-1 sm:grid-cols-2`.
+      - **Configuración ([`settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx))**: Botones de alertas/emergencia y perfil simétricos (`grid-cols-2` / `grid-cols-1 sm:grid-cols-2`), formulario de operadores en `grid-cols-2` y tarjetas móviles `md:hidden` en directorio de operadores.
+    - **Verificación Post-Edición**:
+      - `tsc -p frontend/tsconfig.json --noEmit` (`0` errores) y `npm --prefix frontend run build` (`Next.js 14.2.35`, `15/15` páginas estáticas generadas sin advertencias).
+
 ---
 
 ## 🎯 Guía Operativa Actual

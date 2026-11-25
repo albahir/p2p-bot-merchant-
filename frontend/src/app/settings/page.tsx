@@ -1069,12 +1069,12 @@ export default function SettingsSecurityPage() {
               </div>
             </div>
 
-            <div className="pt-3 border-t border-[#1e2430] flex flex-wrap items-center justify-between gap-2">
+            <div className="pt-3 border-t border-[#1e2430] grid grid-cols-1 sm:grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={handleTestTelegram}
                 disabled={testingTelegram}
-                className="px-3.5 py-2 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary text-xs font-mono font-semibold hover:bg-secondary/25"
+                className="w-full px-3.5 py-2 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary text-xs font-mono font-semibold hover:bg-secondary/25 text-center"
               >
                 {testingTelegram ? "Enviando..." : "Enviar Alerta de Prueba"}
               </button>
@@ -1084,7 +1084,7 @@ export default function SettingsSecurityPage() {
                   type="button"
                   onClick={handleToggleEmergencyPause}
                   disabled={togglingBot}
-                  className={`px-3.5 py-2 rounded-lg text-xs font-bold ${
+                  className={`w-full px-3.5 py-2 rounded-lg text-xs font-bold text-center ${
                     isPaused
                       ? "bg-tertiary text-on-tertiary"
                       : "bg-error text-on-error"
@@ -1669,11 +1669,11 @@ export default function SettingsSecurityPage() {
               />
             </div>
 
-            <div className="md:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-2.5 pt-1">
+            <div className="md:col-span-2 lg:col-span-3 grid grid-cols-2 sm:flex items-center gap-2.5 pt-1">
               <button
                 type="submit"
                 disabled={savingRecovery}
-                className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50"
+                className="w-full sm:w-auto px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 text-center"
               >
                 {savingRecovery ? "Guardando..." : "Guardar"}
               </button>
@@ -1681,7 +1681,7 @@ export default function SettingsSecurityPage() {
                 type="button"
                 disabled={savingRecovery}
                 onClick={(e) => handleSaveRecoveryProfile(e as any, true)}
-                className="px-4 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-white"
+                className="w-full sm:w-auto px-4 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-white text-center whitespace-nowrap"
               >
                 Nueva llave maestra
               </button>
@@ -1705,7 +1705,7 @@ export default function SettingsSecurityPage() {
               {/* Alta Rápida por ID de Telegram */}
               <form
                 onSubmit={handleAuthorizeOperator}
-                className="flex items-center gap-2 flex-wrap"
+                className="grid grid-cols-2 sm:flex items-center gap-2 w-full lg:w-auto"
               >
                 <input
                   type="text"
@@ -1715,8 +1715,8 @@ export default function SettingsSecurityPage() {
                   enterKeyHint="next"
                   value={newTgId}
                   onChange={(e) => setNewTgId(e.target.value.replace(/\D/g, ""))}
-                  placeholder="ID de Telegram (ej. 2076708117)"
-                  className="w-48 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  placeholder="ID Telegram"
+                  className="w-full sm:w-44 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
                 />
                 <input
                   type="text"
@@ -1726,7 +1726,7 @@ export default function SettingsSecurityPage() {
                   value={newUsername}
                   onChange={(e) => setNewUsername(e.target.value)}
                   placeholder="Alias opcional"
-                  className="w-36 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  className="w-full sm:w-36 px-3 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
                 />
                 <select
                   aria-label="Rol inicial del operador"
@@ -1734,7 +1734,7 @@ export default function SettingsSecurityPage() {
                   onChange={(e) =>
                     setNewRole(e.target.value as "ADMIN" | "TRADER" | "INVITADO")
                   }
-                  className="px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-primary"
+                  className="w-full sm:w-auto px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-primary"
                 >
                   <option value="TRADER">COMERCIANTE</option>
                   <option value="ADMIN">ADMINISTRADOR</option>
@@ -1743,14 +1743,122 @@ export default function SettingsSecurityPage() {
                 <button
                   type="submit"
                   disabled={authorizingUser || !newTgId}
-                  className="px-3.5 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-40 whitespace-nowrap"
+                  className="w-full sm:w-auto px-3.5 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-40 whitespace-nowrap"
                 >
                   {authorizingUser ? "Autorizando..." : "+ Autorizar"}
                 </button>
               </form>
             </div>
 
-            <div className="overflow-x-auto overscroll-x-contain">
+            {/* Tarjetas Móviles para Operadores sin recorte de columnas */}
+            <div className="md:hidden divide-y divide-[#1e2430]/70 text-xs">
+              {loading ? (
+                <div className="py-8 text-center text-slate-400 font-mono">
+                  Cargando directorio de operadores...
+                </div>
+              ) : operators.length === 0 ? (
+                <div className="py-8 text-center text-slate-400 font-mono">
+                  No hay operadores registrados.
+                </div>
+              ) : (
+                operators.map((op) => {
+                  const isEnvImmutable =
+                    op.permission_source?.includes("Inmutable") ?? false;
+                  const tgLinked =
+                    op.telegram_linked ?? Boolean(op.telegram_id);
+                  const apiConfigured = Boolean(op.binance_api_configured);
+                  const sheetConfigured =
+                    op.google_sheet_configured ?? Boolean(op.google_sheet_id);
+
+                  return (
+                    <div key={`mob-op-${op.id}`} className="p-3.5 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="font-semibold text-white truncate">
+                            {op.username}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap ${
+                              op.is_active
+                                ? "bg-tertiary/15 text-tertiary"
+                                : "bg-error/15 text-error"
+                            }`}
+                          >
+                            {op.is_active ? "ACTIVO" : "SUSPENDIDO"}
+                          </span>
+                        </div>
+                        <select
+                          disabled={isEnvImmutable || op.id === currentUser.id}
+                          value={op.role}
+                          onChange={(e) =>
+                            handleRoleChange(
+                              op,
+                              e.target.value as "ADMIN" | "TRADER" | "INVITADO"
+                            )
+                          }
+                          className="px-2 py-1 rounded bg-surface-container border border-[#1e2430] text-[10px] font-mono font-bold text-white disabled:opacity-60"
+                        >
+                          <option value="ADMIN">ADMINISTRADOR</option>
+                          <option value="TRADER">COMERCIANTE</option>
+                          <option value="INVITADO">INVITADO</option>
+                        </select>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono">
+                        <div className="text-slate-400">
+                          TG:{" "}
+                          <span className={tgLinked ? "text-secondary font-semibold" : "text-slate-500"}>
+                            {tgLinked ? op.telegram_id : "Sin vincular"}
+                          </span>
+                        </div>
+                        <div className="text-right text-slate-400">
+                          API:{" "}
+                          <span className={apiConfigured ? "text-tertiary font-semibold" : "text-slate-500"}>
+                            {apiConfigured ? op.binance_key_type || "AES" : "Sin API"}
+                          </span>
+                        </div>
+                        <div className="text-slate-400">
+                          Sheet:{" "}
+                          <span className={sheetConfigured ? "text-tertiary" : "text-slate-500"}>
+                            {sheetConfigured ? `${op.google_sheet_id?.slice(0, 8)}…` : "Sin hoja"}
+                          </span>
+                        </div>
+                        <div className="text-right text-slate-400 truncate">
+                          {op.permission_source || "Base de Datos"}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                        {op.role === "INVITADO" && (
+                          <button
+                            type="button"
+                            onClick={() => handleRoleChange(op, "TRADER")}
+                            className="px-2.5 py-1 rounded bg-tertiary/15 text-tertiary border border-tertiary/30 text-[10px] font-mono font-bold"
+                          >
+                            Aprobar Comerciante
+                          </button>
+                        )}
+                        {op.id !== currentUser.id && !isEnvImmutable && (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleStatus(op)}
+                            className={`px-2.5 py-1 rounded border text-[10px] font-mono font-bold ${
+                              op.is_active
+                                ? "bg-error/10 border-error/30 text-error"
+                                : "bg-tertiary/10 border-tertiary/30 text-tertiary"
+                            }`}
+                          >
+                            {op.is_active ? "Suspender" : "Reactivar"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="hidden md:block overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 z-10 bg-surface-container">
                   <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-300">
