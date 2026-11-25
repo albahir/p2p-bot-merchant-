@@ -109,7 +109,7 @@ export default function LoginPage() {
         setLoading(true);
         try {
           await loginTelegram(tgUser);
-          router.push("/");
+          window.location.assign("/");
         } catch (err: any) {
           setError(err.message || "No se pudo autenticar con Telegram.");
         } finally {
@@ -143,7 +143,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await login(username.trim(), password);
-      router.push("/");
+      window.location.assign("/");
     } catch (err: any) {
       setError(err.message || "Credenciales inválidas o cuenta suspendida.");
     } finally {
@@ -158,7 +158,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await loginTelegramWebApp(tg.initData);
-      router.push("/");
+      window.location.assign("/");
     } catch (err: any) {
       setError(err.message || "Error verificando firma HMAC de Telegram Mini App.");
     } finally {
