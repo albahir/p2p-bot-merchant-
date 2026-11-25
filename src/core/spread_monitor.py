@@ -941,6 +941,8 @@ class SpreadMonitor:
 
         buy_ads: list[dict[str, Any]] = []
         sell_ads: list[dict[str, Any]] = []
+        raw_buy_total = 0
+        raw_sell_total = 0
         source_label = "binance_bapi"
 
         try:
@@ -991,6 +993,9 @@ class SpreadMonitor:
                     merchant_check=merchant_only,
                     use_public_bapi=True,
                 )
+
+            raw_buy_total = int(getattr(buy_resp, "total", 0) or 0)
+            raw_sell_total = int(getattr(sell_resp, "total", 0) or 0)
 
             for item in buy_resp.data:
                 price_f = float(item.adv.price or 0.0)
@@ -1115,6 +1120,31 @@ class SpreadMonitor:
             recommended_mode = "NONE"
             calc = None
 
+        total_buy_ads = max(raw_buy_total, len(buy_ads))
+        total_sell_ads = max(raw_sell_total, len(sell_ads))
+        total_book_ads = total_buy_ads + total_sell_ads
+        buy_ads_share_pct = round((total_buy_ads / total_book_ads) * 100.0, 1) if total_book_ads > 0 else 50.0
+        sell_ads_share_pct = round(100.0 - buy_ads_share_pct, 1) if total_book_ads > 0 else 50.0
+        buy_merchants_count = sum(1 for a in buy_ads if a.get("is_merchant"))
+        sell_merchants_count = sum(1 for a in sell_ads if a.get("is_merchant"))
+        buy_month_orders_sum = sum(int(a.get("month_orders") or 0) for a in buy_ads)
+        sell_month_orders_sum = sum(int(a.get("month_orders") or 0) for a in sell_ads)
+
+        if total_book_ads == 0:
+            market_pressure_label = "Sin anuncios activos para este banco"
+        elif sell_ads_share_pct >= 58.0:
+            market_pressure_label = (
+                f"Mayor demanda de compra ({sell_ads_share_pct:.0f}% Venta vs {buy_ads_share_pct:.0f}% Compra)"
+            )
+        elif buy_ads_share_pct >= 58.0:
+            market_pressure_label = (
+                f"Mayor oferta disponible ({buy_ads_share_pct:.0f}% Compra vs {sell_ads_share_pct:.0f}% Venta)"
+            )
+        else:
+            market_pressure_label = (
+                f"Libro equilibrado ({buy_ads_share_pct:.0f}% Compra · {sell_ads_share_pct:.0f}% Venta)"
+            )
+
         result: dict[str, Any] = {
             "amount_usdt": safe_usdt,
             "trans_amount_ves": trans_amount_ves,
@@ -1132,6 +1162,15 @@ class SpreadMonitor:
             "recommended_mode": recommended_mode,
             "net_profit_ves": calc.net_profit_ves if calc else 0.0,
             "net_profit_usdt": calc.net_profit_usdt if calc else 0.0,
+            "total_buy_ads": total_buy_ads,
+            "total_sell_ads": total_sell_ads,
+            "buy_ads_share_pct": buy_ads_share_pct,
+            "sell_ads_share_pct": sell_ads_share_pct,
+            "buy_merchants_count": buy_merchants_count,
+            "sell_merchants_count": sell_merchants_count,
+            "buy_month_orders_sum": buy_month_orders_sum,
+            "sell_month_orders_sum": sell_month_orders_sum,
+            "market_pressure_label": market_pressure_label,
             "buy_ads": buy_ads,
             "sell_ads": sell_ads,
             "source": source_label,

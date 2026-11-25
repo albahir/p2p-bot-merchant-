@@ -11,6 +11,14 @@ import {
   previewBankStatement,
 } from "@/lib/api";
 
+type StatementFilterTab =
+  | "ALL"
+  | "UNMATCHED"
+  | "MATCHED"
+  | "FEES"
+  | "MISMATCH"
+  | "DUPLICATES";
+
 interface EditableRow extends StatementPreviewRow {
   selectedAction: StatementAction;
   selectedOrder: string;
@@ -40,6 +48,10 @@ export function StatementImportModal({
   const [colMap, setColMap] = useState<Record<string, string>>({});
   const [reloadingMap, setReloadingMap] = useState<boolean>(false);
   const [committing, setCommitting] = useState<boolean>(false);
+  const [filterTab, setFilterTab] = useState<StatementFilterTab>("ALL");
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [page, setPage] = useState<number>(1);
+  const PAGE_SIZE = 50;
 
   useEffect(() => {
     if (!preview) return;
@@ -52,6 +64,9 @@ export function StatementImportModal({
       }))
     );
     setColMap({});
+    setFilterTab("ALL");
+    setSearchQuery("");
+    setPage(1);
   }, [preview]);
 
   if (!isOpen || !preview) return null;
@@ -60,8 +75,35 @@ export function StatementImportModal({
     (r) => r.selectedAction !== "IGNORE" && r.selectedAction !== "DUPLICATE_EXISTING"
   );
   const matchedCount = rows.filter((r) => r.selectedAction === "P2P_MATCH").length;
+  const unmatchedCount = rows.filter((r) => r.selectedAction === "P2P_UNMATCHED").length;
   const feesCount = rows.filter((r) => r.selectedAction === "BANK_FEE").length;
+  const mismatchCount = rows.filter((r) => r.balance_ok === false).length;
   const ignoredOrDupCount = rows.length - activeRows.length;
+
+  const qLower = searchQuery.trim().toLowerCase();
+  const filteredRows = rows.filter((r) => {
+    if (filterTab === "UNMATCHED" && r.selectedAction !== "P2P_UNMATCHED") return false;
+    if (filterTab === "MATCHED" && r.selectedAction !== "P2P_MATCH") return false;
+    if (filterTab === "FEES" && r.selectedAction !== "BANK_FEE") return false;
+    if (filterTab === "MISMATCH" && r.balance_ok !== false) return false;
+    if (
+      filterTab === "DUPLICATES" &&
+      r.selectedAction !== "DUPLICATE_EXISTING" &&
+      r.selectedAction !== "IGNORE"
+    ) {
+      return false;
+    }
+    if (qLower) {
+      const hay = `${r.date_vet} ${r.reference_number} ${r.concept} ${r.amount_ves.toFixed(2)}`.toLowerCase();
+      if (!hay.includes(qLower)) return false;
+    }
+    return true;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * PAGE_SIZE;
+  const visibleRows = filteredRows.slice(pageStart, pageStart + PAGE_SIZE);
 
   function updateRowAction(rowIndex: number, action: StatementAction) {
     setRows((prev) =>
@@ -277,11 +319,88 @@ export function StatementImportModal({
           </form>
         )}
 
-        {/* Tabla de Movimientos */}
+        {/* Barra de Filtros, Búsqueda y Paginación para alto volumen */}
+        {rows.length > 0 && (
+          <div className="px-5 py-2.5 bg-surface-container/60 border-b border-[#1e2430] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  { id: "ALL", label: `Todos (${rows.length})` },
+                  { id: "UNMATCHED", label: `Pendientes (${unmatchedCount})` },
+                  { id: "MATCHED", label: `P2P (${matchedCount})` },
+                  { id: "FEES", label: `Comisiones (${feesCount})` },
+                  ...(mismatchCount > 0
+                    ? [{ id: "MISMATCH" as StatementFilterTab, label: `Descuadres (${mismatchCount})` }]
+                    : []),
+                  { id: "DUPLICATES", label: `Excluidas (${ignoredOrDupCount})` },
+                ] as Array<{ id: StatementFilterTab; label: string }>
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    setFilterTab(tab.id);
+                    setPage(1);
+                  }}
+                  className={`px-2.5 py-1 rounded-md border transition-colors cursor-pointer ${
+                    filterTab === tab.id
+                      ? "bg-surface-container-high border-slate-500 text-white font-semibold"
+                      : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="search"
+                aria-label="Filtrar movimientos por referencia, concepto o monto"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="Buscar ref, concepto o monto..."
+                className="px-2.5 py-1 rounded-md bg-surface-container-lowest border border-[#1e2430] text-[11px] text-white w-52"
+              />
+              {totalPages > 1 && (
+                <div className="flex items-center gap-1 text-slate-300 tabular-nums">
+                  <button
+                    type="button"
+                    disabled={safePage <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    className="px-2 py-1 rounded bg-surface-container border border-[#1e2430] disabled:opacity-40 cursor-pointer"
+                  >
+                    ‹
+                  </button>
+                  <span className="px-1.5">
+                    {safePage}/{totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safePage >= totalPages}
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    className="px-2 py-1 rounded bg-surface-container border border-[#1e2430] disabled:opacity-40 cursor-pointer"
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Tabla de Movimientos (Paginada 50/pág para fluidez con 6,000–25,000 filas) */}
         <div className="flex-1 overflow-auto overscroll-x-contain p-4">
           {rows.length === 0 ? (
             <div className="py-12 text-center text-xs text-slate-400">
               No se extrajeron movimientos en este archivo. Revisa el formato o asigna las columnas arriba.
+            </div>
+          ) : visibleRows.length === 0 ? (
+            <div className="py-12 text-center text-xs text-slate-400">
+              Ningún movimiento coincide con el filtro actual.
             </div>
           ) : (
             <table className="w-full text-left border-collapse text-xs">
@@ -298,7 +417,7 @@ export function StatementImportModal({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1e2430]/70">
-                {rows.map((r) => (
+                {visibleRows.map((r) => (
                   <tr
                     key={r.row_index}
                     className={`${

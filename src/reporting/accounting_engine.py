@@ -100,6 +100,10 @@ class AccountingEngine:
         order: Order,
         voucher: BankVoucher,
         user_id: int | None = None,
+        *,
+        auto_commit: bool = True,
+        entry_number_override: int | None = None,
+        prev_hash_override: str | None = None,
     ) -> list[JournalEntry]:
         """Genera el asiento contable formal de partida doble para una orden P2P conciliada con su comprobante."""
         if user_id is not None and self.user_id is None:
@@ -117,9 +121,15 @@ class AccountingEngine:
             if existing_entries:
                 return existing_entries
 
-        entry_number = self.journal_repo.get_next_entry_number()
-        last_entry = self.journal_repo.get_last_entry()
-        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+        if entry_number_override is not None:
+            entry_number = entry_number_override
+        else:
+            entry_number = self.journal_repo.get_next_entry_number()
+        if prev_hash_override is not None:
+            current_prev_hash = prev_hash_override
+        else:
+            last_entry = self.journal_repo.get_last_entry()
+            current_prev_hash = str(last_entry.entry_hash) if last_entry else "0" * 64
 
         trade_type = str(order.trade_type or "BUY").upper()
         amount_ves = float(voucher.amount_ves)
@@ -232,17 +242,31 @@ class AccountingEngine:
                 entry_hash=entry_hash,
             )
 
-            saved = self.journal_repo.create_entry(entry)
+            saved = self.journal_repo.create_entry(entry, auto_commit=auto_commit)
             created_entries.append(saved)
             current_prev_hash = entry_hash
 
         return created_entries
 
-    def record_unmatched_voucher(self, voucher: BankVoucher) -> list[JournalEntry]:
+    def record_unmatched_voucher(
+        self,
+        voucher: BankVoucher,
+        *,
+        auto_commit: bool = True,
+        entry_number_override: int | None = None,
+        prev_hash_override: str | None = None,
+    ) -> list[JournalEntry]:
         """Asienta un comprobante no conciliado como partida independiente sin forzar emparejamiento."""
-        entry_number = self.journal_repo.get_next_entry_number()
-        last_entry = self.journal_repo.get_last_entry()
-        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+        entry_number = (
+            entry_number_override
+            if entry_number_override is not None
+            else self.journal_repo.get_next_entry_number()
+        )
+        if prev_hash_override is not None:
+            current_prev_hash = prev_hash_override
+        else:
+            last_entry = self.journal_repo.get_last_entry()
+            current_prev_hash = str(last_entry.entry_hash) if last_entry else "0" * 64
 
         amount_ves = float(voucher.amount_ves)
         bank_fee = float(voucher.bank_fee_ves or 0.0)
@@ -324,13 +348,20 @@ class AccountingEngine:
                 prev_hash=current_prev_hash,
                 entry_hash=entry_hash,
             )
-            saved = self.journal_repo.create_entry(entry)
+            saved = self.journal_repo.create_entry(entry, auto_commit=auto_commit)
             created.append(saved)
             current_prev_hash = entry_hash
 
         return created
 
-    def record_bank_fee_voucher(self, voucher: BankVoucher) -> list[JournalEntry]:
+    def record_bank_fee_voucher(
+        self,
+        voucher: BankVoucher,
+        *,
+        auto_commit: bool = True,
+        entry_number_override: int | None = None,
+        prev_hash_override: str | None = None,
+    ) -> list[JournalEntry]:
         """Asienta una comisión bancaria deducible (LISLR Art. 27): DEBE 5.2.01 / HABER 1.1.01."""
         fee_amount = round(float(voucher.bank_fee_ves or voucher.amount_ves or 0.0), 2)
         if fee_amount <= 0.0:
@@ -348,9 +379,16 @@ class AccountingEngine:
             if existing:
                 return existing
 
-        entry_number = self.journal_repo.get_next_entry_number()
-        last_entry = self.journal_repo.get_last_entry()
-        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+        entry_number = (
+            entry_number_override
+            if entry_number_override is not None
+            else self.journal_repo.get_next_entry_number()
+        )
+        if prev_hash_override is not None:
+            current_prev_hash = prev_hash_override
+        else:
+            last_entry = self.journal_repo.get_last_entry()
+            current_prev_hash = str(last_entry.entry_hash) if last_entry else "0" * 64
         dt = cast(datetime | None, voucher.voucher_date) or datetime.now(UTC)
         if dt.tzinfo is not None:
             dt = dt.astimezone(UTC).replace(tzinfo=None)
@@ -402,13 +440,20 @@ class AccountingEngine:
                 prev_hash=current_prev_hash,
                 entry_hash=entry_hash,
             )
-            saved = self.journal_repo.create_entry(entry)
+            saved = self.journal_repo.create_entry(entry, auto_commit=auto_commit)
             created.append(saved)
             current_prev_hash = entry_hash
 
         return created
 
-    def record_capital_transfer_voucher(self, voucher: BankVoucher) -> list[JournalEntry]:
+    def record_capital_transfer_voucher(
+        self,
+        voucher: BankVoucher,
+        *,
+        auto_commit: bool = True,
+        entry_number_override: int | None = None,
+        prev_hash_override: str | None = None,
+    ) -> list[JournalEntry]:
         """Asienta un traspaso o aporte de capital propio sin afectar ingresos gravables ni costo P2P."""
         amount_ves = round(float(voucher.amount_ves or 0.0), 2)
         if amount_ves <= 0.0:
@@ -423,9 +468,16 @@ class AccountingEngine:
             if existing:
                 return existing
 
-        entry_number = self.journal_repo.get_next_entry_number()
-        last_entry = self.journal_repo.get_last_entry()
-        current_prev_hash: str = str(last_entry.entry_hash) if last_entry else "0" * 64
+        entry_number = (
+            entry_number_override
+            if entry_number_override is not None
+            else self.journal_repo.get_next_entry_number()
+        )
+        if prev_hash_override is not None:
+            current_prev_hash = prev_hash_override
+        else:
+            last_entry = self.journal_repo.get_last_entry()
+            current_prev_hash = str(last_entry.entry_hash) if last_entry else "0" * 64
         dt = cast(datetime | None, voucher.voucher_date) or datetime.now(UTC)
         if dt.tzinfo is not None:
             dt = dt.astimezone(UTC).replace(tzinfo=None)
@@ -494,7 +546,7 @@ class AccountingEngine:
                 prev_hash=current_prev_hash,
                 entry_hash=entry_hash,
             )
-            saved = self.journal_repo.create_entry(entry)
+            saved = self.journal_repo.create_entry(entry, auto_commit=auto_commit)
             created.append(saved)
             current_prev_hash = entry_hash
 
@@ -506,30 +558,30 @@ class AccountingEngine:
         month: int,
         cutoff_start_date: date | None = None,
     ) -> tuple[datetime, datetime]:
-        """Retorna límites (start_date, end_date) respetando corte opcional en hora VET (UTC-4)."""
+        """Retorna límites (start_date, end_date) en UTC (naive) correspondientes al mes en Hora Legal de Venezuela (VET = UTC-4)."""
         days_in_month = calendar.monthrange(year, month)[1]
-        if (
-            cutoff_start_date is not None
-            and cutoff_start_date.year == year
-            and cutoff_start_date.month == month
-            and cutoff_start_date.day > 1
-        ):
-            vet_tz = timezone(timedelta(hours=-4))
-            start_dt = (
-                datetime(year, month, cutoff_start_date.day, 0, 0, 0, tzinfo=vet_tz)
-                .astimezone(UTC)
-                .replace(tzinfo=None)
+        vet_tz = timezone(timedelta(hours=-4))
+        start_day = (
+            cutoff_start_date.day
+            if (
+                cutoff_start_date is not None
+                and cutoff_start_date.year == year
+                and cutoff_start_date.month == month
+                and cutoff_start_date.day > 1
             )
-            end_dt = (
-                datetime(year, month, days_in_month, 23, 59, 59, 999999, tzinfo=vet_tz)
-                .astimezone(UTC)
-                .replace(tzinfo=None)
-            )
-            return start_dt, end_dt
-        return (
-            datetime(year, month, 1, 0, 0, 0),
-            datetime(year, month, days_in_month, 23, 59, 59, 999999),
+            else 1
         )
+        start_dt = (
+            datetime(year, month, start_day, 0, 0, 0, tzinfo=vet_tz)
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+        )
+        end_dt = (
+            datetime(year, month, days_in_month, 23, 59, 59, 999999, tzinfo=vet_tz)
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+        )
+        return start_dt, end_dt
 
     def calculate_ledger_for_account(
         self,

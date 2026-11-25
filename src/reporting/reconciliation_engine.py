@@ -56,6 +56,13 @@ class P2PReconciliationEngine:
     def calculate_score(self, voucher: BankVoucher, order: Order) -> float:
         """Calcula el puntaje de coincidencia (0 - 100%) entre un comprobante y una orden."""
         # ---------------------------------------------------------
+        # 0. HARD FILTER: Estado de la Orden (Fail-closed contable)
+        # ---------------------------------------------------------
+        order_status = str(getattr(order, "order_status", "COMPLETED") or "COMPLETED").upper()
+        if order_status != "COMPLETED":
+            return 0.0
+
+        # ---------------------------------------------------------
         # 1. HARD FILTER: Dirección de Flujo de Fondos (Fail-closed)
         # ---------------------------------------------------------
         voucher_mov = (voucher.movement_type or "DEBIT").upper()

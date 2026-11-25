@@ -544,6 +544,8 @@ def aggregate_bank_snapshot(
             "sell_avg": round(sum(acc.sell_prices) / len(acc.sell_prices), 2) if acc.sell_prices else 0.0,
             "vol_buy": round(acc.buy_vol, 2),
             "vol_sell": round(acc.sell_vol, 2),
+            "buy_ads_count": float(len(acc.buy_prices)),
+            "sell_ads_count": float(len(acc.sell_prices)),
         }
     return summary
 

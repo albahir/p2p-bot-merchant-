@@ -944,6 +944,83 @@ export default function SpreadMatrixPage() {
               </div>
             )}
 
+            {/* Comportamiento del Mercado por Banco: Conteo de Órdenes Compra vs Venta */}
+            {orderbook && (() => {
+              const totalBuy = orderbook.total_buy_ads ?? orderbook.buy_ads.length;
+              const totalSell = orderbook.total_sell_ads ?? orderbook.sell_ads.length;
+              const totalAds = totalBuy + totalSell;
+              const buyShare =
+                orderbook.buy_ads_share_pct ??
+                (totalAds > 0 ? Math.round((totalBuy / totalAds) * 1000) / 10 : 50);
+              const sellShare =
+                orderbook.sell_ads_share_pct ??
+                (totalAds > 0 ? Math.round((totalSell / totalAds) * 1000) / 10 : 50);
+              const pressureLabel = orderbook.market_pressure_label || "Equilibrado";
+              const pressureBadgeClass = pressureLabel.toLowerCase().includes("compra")
+                ? "bg-tertiary/15 text-tertiary border-tertiary/30"
+                : pressureLabel.toLowerCase().includes("venta")
+                ? "bg-primary-container/15 text-primary border-primary-container/30"
+                : "bg-surface-container text-slate-300 border-[#263042]";
+
+              return (
+                <div className="p-3 rounded-lg bg-surface-container-lowest border border-[#1e2430] space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="material-symbols-outlined text-[16px] text-secondary">
+                        stacked_bar_chart
+                      </span>
+                      <span className="font-semibold text-white">
+                        Flujo activo en {selectedBankChip}:
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+                        {totalAds.toLocaleString("es-VE")} anuncios
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[11px] font-mono tabular-nums text-tertiary font-semibold">
+                        Compra: {totalBuy.toLocaleString("es-VE")} ({buyShare.toFixed(1)}%)
+                      </span>
+                      <span className="text-slate-600">•</span>
+                      <span className="text-[11px] font-mono tabular-nums text-primary font-semibold">
+                        Venta: {totalSell.toLocaleString("es-VE")} ({sellShare.toFixed(1)}%)
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${pressureBadgeClass}`}
+                      >
+                        {pressureLabel}
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    className="w-full h-2 rounded-full bg-surface-container overflow-hidden flex"
+                    aria-label={`Proporción Compra ${buyShare.toFixed(1)}% vs Venta ${sellShare.toFixed(1)}%`}
+                  >
+                    <div
+                      className="h-full bg-tertiary transition-all duration-300"
+                      style={{ width: `${Math.min(100, Math.max(0, buyShare))}%` }}
+                    />
+                    <div
+                      className="h-full bg-primary-container transition-all duration-300"
+                      style={{ width: `${Math.min(100, Math.max(0, sellShare))}%` }}
+                    />
+                  </div>
+                  {(orderbook.buy_month_orders_sum !== undefined ||
+                    orderbook.sell_month_orders_sum !== undefined) && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-400 tabular-nums">
+                      <span>
+                        Top anunciantes Compra: {orderbook.buy_merchants_count ?? 0} verificados •{" "}
+                        {(orderbook.buy_month_orders_sum ?? 0).toLocaleString("es-VE")} órds/mes
+                      </span>
+                      <span>
+                        Top anunciantes Venta: {orderbook.sell_merchants_count ?? 0} verificados •{" "}
+                        {(orderbook.sell_month_orders_sum ?? 0).toLocaleString("es-VE")} órds/mes
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Dos Columnas: Comprar vs Vender */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {/* Columna Izquierda: COMPRAR USDT */}
@@ -955,8 +1032,11 @@ export default function SpreadMatrixPage() {
                       Comprar USDT
                     </span>
                   </div>
-                  <span className="text-[10px] font-mono text-tertiary">
-                    {orderbook?.buy_ads?.length || 0} anuncios
+                  <span className="text-[10px] font-mono text-tertiary tabular-nums">
+                    {orderbook?.total_buy_ads !== undefined &&
+                    orderbook.total_buy_ads > (orderbook.buy_ads?.length || 0)
+                      ? `${orderbook.buy_ads?.length || 0} de ${orderbook.total_buy_ads.toLocaleString("es-VE")} activos`
+                      : `${orderbook?.total_buy_ads ?? orderbook?.buy_ads?.length ?? 0} anuncios`}
                   </span>
                 </div>
 
@@ -1043,8 +1123,11 @@ export default function SpreadMatrixPage() {
                       Vender USDT
                     </span>
                   </div>
-                  <span className="text-[10px] font-mono text-primary">
-                    {orderbook?.sell_ads?.length || 0} anuncios
+                  <span className="text-[10px] font-mono text-primary tabular-nums">
+                    {orderbook?.total_sell_ads !== undefined &&
+                    orderbook.total_sell_ads > (orderbook.sell_ads?.length || 0)
+                      ? `${orderbook.sell_ads?.length || 0} de ${orderbook.total_sell_ads.toLocaleString("es-VE")} activos`
+                      : `${orderbook?.total_sell_ads ?? orderbook?.sell_ads?.length ?? 0} anuncios`}
                   </span>
                 </div>
 

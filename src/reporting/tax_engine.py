@@ -68,6 +68,9 @@ class FIFOCostMethod(CostMethod):
         results: list[TradeResult] = []
 
         for order in orders:
+            status_val = str(getattr(order, "order_status", "COMPLETED") or "COMPLETED").upper()
+            if status_val != "COMPLETED":
+                continue
             if order.trade_type == "BUY":
                 # Compras entran al inventario acumulando costo total + comisiones
                 crypto_amount = float(order.crypto_amount)
@@ -135,6 +138,9 @@ class WeightedAverageCostMethod(CostMethod):
         results: list[TradeResult] = []
 
         for order in orders:
+            status_val = str(getattr(order, "order_status", "COMPLETED") or "COMPLETED").upper()
+            if status_val != "COMPLETED":
+                continue
             crypto_amount = float(order.crypto_amount)
             fiat_amount = float(order.fiat_amount)
             fee_fiat = float(order.fee_fiat)

@@ -42,10 +42,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: 1536m
-    pids_limit: 128
+    mem_limit: 4096m
+    pids_limit: 256
     tmpfs:
-      - /tmp:size=128m,noexec,nosuid,nodev
+      - /tmp:size=512m,noexec,nosuid,nodev
     expose:
       - "8000"
     volumes:
@@ -54,6 +54,7 @@ services:
       - ../config/.env
     environment:
       DISABLE_MARKET_COLLECTOR: "0"
+      OMP_THREAD_LIMIT: "2"
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,7 +73,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: 768m
+    mem_limit: 1024m
     pids_limit: 128
     tmpfs:
       - /tmp:size=64m,noexec,nosuid,nodev
@@ -105,7 +106,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: 512m
+    mem_limit: 768m
     pids_limit: 96
     expose:
       - "3000"

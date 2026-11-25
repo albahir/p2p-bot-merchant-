@@ -95,6 +95,11 @@ class ManualVoucherRequest(BaseModel):
     sender_cedula: str | None = Field(default=None, max_length=20)
     concept: str | None = Field(default=None, max_length=255)
     order_number: str | None = Field(default=None, max_length=50, description="Orden P2P opcional a vincular")
+    date_vet: str | None = Field(default=None, description="Fecha VET YYYY-MM-DD (por defecto hoy VET)")
+    action: Literal["P2P", "BANK_FEE", "INTERNAL_TRANSFER"] = Field(
+        default="P2P",
+        description="Naturaleza contable del registro manual: Pago P2P, Comisión Bancaria o Traspaso Propio",
+    )
 
 
 class BankBalanceItemResponse(BaseModel):
@@ -476,7 +481,7 @@ class StatementCommitRowRequest(BaseModel):
 
 class StatementCommitRequest(BaseModel):
     bank_name: str = Field(..., min_length=2, max_length=100)
-    rows: list[StatementCommitRowRequest] = Field(..., max_length=2500)
+    rows: list[StatementCommitRowRequest] = Field(..., max_length=25000)
 
 
 class StatementCommitResponse(BaseModel):
@@ -732,11 +737,7 @@ def _build_accounting_export_context(
         naive_utc = dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo is not None else dt
         return start_dt <= naive_utc <= end_dt
 
-    vouchers = [
-        v
-        for v in voucher_repo.list_all(user_id=uid)
-        if v.voucher_date is None or _in_period_bounds(cast(datetime | None, v.voucher_date))
-    ]
+    vouchers = voucher_repo.list_by_date_range(start_dt, end_dt, user_id=uid)
 
     all_orders = order_repo.list_completed(user_id=uid)
     all_tax_results = FIFOCostMethod().process_orders(all_orders)
@@ -873,6 +874,16 @@ def match_voucher_with_order(
             detail=f"Orden P2P '{payload.order_number}' no encontrada.",
         )
 
+    order_status = str(getattr(order, "order_status", "") or "").upper()
+    if order_status != "COMPLETED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"La orden '{order.order_number}' está en estado {order_status}. "
+                "Solo se pueden conciliar comprobantes bancarios con órdenes COMPLETADAS."
+            ),
+        )
+
     # Actualizar comprobante
     voucher.associated_order_number = order.order_number  # type: ignore[assignment]
     voucher.verification_status = "MATCHED"  # type: ignore[assignment]
@@ -919,36 +930,92 @@ def create_manual_voucher(
     order_repo = OrderRepository(db, user_id=uid)
     acct_engine = AccountingEngine(db=db, user_id=uid)
 
+    vet_tz = timezone(timedelta(hours=-4))
+    if payload.date_vet and payload.date_vet.strip():
+        try:
+            d_obj = date.fromisoformat(payload.date_vet.strip())
+            voucher_dt_utc = datetime(d_obj.year, d_obj.month, d_obj.day, 12, 0, 0, tzinfo=vet_tz).astimezone(UTC)
+            target_period = f"{d_obj.year:04d}-{d_obj.month:02d}"
+        except ValueError as err:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Fecha VET inválida. Usa el formato YYYY-MM-DD.",
+            ) from err
+    else:
+        now_vet = datetime.now(vet_tz)
+        voucher_dt_utc = now_vet.astimezone(UTC)
+        target_period = f"{now_vet.year:04d}-{now_vet.month:02d}"
+
+    # Fail-Closed: impedir registros manuales en un período ya cerrado y sellado
+    snap_q = db.query(FiscalPeriodSnapshot).filter(FiscalPeriodSnapshot.period == target_period)
+    if uid is not None:
+        snap_q = snap_q.filter(FiscalPeriodSnapshot.user_id == uid)
+    if snap_q.first() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"El período fiscal {target_period} ya fue cerrado y sellado. "
+                "No se pueden registrar movimientos manuales sobre un mes cerrado (Fail-closed)."
+            ),
+        )
+
     mov_type = payload.movement_type.strip().upper()
     pay_method = payload.payment_method.strip().upper() or "PAGO_MOVIL"
     amount = round(float(payload.amount_ves), 2)
+    action_kind = payload.action
 
-    if payload.bank_fee_ves is not None:
+    if action_kind == "BANK_FEE":
+        mov_type = "DEBIT"
+        fee_ves = amount
+    elif action_kind == "INTERNAL_TRANSFER":
+        fee_ves = round(float(payload.bank_fee_ves or 0.0), 2)
+    elif payload.bank_fee_ves is not None:
         fee_ves = round(float(payload.bank_fee_ves), 2)
     elif mov_type == "DEBIT" and (
-        pay_method == "PAGO_MOVIL"
+        pay_method in ("PAGO_MOVIL", "INTERBANK")
         or (payload.destination_bank and payload.destination_bank.strip().lower() != payload.bank_name.strip().lower())
     ):
         fee_ves = round(amount * 0.003, 2)
     else:
         fee_ves = 0.0
 
-    total_debited = round(amount + fee_ves, 2) if mov_type == "DEBIT" else amount
+    total_debited = (
+        amount
+        if action_kind == "BANK_FEE"
+        else (round(amount + fee_ves, 2) if mov_type == "DEBIT" else amount)
+    )
 
     matched_order = None
-    if payload.order_number and payload.order_number.strip():
-        matched_order = order_repo.get_by_order_number(payload.order_number.strip(), user_id=uid)
-    else:
-        already_matched: set[str] = {
-            str(v.associated_order_number)
-            for v in voucher_repo.list_all(user_id=uid)
-            if v.associated_order_number
-        }
-        for cand in order_repo.list_completed(user_id=uid):
-            if str(cand.order_number) not in already_matched and abs(float(cand.fiat_amount) - amount) <= 0.05:
-                matched_order = cand
-                break
+    if action_kind == "P2P":
+        if payload.order_number and payload.order_number.strip():
+            matched_order = order_repo.get_by_order_number(payload.order_number.strip(), user_id=uid)
+            if matched_order is not None and str(getattr(matched_order, "order_status", "") or "").upper() != "COMPLETED":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"La orden '{matched_order.order_number}' está en estado {matched_order.order_status}. "
+                        "Solo se pueden vincular comprobantes a órdenes COMPLETADAS."
+                    ),
+                )
+        else:
+            expected_trade = "BUY" if mov_type == "DEBIT" else "SELL"
+            already_matched = voucher_repo.list_associated_order_numbers(user_id=uid)
+            start_win = (voucher_dt_utc - timedelta(days=2)).replace(tzinfo=None)
+            end_win = (voucher_dt_utc + timedelta(days=2)).replace(tzinfo=None)
+            for cand in order_repo.list_completed(start_date=start_win, end_date=end_win, user_id=uid):
+                if str(cand.order_number) in already_matched:
+                    continue
+                if str(cand.trade_type or "").upper() != expected_trade:
+                    continue
+                if abs(float(cand.fiat_amount) - amount) <= 0.05:
+                    matched_order = cand
+                    break
 
+    verif_status = (
+        "MATCHED"
+        if (matched_order is not None or action_kind in ("BANK_FEE", "INTERNAL_TRANSFER"))
+        else "UNMATCHED"
+    )
     voucher = BankVoucher(
         user_id=uid,
         bank_name=payload.bank_name.strip()[:100],
@@ -959,17 +1026,27 @@ def create_manual_voucher(
         total_debited_ves=total_debited,
         sender_id=payload.sender_cedula.strip()[:20] if payload.sender_cedula else None,
         sender_name=payload.sender_name.strip()[:255] if payload.sender_name else None,
-        concept=payload.concept.strip()[:255] if payload.concept else "Registro manual rápido",
+        concept=payload.concept.strip()[:255]
+        if payload.concept
+        else (
+            "Comisión bancaria registrada manualmente"
+            if action_kind == "BANK_FEE"
+            else ("Traspaso / capital propio manual" if action_kind == "INTERNAL_TRANSFER" else "Registro manual rápido")
+        ),
         payment_method=pay_method[:30],
         movement_type=mov_type[:20],
         associated_order_number=matched_order.order_number if matched_order else None,
-        verification_status="MATCHED" if matched_order else "UNMATCHED",
-        reconciliation_score=100.0 if matched_order else 0.0,
-        voucher_date=datetime.now(UTC),
+        verification_status=verif_status,
+        reconciliation_score=100.0 if verif_status == "MATCHED" else 0.0,
+        voucher_date=voucher_dt_utc,
     )
     saved_voucher = voucher_repo.create(voucher)
 
-    if matched_order:
+    if action_kind == "BANK_FEE":
+        entries = acct_engine.record_bank_fee_voucher(saved_voucher)
+    elif action_kind == "INTERNAL_TRANSFER":
+        entries = acct_engine.record_capital_transfer_voucher(saved_voucher)
+    elif matched_order:
         entries = acct_engine.record_p2p_trade(order=matched_order, voucher=saved_voucher)
     else:
         entries = acct_engine.record_unmatched_voucher(voucher=saved_voucher)

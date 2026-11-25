@@ -65,10 +65,11 @@ logger = logging.getLogger("statement_importer")
 
 VET_TZ = timezone(timedelta(hours=-4))
 
-MAX_STATEMENT_BYTES = MAX_STATEMENT_UPLOAD_BYTES  # 25 MB anti-DoS sin bloquear extractos extensos ni capturas
-MAX_STATEMENT_ROWS = 5000
-MAX_PDF_PAGES = 150
-PDF_AI_CHUNK_PAGES = 4
+MAX_STATEMENT_BYTES = MAX_STATEMENT_UPLOAD_BYTES  # 50 MB anti-DoS para extractos mensuales extensos
+MAX_STATEMENT_ROWS = 25000
+MAX_PDF_PAGES = 500
+PDF_AI_CHUNK_PAGES = 2
+_OCR_CONCURRENCY_SEMAPHORE = threading.BoundedSemaphore(2)
 MAX_OCR_IMAGE_WIDTH = 3600
 MAX_OCR_IMAGE_HEIGHT = 14000
 MAX_OCR_IMAGE_DIMENSION = MAX_OCR_IMAGE_HEIGHT
@@ -104,7 +105,9 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
         "ref",
         "nro referencia",
         "numero de referencia",
+        "numero",
         "nro. ref",
+        "nro.",
         "nro doc",
         "documento",
         "comprobante",
@@ -212,6 +215,9 @@ _COMIS_ABBREV_RE = re.compile(r"\bCOMIS[.,]?\b")
 _PAGO_MOVIL_KEYWORDS: tuple[str, ...] = (
     "PAGO MOVIL",
     "PAGOMOVIL",
+    "T-PAGO",
+    "TPAGO",
+    "CREDITO INMEDIATO",
     "PAPM",
     "P.NAT",
     "P.JUR",
@@ -224,7 +230,9 @@ _NOISE_LINE_KEYWORDS: tuple[str, ...] = (
     "SALDO ANTERIOR",
     "SALDO MES ANTERIOR",
     "SALDO INICIAL",
+    "SALDO AL INICIO",
     "SALDO FINAL",
+    "SALDO AL FINAL",
     "SALDO PROMEDIO",
     "SALDO DE CIERRE",
     "TOTAL DEBITOS",
@@ -239,6 +247,10 @@ _NOISE_LINE_KEYWORDS: tuple[str, ...] = (
     "RESUMEN DE MOVIMIENTOS",
     "RESUMEN DE SALDOS",
     "RESUMEN DE CUENTA",
+    "RESUMEN ESTADO DE CUENTA",
+    "MOVIMIENTOS DE CUENTA",
+    "DETALLE DE MOVIMIENTOS",
+    "CODIGO CUENTA CLIENTE",
     "PAGINA ",
     "PAGE ",
     "ESTADO DE CUENTA",
@@ -315,6 +327,11 @@ class ParsedStatementRow:
     match_confidence: float = 0.0
     notes: str = ""
     amount_uncertain: bool = False
+    counterparty_name: str | None = None
+    sender_id: str | None = None
+    destination_bank: str | None = None
+    tx_time_vet: str | None = None
+    source_page_idx: int | None = None
 
 
 @dataclass
@@ -337,6 +354,7 @@ class StatementPreviewResult:
     rows: list[ParsedStatementRow] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     available_orders: list[dict[str, Any]] = field(default_factory=list)
+    cover_summary: dict[str, float | int | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -466,7 +484,124 @@ def _extract_period_year_month(text: str, fallback_year: int) -> tuple[int, int 
     m_yr = re.search(r"\b(20\d{2})\b", upper)
     if m_yr:
         year = int(m_yr.group(1))
+        return year, month
+
+    # Soporte para fechas con año de 2 dígitos (ej. Mercantil portada: 01-10-26 / 31-10-26)
+    m_dmy2 = re.search(r"\b(?:0?[1-9]|[12]\d|3[01])[\/\-](0?[1-9]|1[0-2])[\/\-](\d{2})\b", upper)
+    if m_dmy2:
+        month = int(m_dmy2.group(1))
+        y2 = int(m_dmy2.group(2))
+        year = (2000 + y2) if y2 < 80 else (1900 + y2)
     return year, month
+
+
+def _parse_flexible_summary_amount(raw: str | None) -> float | None:
+    """Parsea montos de resúmenes de portada tolerando comas repetidas (ej. Mercantil 230,379,425,24 o 232.388,079,66)."""
+    if not raw:
+        return None
+    s = re.sub(r"[^0-9,.\-]", "", str(raw).strip())
+    if not s or s in ("-", ".", ","):
+        return None
+    neg = s.startswith("-")
+    s = s.lstrip("-")
+    m_dec = re.match(r"^([0-9.,]+)[.,](\d{2})$", s)
+    if m_dec:
+        int_part = re.sub(r"[.,]", "", m_dec.group(1))
+        if not int_part:
+            return None
+        try:
+            val = float(f"{int_part}.{m_dec.group(2)}")
+            return round(-val if neg else val, 2)
+        except ValueError:
+            return None
+    val = parse_monetary_amount(s)
+    return round(-val if neg else val, 2)
+
+
+def _extract_cover_summary(meta_text: str) -> dict[str, float | int | None]:
+    """Extrae saldos y totales declarados en la portada/resumen (Banesco, Mercantil, BDV)."""
+    upper = normalize_text(meta_text)
+    if not upper:
+        return {}
+    summary: dict[str, float | int | None] = {}
+
+    m_open = re.search(
+        r"(?:SALDO\s+(?:AL\s+)?INICIO(?:\s+DEL\s+PERIODO)?|SALDO\s+INICIAL|SALDO\s+MES\s+ANTERIOR|\bINICIAL\b)\s*:?\s*([+-]?\d[\d.,]*[.,]\d{2})",
+        upper,
+    )
+    if m_open:
+        summary["opening_balance"] = _parse_flexible_summary_amount(m_open.group(1))
+
+    m_close = re.search(
+        r"(?:SALDO\s+(?:AL\s+)?FINAL(?:\s+DEL\s+PERIODO)?|\bFINAL\b)\s*:?\s*(?:\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\s+)?([+-]?\d[\d.,]*[.,]\d{2})",
+        upper,
+    )
+    if m_close:
+        summary["closing_balance"] = _parse_flexible_summary_amount(m_close.group(1))
+
+    # Mercantil: "327 OTROS CREDITOS A SU CUENTA 230,379,425,24" | Banesco: "OTROS CREDITOS 648 516.533.772,77"
+    m_cred_m = re.search(r"\b(\d+)\s+OTROS\s+CREDITOS(?:\s+A\s+SU\s+CUENTA)?\s+(\d[\d.,]*[.,]\d{2})", upper)
+    m_cred_b = re.search(r"OTROS\s+CREDITOS\s+(\d+)\s+(\d[\d.,]*[.,]\d{2})", upper)
+    if m_cred_m:
+        summary["declared_credits_count"] = int(m_cred_m.group(1))
+        summary["declared_credits_total"] = _parse_flexible_summary_amount(m_cred_m.group(2))
+    elif m_cred_b:
+        summary["declared_credits_count"] = int(m_cred_b.group(1))
+        summary["declared_credits_total"] = _parse_flexible_summary_amount(m_cred_b.group(2))
+
+    # Mercantil: "6387 OTROS DEBITOS A SU CUENTA 232.388,079,66" | Banesco: "OTROS DEBITOS 5349 516.516.305,66"
+    m_deb_m = re.search(r"\b(\d+)\s+OTROS\s+DEBITOS(?:\s+A\s+SU\s+CUENTA)?\s+(\d[\d.,]*[.,]\d{2})", upper)
+    m_deb_b = re.search(r"OTROS\s+DEBITOS\s+(\d+)\s+(\d[\d.,]*[.,]\d{2})", upper)
+    if m_deb_m:
+        summary["declared_debits_count"] = int(m_deb_m.group(1))
+        summary["declared_debits_total"] = _parse_flexible_summary_amount(m_deb_m.group(2))
+    elif m_deb_b:
+        summary["declared_debits_count"] = int(m_deb_b.group(1))
+        summary["declared_debits_total"] = _parse_flexible_summary_amount(m_deb_b.group(2))
+
+    return summary
+
+
+def _enrich_row_metadata(row: ParsedStatementRow, full_desc: str) -> None:
+    """Extrae hora exacta VET, cédula/RIF, beneficiario/contraparte y banco destino desde descripciones ricas (Mercantil/BDV)."""
+    upper = normalize_text(full_desc)
+    if not upper:
+        return
+
+    # 1. Hora exacta VET: "EL 01-10-26 A LAS 19:19:41 HORAS"
+    m_time = re.search(r"\bA\s+LAS\s+(\d{1,2}:\d{2}:\d{2})\s+HORAS?\b", upper)
+    if m_time:
+        t_str = m_time.group(1)
+        try:
+            hh, mm, ss = (int(p) for p in t_str.split(":"))
+            if 0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59:
+                row.tx_time_vet = f"{hh:02d}:{mm:02d}:{ss:02d}"
+                y, m, d = (int(p) for p in row.date_vet.split("-"))
+                row.voucher_datetime_utc = datetime(y, m, d, hh, mm, ss, tzinfo=VET_TZ).astimezone(UTC)
+        except ValueError:
+            pass
+
+    # 2. Cédula o RIF del beneficiario/contraparte (ej. "A V90026775", "V-19456789")
+    m_cid = re.search(r"(?<![A-Z0-9])([VEJGP])[\-\s]?(\d{6,10})(?!\d)", upper)
+    if m_cid:
+        row.sender_id = f"{m_cid.group(1)}-{m_cid.group(2)}"
+
+    # 3. Nombre de contraparte / beneficiario en transferencias Mercantil ("A LA CU ENTA DE JESUS FAJARDO ***8921")
+    m_cp = re.search(
+        r"(?:A\s+LA|DESDE(?:\s+LA)?)\s+CU\s*ENTA\s+DE\s+([A-Z][A-Z\s]{2,55}?)(?=\s*(?:\*{2,}|\d{3,}|POR\s+BS|REALIZADA|EL\s+\d{2}|$))",
+        upper,
+    )
+    if m_cp:
+        cand_name = re.sub(r"\s+", " ", m_cp.group(1)).strip()
+        if len(cand_name) >= 3 and cand_name not in ("TERCEROS", "TERCERO"):
+            row.counterparty_name = cand_name[:120]
+
+    # 4. Banco destino en T-Pago / Crédito Inmediato ("EN BANCAMIGA BANCO UNIVERSAL", "EN BANCO NACIONAL DE CREDITO")
+    m_dbank = re.search(r"\bEN\s+([A-Z0-9\s.,]{3,45}?)(?=\s*(?:POR\s+BS|POR\s+CONCEPTO|EL\s+\d{2}|$))", upper)
+    if m_dbank:
+        detected_dest = detect_bank_from_text(m_dbank.group(1))
+        if detected_dest:
+            row.destination_bank = detected_dest
 
 
 def _parse_vet_date(raw_date: str, default_year: int) -> tuple[str, datetime] | None:
@@ -558,10 +693,14 @@ def _extract_reference(text: str, explicit_ref: str | None = None) -> tuple[str,
         cleaned = (text[: m_explicit.start()] + " " + text[m_explicit.end() :]).strip()
         return ref_val[:50], _sanitize_cell_text(cleaned or text)
 
-    m_digits = re.search(r"(?<![\/\.-])\b(\d{5,16})\b(?![\/\.-])", text)
+    # Evitar confundir fechas ("EL 01-10-26"), cédulas ("V90026775") o horas ("19:19:41") con números de referencia
+    scrubbed = re.sub(r"\bEL\s+\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b", " ", text, flags=re.IGNORECASE)
+    scrubbed = re.sub(r"\b\d{1,2}:\d{2}:\d{2}\b", " ", scrubbed)
+    scrubbed = re.sub(r"\b[VEJGP]-?\d{6,10}\b", " ", scrubbed, flags=re.IGNORECASE)
+    m_digits = re.search(r"(?<![\/\.-])\b(\d{5,16})\b(?![\/\.-])", scrubbed)
     if m_digits:
         ref_val = m_digits.group(1)
-        cleaned = (text[: m_digits.start()] + " " + text[m_digits.end() :]).strip()
+        cleaned = re.sub(rf"\b{re.escape(ref_val)}\b", "", text, count=1).strip()
         return ref_val[:50], _sanitize_cell_text(cleaned or text)
 
     return "S/R", _sanitize_cell_text(text)
@@ -680,13 +819,44 @@ def _group_words_into_lines(words: list[dict[str, Any]], y_tol: float = 2.6) -> 
     lines: list[_PdfWordLine] = []
     for grp in groups:
         grp_sorted = sorted(grp, key=lambda w: float(w["x0"]))
-        top_v = min(float(w["top"]) for w in grp_sorted)
-        bot_v = max(float(w["bottom"]) for w in grp_sorted)
-        txt = " ".join(str(w["text"]).strip() for w in grp_sorted if str(w["text"]).strip())
+        # Fusionar montos con decimales separados por OCR (ej. "3.938.263," + "48" o "-" + "1.234,56")
+        merged_grp: list[dict[str, Any]] = []
+        idx = 0
+        while idx < len(grp_sorted):
+            cur = grp_sorted[idx]
+            cur_txt = str(cur.get("text", "")).strip()
+            if idx + 1 < len(grp_sorted):
+                nxt = grp_sorted[idx + 1]
+                nxt_txt = str(nxt.get("text", "")).strip()
+                gap = float(nxt["x0"]) - float(cur["x1"])
+                if (
+                    gap <= 10.0
+                    and (
+                        (re.fullmatch(r"[-+]?\d[\d.,]*[.,]", cur_txt) and re.fullmatch(r"\d{2}", nxt_txt))
+                        or (cur_txt == "-" and _MONEY_TOKEN_RE.fullmatch(nxt_txt))
+                    )
+                ):
+                    merged_grp.append(
+                        {
+                            "text": f"{cur_txt}{nxt_txt}",
+                            "x0": float(cur["x0"]),
+                            "x1": float(nxt["x1"]),
+                            "top": min(float(cur["top"]), float(nxt["top"])),
+                            "bottom": max(float(cur["bottom"]), float(nxt["bottom"])),
+                        }
+                    )
+                    idx += 2
+                    continue
+            merged_grp.append(cur)
+            idx += 1
+
+        top_v = min(float(w["top"]) for w in merged_grp)
+        bot_v = max(float(w["bottom"]) for w in merged_grp)
+        txt = " ".join(str(w["text"]).strip() for w in merged_grp if str(w["text"]).strip())
         if txt:
             lines.append(
                 _PdfWordLine(
-                    words=grp_sorted,
+                    words=merged_grp,
                     top=top_v,
                     bottom=bot_v,
                     y_mid=(top_v + bot_v) / 2.0,
@@ -854,6 +1024,98 @@ def _detect_pdf_word_header(
     if best_overall is None:
         return None
     return best_overall[1], best_overall[2], best_overall[3]
+
+
+def _split_page_words_into_panels(
+    words: list[dict[str, Any]],
+    page_w: float,
+    y_tol: float,
+    prev_split_x: float | None = None,
+) -> tuple[list[tuple[list[dict[str, Any]], float]], float | None]:
+    """Detecta páginas apaisadas con 2 tablas paralelas (Banesco/Mercantil págs. 2+) y las divide izquierda -> derecha."""
+    if not words or page_w <= 0.0:
+        return [(words, page_w)], prev_split_x
+
+    wlines = _group_words_into_lines(words, y_tol=y_tol)
+    if not wlines:
+        return [(words, page_w)], prev_split_x
+
+    scan_limit = min(len(wlines), 45)
+    detected_split_x: float | None = None
+
+    for i in range(scan_limit):
+        for span in (1, 2):
+            if i + span > len(wlines):
+                break
+            win = wlines[i : i + span]
+            if span == 2 and (win[1].top - win[0].top) > 14.0:
+                continue
+            win_words = [w for ln in win for w in ln.words]
+            clusters = _cluster_header_words(win_words)
+            date_clusters = [c for c in clusters if _match_header_role(c[0]) == "date"]
+            if len(date_clusters) < 2:
+                continue
+
+            # Buscar par (cabecera fecha izquierda, cabecera fecha derecha) suficientemente separado
+            for d_left in date_clusters:
+                if d_left[1] >= page_w * 0.35:
+                    continue
+                for d_right in date_clusters:
+                    if d_right[1] <= page_w * 0.42:
+                        continue
+                    if (d_right[1] - d_left[2]) < page_w * 0.25:
+                        continue
+
+                    # Calcular línea de corte X limpia entre el borde derecho del panel izquierdo y d_right.x0
+                    left_side_clusters = [c for c in clusters if c[2] <= d_right[1] + 2.0]
+                    left_edge = max((c[2] for c in left_side_clusters), default=d_right[1] - 12.0)
+                    cand_split_x = (
+                        (left_edge + d_right[1]) / 2.0
+                        if left_edge < d_right[1]
+                        else (d_right[1] - 4.0)
+                    )
+                    cand_split_x = min(d_right[1] - 2.0, max(page_w * 0.35, cand_split_x))
+
+                    lw = [w for w in win_words if ((float(w["x0"]) + float(w["x1"])) / 2.0) < cand_split_x]
+                    rw = [
+                        {**w, "x0": float(w["x0"]) - cand_split_x, "x1": float(w["x1"]) - cand_split_x}
+                        for w in win_words
+                        if ((float(w["x0"]) + float(w["x1"])) / 2.0) >= cand_split_x
+                    ]
+                    l_hdr = _detect_pdf_word_header(_group_words_into_lines(lw, y_tol=y_tol))
+                    r_hdr = _detect_pdf_word_header(_group_words_into_lines(rw, y_tol=y_tol))
+                    if l_hdr is not None and r_hdr is not None:
+                        detected_split_x = cand_split_x
+                        break
+                if detected_split_x is not None:
+                    break
+            if detected_split_x is not None:
+                break
+        if detected_split_x is not None:
+            break
+
+    eff_split_x = detected_split_x
+    if eff_split_x is None and prev_split_x is not None and _detect_pdf_word_header(wlines) is None:
+        # Si la página no repite cabecera pero continúa un diseño de 2 paneles, reutilizar el corte vertical
+        eff_split_x = prev_split_x
+
+    if eff_split_x is None:
+        return [(words, page_w)], None
+
+    left_panel_words = [
+        w for w in words if ((float(w["x0"]) + float(w["x1"])) / 2.0) < eff_split_x
+    ]
+    right_panel_words = [
+        {**w, "x0": max(0.0, float(w["x0"]) - eff_split_x), "x1": max(0.5, float(w["x1"]) - eff_split_x)}
+        for w in words
+        if ((float(w["x0"]) + float(w["x1"])) / 2.0) >= eff_split_x
+    ]
+    panels: list[tuple[list[dict[str, Any]], float]] = []
+    if left_panel_words:
+        panels.append((left_panel_words, eff_split_x))
+    if right_panel_words:
+        panels.append((right_panel_words, max(1.0, page_w - eff_split_x)))
+    return (panels or [(words, page_w)]), eff_split_x
 
 
 def _calibrate_pdf_column_bands(
@@ -1075,6 +1337,9 @@ def _split_ocr_text_into_subwords(
     cleaned = re.sub(r"\s+", " ", raw_text or "").strip()
     if not cleaned:
         return []
+    # Reparar decimales o signos separados por OCR ("3.938.263, 48" -> "3.938.263,48")
+    cleaned = re.sub(r"(\d[.,])\s+(\d{2})(?=\s|$)", r"\1\2", cleaned)
+    cleaned = re.sub(r"(?<!\S)-\s+(\d[\d.,]*[.,]\d{2})(?=\s|$)", r"-\1", cleaned)
 
     parts: list[str] = []
     for tok in cleaned.split(" "):
@@ -1229,6 +1494,23 @@ def _run_tesseract_on_image(img: Image.Image) -> tuple[list[dict[str, Any]], flo
     return words, round(mean_conf, 4)
 
 
+def _render_single_pdf_page(pdf_doc: Any, page_idx: int) -> Image.Image | None:
+    """Renderiza una única página PDFium a imagen RGB limpia y libera los recursos de la página inmediatamente."""
+    page = pdf_doc[page_idx]
+    try:
+        w_pt, h_pt = page.get_size()
+        safe_scale = compute_safe_pdf_render_scale(float(w_pt), float(h_pt), target_scale=2.2)
+        if safe_scale is None:
+            return None
+        bitmap = page.render(scale=safe_scale)
+        raw_pil = bitmap.to_pil().convert("RGB")
+        if (raw_pil.width * raw_pil.height) > MAX_OCR_IMAGE_PIXELS:
+            return None
+        return Image.frombytes("RGB", raw_pil.size, raw_pil.tobytes())
+    finally:
+        page.close()
+
+
 def _render_pdf_pages_as_images(file_bytes: bytes, max_pages: int = MAX_PDF_PAGES) -> list[Image.Image]:
     """Renderiza páginas de PDF escaneado a imágenes RGB limpias acotando dimensiones de salida."""
     try:
@@ -1245,20 +1527,9 @@ def _render_pdf_pages_as_images(file_bytes: bytes, max_pages: int = MAX_PDF_PAGE
     try:
         count = min(len(pdf_doc), max_pages)
         for idx in range(count):
-            page = pdf_doc[idx]
-            try:
-                w_pt, h_pt = page.get_size()
-                safe_scale = compute_safe_pdf_render_scale(float(w_pt), float(h_pt), target_scale=2.2)
-                if safe_scale is None:
-                    continue
-                bitmap = page.render(scale=safe_scale)
-                raw_pil = bitmap.to_pil().convert("RGB")
-                if (raw_pil.width * raw_pil.height) > MAX_OCR_IMAGE_PIXELS:
-                    continue
-                clean_pil = Image.frombytes("RGB", raw_pil.size, raw_pil.tobytes())
+            clean_pil = _render_single_pdf_page(pdf_doc, idx)
+            if clean_pil is not None:
                 rendered.append(clean_pil)
-            finally:
-                page.close()
     finally:
         pdf_doc.close()
     return rendered
@@ -1267,7 +1538,7 @@ def _render_pdf_pages_as_images(file_bytes: bytes, max_pages: int = MAX_PDF_PAGE
 class BankStatementImporter:
     """Extractor, verificador matemático y conciliador universal de estados de cuenta bancarios."""
 
-    GEMINI_MODELS: tuple[str, ...] = ("gemini-2.0-flash", "gemini-1.5-flash")
+    GEMINI_MODELS: tuple[str, ...] = ("gemini-2.0-flash", "gemini-flash-lite-latest")
 
     def __init__(
         self,
@@ -1609,6 +1880,41 @@ class BankStatementImporter:
             warnings=warnings,
         )
 
+    @staticmethod
+    def _pdf_reader_has_fonts(reader: PdfReader, max_check_pages: int = 5) -> bool:
+        """Detecta en <5 ms si el PDF declara alguna fuente nativa; evita perder minutos en PDFs escaneados o vectorizados."""
+        for page in reader.pages[:max_check_pages]:
+            try:
+                res = page.get("/Resources")
+                if res is None:
+                    continue
+                if hasattr(res, "get_object"):
+                    res = res.get_object()
+                if not isinstance(res, dict):
+                    continue
+                fonts = res.get("/Font")
+                if fonts:
+                    if hasattr(fonts, "get_object"):
+                        fonts = fonts.get_object()
+                    if isinstance(fonts, dict) and len(fonts) > 0:
+                        return True
+                xobjs = res.get("/XObject")
+                if xobjs:
+                    if hasattr(xobjs, "get_object"):
+                        xobjs = xobjs.get_object()
+                    if isinstance(xobjs, dict):
+                        for xo in xobjs.values():
+                            xo_obj = xo.get_object() if hasattr(xo, "get_object") else xo
+                            if isinstance(xo_obj, dict) and str(xo_obj.get("/Subtype", "")) == "/Form":
+                                xo_res = xo_obj.get("/Resources")
+                                if xo_res is not None and hasattr(xo_res, "get_object"):
+                                    xo_res = xo_res.get_object()
+                                if isinstance(xo_res, dict) and xo_res.get("/Font"):
+                                    return True
+            except (PdfReadError, AttributeError, KeyError, TypeError, ValueError):
+                return True
+        return False
+
     def _parse_pdf_bytes(
         self,
         file_bytes: bytes,
@@ -1636,21 +1942,37 @@ class BankStatementImporter:
         if total_pages > MAX_PDF_PAGES:
             warnings.append(f"Se procesaron únicamente las primeras {MAX_PDF_PAGES} páginas del PDF.")
 
-        # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra)
-        (
-            rows,
-            detected_bank,
-            eff_year,
-            has_text_layer,
-            extra_warnings,
-        ) = self._extract_pdf_with_pdfplumber(
-            file_bytes=file_bytes,
-            filename=filename,
-            bank_name_override=bank_name_override,
-            default_year=default_year,
-        )
-        warnings.extend(extra_warnings)
-        extraction_method = "PDF_PLUMBER_GEOMETRIC"
+        # Atajo crítico para PDFs escaneados o con texto trazado en curvas (ej. Banesco/Mercantil sin /Font):
+        # evita recorrer miles de curvas Bezier en pdfplumber antes de saltar al OCR local.
+        has_native_fonts = self._pdf_reader_has_fonts(reader)
+        if has_native_fonts:
+            # 1. Extractor geométrico universal con pdfplumber (coordenadas reales X/Y por palabra)
+            (
+                rows,
+                detected_bank,
+                eff_year,
+                has_text_layer,
+                extra_warnings,
+                cover_summary,
+            ) = self._extract_pdf_with_pdfplumber(
+                file_bytes=file_bytes,
+                filename=filename,
+                bank_name_override=bank_name_override,
+                default_year=default_year,
+            )
+            warnings.extend(extra_warnings)
+            extraction_method = "PDF_PLUMBER_GEOMETRIC"
+        else:
+            rows = []
+            detected_bank = (
+                normalize_bank_name(bank_name_override)
+                if bank_name_override and bank_name_override.strip()
+                else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
+            )
+            eff_year = default_year
+            has_text_layer = False
+            cover_summary = {}
+            extraction_method = "PDF_PLUMBER_GEOMETRIC"
 
         # 2. Respaldo pypdf por líneas si el PDF tiene texto pero sin cabeceras estándar detectadas
         if not rows and has_text_layer:
@@ -1667,21 +1989,17 @@ class BankStatementImporter:
                 if rows:
                     extraction_method = "PDF_LAYOUT_UNIVERSAL"
 
-        # 3. OCR local gratuito y privado (Dual-OCR RapidOCR + Tesseract 5 con árbitro matemático)
+        # 3. OCR local gratuito y privado en streaming página-por-página (RAM constante + Tesseract quirúrgico)
         if not rows and not has_text_layer:
-            rendered_pages = _render_pdf_pages_as_images(file_bytes, max_pages=MAX_PDF_PAGES)
-            if rendered_pages:
-                ocr_res = self._extract_with_dual_ocr(
-                    images=rendered_pages,
-                    file_type="PDF",
-                    method_prefix="PDF_OCR",
-                    filename=filename,
-                    bank_name_override=bank_name_override,
-                    default_year=eff_year,
-                    extra_warnings=warnings,
-                )
-                if ocr_res.rows:
-                    return ocr_res
+            ocr_res = self._extract_pdf_with_streaming_dual_ocr(
+                file_bytes=file_bytes,
+                filename=filename,
+                bank_name_override=bank_name_override,
+                default_year=eff_year,
+                extra_warnings=warnings,
+            )
+            if ocr_res is not None and ocr_res.rows:
+                return ocr_res
 
         # 4. Último respaldo IA multimodal (solo si falla OCR local o no hay librerías OCR y existe clave Gemini)
         if not rows and self._has_real_ai_key():
@@ -1717,6 +2035,7 @@ class BankStatementImporter:
             unmatched_count=len(rows),
             rows=rows,
             warnings=warnings,
+            cover_summary=cover_summary,
         )
 
     def _parse_image_bytes(
@@ -1742,39 +2061,39 @@ class BankStatementImporter:
             )
         return res
 
-    def _evaluate_ocr_candidate(
+    def _run_ocr_engine_on_image(
         self,
         engine_name: Literal["rapidocr", "tesseract"],
-        images: list[Image.Image],
+        img: Image.Image,
+    ) -> tuple[list[dict[str, Any]], float]:
+        """Ejecuta un motor OCR sobre una sola imagen bajo el semáforo de concurrencia VPS."""
+        custom_fn = self._ocr_engines.get(engine_name) if self._ocr_engines is not None else None
+        if self._ocr_engines is not None and engine_name not in self._ocr_engines:
+            return [], 0.0
+        with _OCR_CONCURRENCY_SEMAPHORE:
+            if custom_fn is not None:
+                return custom_fn(img)
+            if engine_name == "rapidocr":
+                return _run_rapidocr_on_image(img)
+            return _run_tesseract_on_image(img)
+
+    def _build_ocr_preview_from_pages(
+        self,
+        pages_words: list[tuple[list[dict[str, Any]], float]],
+        page_confs: list[float],
+        engine_label: str,
         file_type: str,
         method_prefix: str,
         filename: str,
         bank_name_override: str | None,
         default_year: int,
     ) -> tuple[StatementPreviewResult | None, float]:
-        """Ejecuta un motor OCR específico sobre las páginas y devuelve resultado verificado y confianza."""
-        custom_fn = self._ocr_engines.get(engine_name) if self._ocr_engines is not None else None
-        if self._ocr_engines is not None and engine_name not in self._ocr_engines:
-            return None, 0.0
-
-        pages_words: list[tuple[list[dict[str, Any]], float]] = []
-        confs: list[float] = []
-        for img in images:
-            if custom_fn is not None:
-                words, conf = custom_fn(img)
-            elif engine_name == "rapidocr":
-                words, conf = _run_rapidocr_on_image(img)
-            else:
-                words, conf = _run_tesseract_on_image(img)
-            pages_words.append((words, 612.0))
-            if words:
-                confs.append(float(conf))
-
         if not any(pw[0] for pw in pages_words):
             return None, 0.0
 
-        mean_conf = (sum(confs) / len(confs)) if confs else 0.0
-        rows, bank_name, _eff_year, extract_warnings = self._extract_rows_from_word_pages(
+        valid_confs = [c for c, pw in zip(page_confs, pages_words, strict=False) if pw[0]]
+        mean_conf = (sum(valid_confs) / len(valid_confs)) if valid_confs else 0.0
+        rows, bank_name, _eff_year, extract_warnings, cover_summary = self._extract_rows_from_word_pages(
             pages_words=pages_words,
             filename=filename,
             bank_name_override=bank_name_override,
@@ -1784,7 +2103,7 @@ class BankStatementImporter:
         res = StatementPreviewResult(
             bank_name=bank_name,
             file_type=file_type,
-            extraction_method=f"{method_prefix}_{engine_name.upper()}",
+            extraction_method=f"{method_prefix}_{engine_label.upper()}",
             detected_columns=[],
             needs_column_mapping=False,
             detected_order="UNKNOWN",
@@ -1799,9 +2118,171 @@ class BankStatementImporter:
             unmatched_count=len(rows),
             rows=rows,
             warnings=list(extract_warnings),
+            cover_summary=cover_summary,
         )
         self._verify_and_classify_rows(res)
         return res, round(mean_conf, 4)
+
+    @staticmethod
+    def _identify_problematic_ocr_pages(
+        res: StatementPreviewResult | None,
+        page_confs: list[float],
+        total_pages: int,
+    ) -> list[int]:
+        """Identifica únicamente los índices de página con descuadres, dudas o baja confianza para Tesseract quirúrgico."""
+        if total_pages <= 1:
+            return list(range(total_pages))
+        if res is None or res.total_rows == 0:
+            return list(range(total_pages))
+
+        flagged: set[int] = set()
+        for idx, conf in enumerate(page_confs):
+            if conf < 0.78:
+                flagged.add(idx)
+
+        for r in res.rows:
+            p_idx = r.source_page_idx
+            if p_idx is None:
+                continue
+            if r.balance_ok is False:
+                flagged.add(p_idx)
+                # Un descuadre en la primera fila de la página N puede originarse en la página N-1
+                if p_idx > 0:
+                    flagged.add(p_idx - 1)
+            elif r.amount_uncertain or r.reference_number == "S/R":
+                flagged.add(p_idx)
+
+        if not flagged and res.bank_name == "BANCO DESCONOCIDO":
+            flagged.add(0)
+
+        return sorted(p for p in flagged if 0 <= p < total_pages)
+
+    def _extract_pdf_with_streaming_dual_ocr(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+        extra_warnings: list[str],
+    ) -> StatementPreviewResult | None:
+        """Ejecuta OCR local en streaming página-por-página (RAM constante) con respaldo Tesseract quirúrgico."""
+        try:
+            import pypdfium2 as pdfium
+        except ImportError:
+            return None
+
+        try:
+            pdf_doc = pdfium.PdfDocument(file_bytes)
+        except Exception:  # noqa: BLE001 - fallo de driver PDFium aislado fail-closed
+            return None
+
+        try:
+            total_pages = min(len(pdf_doc), MAX_PDF_PAGES)
+            if total_pages <= 0:
+                return None
+
+            rapid_pages: list[tuple[list[dict[str, Any]], float]] = []
+            rapid_confs: list[float] = []
+            for p_idx in range(total_pages):
+                img = _render_single_pdf_page(pdf_doc, p_idx)
+                if img is None:
+                    rapid_pages.append(([], 612.0))
+                    rapid_confs.append(0.0)
+                    continue
+                try:
+                    words, conf = self._run_ocr_engine_on_image("rapidocr", img)
+                finally:
+                    img.close()
+                rapid_pages.append((words, 612.0))
+                rapid_confs.append(float(conf))
+
+            rapid_res, rapid_conf = self._build_ocr_preview_from_pages(
+                pages_words=rapid_pages,
+                page_confs=rapid_confs,
+                engine_label="rapidocr",
+                file_type="PDF",
+                method_prefix="PDF_OCR",
+                filename=filename,
+                bank_name_override=bank_name_override,
+                default_year=default_year,
+            )
+
+            tess_res: StatementPreviewResult | None = None
+            tess_conf = 0.0
+            if self._needs_second_ocr_opinion(rapid_res, rapid_conf):
+                target_pages = self._identify_problematic_ocr_pages(rapid_res, rapid_confs, total_pages)
+                hybrid_pages = list(rapid_pages)
+                hybrid_confs = list(rapid_confs)
+                ran_any = False
+                for p_idx in target_pages:
+                    img = _render_single_pdf_page(pdf_doc, p_idx)
+                    if img is None:
+                        continue
+                    try:
+                        t_words, t_conf = self._run_ocr_engine_on_image("tesseract", img)
+                    finally:
+                        img.close()
+                    if t_words:
+                        hybrid_pages[p_idx] = (t_words, 612.0)
+                        hybrid_confs[p_idx] = float(t_conf)
+                        ran_any = True
+                if ran_any:
+                    tess_res, tess_conf = self._build_ocr_preview_from_pages(
+                        pages_words=hybrid_pages,
+                        page_confs=hybrid_confs,
+                        engine_label="tesseract",
+                        file_type="PDF",
+                        method_prefix="PDF_OCR",
+                        filename=filename,
+                        bank_name_override=bank_name_override,
+                        default_year=default_year,
+                    )
+
+            return self._select_best_dual_ocr_result(
+                rapid_res=rapid_res,
+                rapid_conf=rapid_conf,
+                tess_res=tess_res,
+                tess_conf=tess_conf,
+                file_type="PDF",
+                method_prefix="PDF_OCR",
+                filename=filename,
+                bank_name_override=bank_name_override,
+                extra_warnings=extra_warnings,
+            )
+        finally:
+            pdf_doc.close()
+
+    def _evaluate_ocr_candidate(
+        self,
+        engine_name: Literal["rapidocr", "tesseract"],
+        images: list[Image.Image],
+        file_type: str,
+        method_prefix: str,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+    ) -> tuple[StatementPreviewResult | None, float]:
+        """Ejecuta un motor OCR específico sobre las páginas y devuelve resultado verificado y confianza."""
+        if self._ocr_engines is not None and engine_name not in self._ocr_engines:
+            return None, 0.0
+
+        pages_words: list[tuple[list[dict[str, Any]], float]] = []
+        confs: list[float] = []
+        for img in images:
+            words, conf = self._run_ocr_engine_on_image(engine_name, img)
+            pages_words.append((words, 612.0))
+            confs.append(float(conf) if words else 0.0)
+
+        return self._build_ocr_preview_from_pages(
+            pages_words=pages_words,
+            page_confs=confs,
+            engine_label=engine_name,
+            file_type=file_type,
+            method_prefix=method_prefix,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+        )
 
     @staticmethod
     def _needs_second_ocr_opinion(res: StatementPreviewResult | None, mean_conf: float) -> bool:
@@ -1904,40 +2385,19 @@ class BankStatementImporter:
         self._verify_and_classify_rows(cand)
         return cand
 
-    def _extract_with_dual_ocr(
+    def _select_best_dual_ocr_result(
         self,
-        images: list[Image.Image],
+        rapid_res: StatementPreviewResult | None,
+        rapid_conf: float,
+        tess_res: StatementPreviewResult | None,
+        tess_conf: float,
         file_type: str,
         method_prefix: str,
         filename: str,
         bank_name_override: str | None,
-        default_year: int,
         extra_warnings: list[str],
     ) -> StatementPreviewResult:
-        """Orquesta RapidOCR + Tesseract 5 local con árbitro matemático y conciliación fila-a-fila."""
-        rapid_res, rapid_conf = self._evaluate_ocr_candidate(
-            engine_name="rapidocr",
-            images=images,
-            file_type=file_type,
-            method_prefix=method_prefix,
-            filename=filename,
-            bank_name_override=bank_name_override,
-            default_year=default_year,
-        )
-
-        tess_res: StatementPreviewResult | None = None
-        tess_conf = 0.0
-        if self._needs_second_ocr_opinion(rapid_res, rapid_conf):
-            tess_res, tess_conf = self._evaluate_ocr_candidate(
-                engine_name="tesseract",
-                images=images,
-                file_type=file_type,
-                method_prefix=method_prefix,
-                filename=filename,
-                bank_name_override=bank_name_override,
-                default_year=default_year,
-            )
-
+        """Elige el ganador matemático entre RapidOCR y Tesseract e intenta consenso fila-a-fila."""
         candidates: list[tuple[str, StatementPreviewResult, float]] = []
         if rapid_res is not None and rapid_res.total_rows > 0:
             candidates.append(("RapidOCR", rapid_res, self._score_ocr_result(rapid_res, rapid_conf)))
@@ -2001,6 +2461,85 @@ class BankStatementImporter:
             winner_res.warnings = [*extra_warnings, *winner_res.warnings]
         return winner_res
 
+    def _extract_with_dual_ocr(
+        self,
+        images: list[Image.Image],
+        file_type: str,
+        method_prefix: str,
+        filename: str,
+        bank_name_override: str | None,
+        default_year: int,
+        extra_warnings: list[str],
+    ) -> StatementPreviewResult:
+        """Orquesta RapidOCR + Tesseract 5 local con árbitro matemático y Tesseract quirúrgico multipágina."""
+        rapid_pages: list[tuple[list[dict[str, Any]], float]] = []
+        rapid_confs: list[float] = []
+        if self._ocr_engines is None or "rapidocr" in self._ocr_engines:
+            for img in images:
+                words, conf = self._run_ocr_engine_on_image("rapidocr", img)
+                rapid_pages.append((words, 612.0))
+                rapid_confs.append(float(conf) if words else 0.0)
+        rapid_res, rapid_conf = self._build_ocr_preview_from_pages(
+            pages_words=rapid_pages,
+            page_confs=rapid_confs,
+            engine_label="rapidocr",
+            file_type=file_type,
+            method_prefix=method_prefix,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            default_year=default_year,
+        )
+
+        tess_res: StatementPreviewResult | None = None
+        tess_conf = 0.0
+        if self._needs_second_ocr_opinion(rapid_res, rapid_conf) and (
+            self._ocr_engines is None or "tesseract" in self._ocr_engines
+        ):
+            if len(images) <= 1 or rapid_res is None or rapid_res.total_rows == 0:
+                tess_res, tess_conf = self._evaluate_ocr_candidate(
+                    engine_name="tesseract",
+                    images=images,
+                    file_type=file_type,
+                    method_prefix=method_prefix,
+                    filename=filename,
+                    bank_name_override=bank_name_override,
+                    default_year=default_year,
+                )
+            else:
+                target_pages = self._identify_problematic_ocr_pages(rapid_res, rapid_confs, len(images))
+                hybrid_pages = list(rapid_pages)
+                hybrid_confs = list(rapid_confs)
+                ran_any = False
+                for p_idx in target_pages:
+                    t_words, t_conf = self._run_ocr_engine_on_image("tesseract", images[p_idx])
+                    if t_words:
+                        hybrid_pages[p_idx] = (t_words, 612.0)
+                        hybrid_confs[p_idx] = float(t_conf)
+                        ran_any = True
+                if ran_any:
+                    tess_res, tess_conf = self._build_ocr_preview_from_pages(
+                        pages_words=hybrid_pages,
+                        page_confs=hybrid_confs,
+                        engine_label="tesseract",
+                        file_type=file_type,
+                        method_prefix=method_prefix,
+                        filename=filename,
+                        bank_name_override=bank_name_override,
+                        default_year=default_year,
+                    )
+
+        return self._select_best_dual_ocr_result(
+            rapid_res=rapid_res,
+            rapid_conf=rapid_conf,
+            tess_res=tess_res,
+            tess_conf=tess_conf,
+            file_type=file_type,
+            method_prefix=method_prefix,
+            filename=filename,
+            bank_name_override=bank_name_override,
+            extra_warnings=extra_warnings,
+        )
+
     @staticmethod
     def _infer_bank_from_concepts(rows: list[ParsedStatementRow]) -> str | None:
         """Identifica el banco emisor cuando el logo es una imagen pero los conceptos mencionan el riel propio."""
@@ -2029,186 +2568,242 @@ class BankStatementImporter:
         bank_name_override: str | None,
         default_year: int,
         y_tol: float | None = 2.6,
-    ) -> tuple[list[ParsedStatementRow], str, int, list[str]]:
-        """Motor geométrico compartido por pdfplumber (PDF nativo) y RapidOCR/Tesseract (escaneados/imágenes)."""
+    ) -> tuple[list[ParsedStatementRow], str, int, list[str], dict[str, float | int | None]]:
+        """Motor geométrico compartido por pdfplumber (PDF nativo) y RapidOCR/Tesseract (escaneados/imágenes).
+        Soporta tanto tablas de 1 columna (BDV, BNC, Provincial) como PDFs apaisados de 2 paneles paralelos (Banesco, Mercantil).
+        """
         warnings: list[str] = []
         rows: list[ParsedStatementRow] = []
         last_global_row: ParsedStatementRow | None = None
+        last_global_full_desc: str = ""
         active_bands: list[_PdfColAnchor] | None = None
         active_table_x_min = 0.0
+        active_split_x: float | None = None
         meta_lines: list[str] = []
 
         eff_year = default_year
         eff_month: int | None = None
         year_explicit = default_year != datetime.now(VET_TZ).year
 
-        for p_idx, (words, raw_page_w) in enumerate(pages_words[:MAX_PDF_PAGES]):
-            if not words:
+        for p_idx, (raw_words, raw_page_w) in enumerate(pages_words[:MAX_PDF_PAGES]):
+            if not raw_words:
                 continue
             if y_tol is None:
                 heights = sorted(
                     max(2.0, float(w["bottom"]) - float(w["top"]))
-                    for w in words
+                    for w in raw_words
                 )
                 med_h = heights[len(heights) // 2] if heights else 8.0
                 eff_y_tol = max(3.6, min(9.5, med_h * 0.55))
             else:
                 eff_y_tol = y_tol
 
-            wlines = _group_words_into_lines(words, y_tol=eff_y_tol)
-            if not wlines:
-                continue
-
-            page_w = float(raw_page_w or 612.0)
-            hdr = _detect_pdf_word_header(wlines)
-            if hdr is not None:
-                hdr_start, hdr_end, anchors = hdr
-                table_x_min = max(0.0, anchors[0].hdr_x0 - 20.0) if anchors[0].hdr_x0 >= 120.0 else 0.0
-                active_table_x_min = table_x_min
-                if p_idx == 0:
-                    meta_lines.extend(ln.text for ln in wlines[:hdr_start])
-                    if table_x_min > 0.0:
-                        left_words = [w for w in words if float(w["x1"]) <= table_x_min]
-                        meta_lines.extend(ln.text for ln in _group_words_into_lines(left_words, y_tol=eff_y_tol))
-
-                if table_x_min > 0.0:
-                    hdr_word_ids = {id(w) for ln in wlines[hdr_start:hdr_end] for w in ln.words}
-                    hdr_bottom_v = wlines[hdr_end - 1].bottom
-                    right_words = [
-                        w
-                        for w in words
-                        if float(w["x0"]) >= table_x_min - 2.0
-                        and float(w["top"]) > hdr_bottom_v - 1.5
-                        and id(w) not in hdr_word_ids
-                    ]
-                    body_lines = _group_words_into_lines(right_words, y_tol=eff_y_tol)
-                else:
-                    body_lines = wlines[hdr_end:]
-            elif active_bands is not None and p_idx > 0:
-                anchors = active_bands
-                if active_table_x_min > 0.0:
-                    right_words = [w for w in words if float(w["x0"]) >= active_table_x_min - 2.0]
-                    body_lines = _group_words_into_lines(right_words, y_tol=eff_y_tol)
-                else:
-                    body_lines = wlines
-            else:
-                if p_idx == 0:
-                    meta_lines.extend(ln.text for ln in wlines[:15])
-                continue
-
-            if p_idx == 0:
-                for wl in wlines[-5:]:
-                    if _is_noise_or_footer_line(wl.text):
-                        meta_lines.append(wl.text)
-                meta_sample = "\n".join(meta_lines) + f"\n{filename}"
-                parsed_yr, parsed_mo = _extract_period_year_month(meta_sample, eff_year)
-                if not year_explicit:
-                    eff_year = parsed_yr
-                if parsed_mo is not None:
-                    eff_month = parsed_mo
-
-            bands = _calibrate_pdf_column_bands(
-                anchors,
-                body_lines,
-                page_w,
-                allow_day_only=(eff_month is not None),
+            page_w_full = float(raw_page_w or 612.0)
+            panels, detected_split_x = _split_page_words_into_panels(
+                words=raw_words,
+                page_w=page_w_full,
+                y_tol=eff_y_tol,
+                prev_split_x=active_split_x,
             )
-            active_bands = bands
+            if detected_split_x is not None:
+                active_split_x = detected_split_x
+            elif (
+                len(panels) == 1
+                and p_idx > 0
+                and _detect_pdf_word_header(_group_words_into_lines(raw_words, y_tol=eff_y_tol)) is not None
+            ):
+                # Si una página posterior ya no es 2 columnas y tiene cabecera propia, reiniciar split
+                active_split_x = None
 
-            page_anchors: list[dict[str, Any]] = []
-            cont_candidates: list[dict[str, Any]] = []
-
-            for b_idx, wl in enumerate(body_lines):
-                if _is_noise_or_footer_line(wl.text):
+            for panel_idx, (words, panel_w) in enumerate(panels):
+                if not words:
                     continue
-                parsed = self._parse_pdf_word_line(wl, bands, eff_year, default_month=eff_month)
-                if parsed is not None:
-                    page_anchors.append(
-                        {
-                            "line_idx": b_idx,
-                            "y_mid": wl.y_mid,
-                            "row": parsed["row"],
-                            "inline_concept": parsed["inline_concept"],
-                            "has_inline": parsed["has_inline_concept"],
-                            "top_parts": [],
-                            "bottom_parts": [],
-                        }
+                wlines = _group_words_into_lines(words, y_tol=eff_y_tol)
+                if not wlines:
+                    continue
+
+                hdr = _detect_pdf_word_header(wlines)
+                if hdr is not None:
+                    hdr_start, hdr_end, anchors = hdr
+                    # Solo recortar panel izquierdo si estamos en página single-panel con tabla desplazada a la derecha (Banesco pág. 1)
+                    table_x_min = (
+                        max(0.0, anchors[0].hdr_x0 - 20.0)
+                        if (len(panels) == 1 and anchors[0].hdr_x0 >= 120.0)
+                        else 0.0
                     )
+                    active_table_x_min = table_x_min
+                    if p_idx == 0 and panel_idx == 0:
+                        meta_lines.extend(ln.text for ln in wlines[:hdr_start])
+                        if table_x_min > 0.0:
+                            left_words = [w for w in words if float(w["x1"]) <= table_x_min]
+                            meta_lines.extend(
+                                ln.text for ln in _group_words_into_lines(left_words, y_tol=eff_y_tol)
+                            )
+
+                    if table_x_min > 0.0:
+                        hdr_word_ids = {id(w) for ln in wlines[hdr_start:hdr_end] for w in ln.words}
+                        hdr_bottom_v = wlines[hdr_end - 1].bottom
+                        right_words = [
+                            w
+                            for w in words
+                            if float(w["x0"]) >= table_x_min - 2.0
+                            and float(w["top"]) > hdr_bottom_v - 1.5
+                            and id(w) not in hdr_word_ids
+                        ]
+                        body_lines = _group_words_into_lines(right_words, y_tol=eff_y_tol)
+                    else:
+                        body_lines = wlines[hdr_end:]
+                elif active_bands is not None and (p_idx > 0 or panel_idx > 0):
+                    anchors = active_bands
+                    if len(panels) == 1 and active_table_x_min > 0.0:
+                        right_words = [w for w in words if float(w["x0"]) >= active_table_x_min - 2.0]
+                        body_lines = _group_words_into_lines(right_words, y_tol=eff_y_tol)
+                    else:
+                        body_lines = wlines
                 else:
-                    cont_txt = self._extract_continuation_text(wl, bands)
-                    if cont_txt:
-                        cont_candidates.append(
+                    # Portada sin tabla de movimientos (ej. Mercantil página 1): capturar todas las líneas de resumen
+                    if p_idx == 0:
+                        meta_lines.extend(ln.text for ln in wlines)
+                    continue
+
+                if p_idx == 0 and panel_idx == 0:
+                    for wl in wlines[-5:]:
+                        if _is_noise_or_footer_line(wl.text):
+                            meta_lines.append(wl.text)
+                    meta_sample = "\n".join(meta_lines) + f"\n{filename}"
+                    parsed_yr, parsed_mo = _extract_period_year_month(meta_sample, eff_year)
+                    if not year_explicit:
+                        eff_year = parsed_yr
+                    if parsed_mo is not None:
+                        eff_month = parsed_mo
+                elif p_idx == 1 and panel_idx == 0 and eff_month is None and meta_lines:
+                    # Si la portada en pág. 1 no tenía tabla, recalcular año/mes con toda la portada acumulada
+                    meta_sample = "\n".join(meta_lines) + f"\n{filename}"
+                    parsed_yr, parsed_mo = _extract_period_year_month(meta_sample, eff_year)
+                    if not year_explicit:
+                        eff_year = parsed_yr
+                    if parsed_mo is not None:
+                        eff_month = parsed_mo
+
+                bands = _calibrate_pdf_column_bands(
+                    anchors,
+                    body_lines,
+                    panel_w,
+                    allow_day_only=(eff_month is not None),
+                )
+                active_bands = bands
+
+                page_anchors: list[dict[str, Any]] = []
+                cont_candidates: list[dict[str, Any]] = []
+                panel_last_date_vet: str | None = last_global_row.date_vet if last_global_row is not None else None
+
+                for b_idx, wl in enumerate(body_lines):
+                    if _is_noise_or_footer_line(wl.text):
+                        continue
+                    parsed = self._parse_pdf_word_line(
+                        wl,
+                        bands,
+                        eff_year,
+                        default_month=eff_month,
+                        fallback_date_vet=panel_last_date_vet,
+                    )
+                    if parsed is not None:
+                        panel_last_date_vet = str(parsed["row"].date_vet)
+                        page_anchors.append(
                             {
                                 "line_idx": b_idx,
                                 "y_mid": wl.y_mid,
-                                "text": cont_txt,
+                                "row": parsed["row"],
+                                "inline_concept": parsed["inline_concept"],
+                                "has_inline": parsed["has_inline_concept"],
+                                "top_parts": [],
+                                "bottom_parts": [],
                             }
                         )
-
-            cross_page_parts: list[str] = []
-            for cand in cont_candidates:
-                c_idx = int(cand["line_idx"])
-                c_y = float(cand["y_mid"])
-                c_txt = str(cand["text"])
-
-                prev_a = next(
-                    (a for a in reversed(page_anchors) if int(a["line_idx"]) < c_idx),
-                    None,
-                )
-                next_a = next((a for a in page_anchors if int(a["line_idx"]) > c_idx), None)
-
-                d_prev = (c_y - float(prev_a["y_mid"])) if prev_a is not None else 9999.0
-                d_next = (float(next_a["y_mid"]) - c_y) if next_a is not None else 9999.0
-
-                if (
-                    next_a is not None
-                    and not next_a["has_inline"]
-                    and d_next <= 12.0
-                    and d_next < d_prev
-                ):
-                    next_a["top_parts"].append(c_txt)
-                elif prev_a is not None:
-                    prev_a["bottom_parts"].append(c_txt)
-                elif last_global_row is not None:
-                    cross_page_parts.append(c_txt)
-
-            if cross_page_parts and last_global_row is not None:
-                merged_prev = _sanitize_cell_text(
-                    f"{last_global_row.concept} {' '.join(cross_page_parts)}"
-                )
-                if merged_prev:
-                    last_global_row.concept = merged_prev
-                    last_global_row.payment_method = _infer_payment_method(merged_prev)
-
-            for anch in page_anchors:
-                row_obj: ParsedStatementRow = anch["row"]
-                parts = [
-                    *anch["top_parts"],
-                    *([anch["inline_concept"]] if anch["inline_concept"] else []),
-                    *anch["bottom_parts"],
-                ]
-                assembled = _sanitize_cell_text(" ".join(parts))
-                if assembled:
-                    if row_obj.reference_number == "S/R":
-                        new_ref, new_conc = _extract_reference(assembled)
-                        row_obj.reference_number = new_ref
-                        row_obj.concept = new_conc or assembled
                     else:
-                        row_obj.concept = assembled
-                row_obj.payment_method = _infer_payment_method(row_obj.concept)
-                row_obj.row_index = len(rows)
-                rows.append(row_obj)
-                last_global_row = row_obj
-                if len(rows) >= MAX_STATEMENT_ROWS:
-                    warnings.append(
-                        f"Se alcanzó el límite de seguridad de {MAX_STATEMENT_ROWS} movimientos."
+                        cont_txt = self._extract_continuation_text(wl, bands)
+                        if cont_txt:
+                            cont_candidates.append(
+                                {
+                                    "line_idx": b_idx,
+                                    "y_mid": wl.y_mid,
+                                    "text": cont_txt,
+                                }
+                            )
+
+                cross_page_parts: list[str] = []
+                for cand in cont_candidates:
+                    c_idx = int(cand["line_idx"])
+                    c_y = float(cand["y_mid"])
+                    c_txt = str(cand["text"])
+
+                    prev_a = next(
+                        (a for a in reversed(page_anchors) if int(a["line_idx"]) < c_idx),
+                        None,
                     )
+                    next_a = next((a for a in page_anchors if int(a["line_idx"]) > c_idx), None)
+
+                    d_prev = (c_y - float(prev_a["y_mid"])) if prev_a is not None else 9999.0
+                    d_next = (float(next_a["y_mid"]) - c_y) if next_a is not None else 9999.0
+
+                    if (
+                        next_a is not None
+                        and not next_a["has_inline"]
+                        and d_next <= 12.0
+                        and d_next < d_prev
+                    ):
+                        next_a["top_parts"].append(c_txt)
+                    elif prev_a is not None:
+                        prev_a["bottom_parts"].append(c_txt)
+                    elif last_global_row is not None:
+                        cross_page_parts.append(c_txt)
+
+                if cross_page_parts and last_global_row is not None:
+                    full_prev_desc = f"{last_global_full_desc or last_global_row.concept} {' '.join(cross_page_parts)}"
+                    last_global_full_desc = full_prev_desc
+                    _enrich_row_metadata(last_global_row, full_prev_desc)
+                    merged_prev = _sanitize_cell_text(full_prev_desc)
+                    if merged_prev:
+                        last_global_row.concept = merged_prev
+                        last_global_row.payment_method = _infer_payment_method(full_prev_desc)
+
+                for anch in page_anchors:
+                    row_obj: ParsedStatementRow = anch["row"]
+                    parts = [
+                        *anch["top_parts"],
+                        *([anch["inline_concept"]] if anch["inline_concept"] else []),
+                        *anch["bottom_parts"],
+                    ]
+                    full_desc = re.sub(r"\s+", " ", " ".join(parts)).strip()
+                    assembled = _sanitize_cell_text(full_desc)
+                    if assembled:
+                        if row_obj.reference_number == "S/R":
+                            new_ref, new_conc = _extract_reference(assembled)
+                            row_obj.reference_number = new_ref
+                            row_obj.concept = new_conc or assembled
+                        else:
+                            row_obj.concept = assembled
+                    _enrich_row_metadata(row_obj, full_desc or row_obj.concept)
+                    row_obj.payment_method = _infer_payment_method(full_desc or row_obj.concept)
+                    row_obj.source_page_idx = p_idx
+                    row_obj.row_index = len(rows)
+                    rows.append(row_obj)
+                    last_global_row = row_obj
+                    last_global_full_desc = full_desc or row_obj.concept
+                    if len(rows) >= MAX_STATEMENT_ROWS:
+                        warnings.append(
+                            f"Se alcanzó el límite de seguridad de {MAX_STATEMENT_ROWS} movimientos."
+                        )
+                        break
+
+                if len(rows) >= MAX_STATEMENT_ROWS:
                     break
 
             if len(rows) >= MAX_STATEMENT_ROWS:
                 break
 
         meta_sample_all = "\n".join(meta_lines) + f"\n{filename}"
+        cover_summary = _extract_cover_summary(meta_sample_all)
         detected_bank = (
             normalize_bank_name(bank_name_override)
             if bank_name_override and bank_name_override.strip()
@@ -2218,7 +2813,7 @@ class BankStatementImporter:
             inferred = self._infer_bank_from_concepts(rows)
             if inferred:
                 detected_bank = inferred
-        return rows, detected_bank, eff_year, warnings
+        return rows, detected_bank, eff_year, warnings, cover_summary
 
     def _extract_pdf_with_pdfplumber(
         self,
@@ -2226,7 +2821,7 @@ class BankStatementImporter:
         filename: str,
         bank_name_override: str | None,
         default_year: int,
-    ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str]]:
+    ) -> tuple[list[ParsedStatementRow], str, int, bool, list[str], dict[str, float | int | None]]:
         """Extrae palabras vectoriales con pdfplumber y delega al motor geométrico universal."""
         try:
             pdf_doc = pdfplumber.open(io.BytesIO(file_bytes))
@@ -2236,12 +2831,13 @@ class BankStatementImporter:
                 if bank_name_override and bank_name_override.strip()
                 else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
             )
-            return [], fallback_bank, default_year, False, []
+            return [], fallback_bank, default_year, False, [], {}
 
         pages_words: list[tuple[list[dict[str, Any]], float]] = []
         has_any_text = False
         with pdf_doc:
-            for page in pdf_doc.pages[:MAX_PDF_PAGES]:
+            page_slice = pdf_doc.pages[:MAX_PDF_PAGES]
+            for p_idx, page in enumerate(page_slice):
                 words = (
                     page.extract_words(
                         keep_blank_chars=False,
@@ -2254,6 +2850,9 @@ class BankStatementImporter:
                 if words:
                     has_any_text = True
                 pages_words.append((words, float(page.width or 612.0)))
+                # Corte temprano si las primeras 5 páginas de un PDF largo no tienen capa de texto
+                if not has_any_text and p_idx >= 4 and len(page_slice) > 10:
+                    break
 
         if not has_any_text:
             fallback_bank = (
@@ -2261,22 +2860,37 @@ class BankStatementImporter:
                 if bank_name_override and bank_name_override.strip()
                 else (detect_bank_from_text(filename) or "BANCO DESCONOCIDO")
             )
-            return [], fallback_bank, default_year, False, []
+            return [], fallback_bank, default_year, False, [], {}
 
-        rows, detected_bank, eff_year, warnings = self._extract_rows_from_word_pages(
+        rows, detected_bank, eff_year, warnings, cover_summary = self._extract_rows_from_word_pages(
             pages_words=pages_words,
             filename=filename,
             bank_name_override=bank_name_override,
             default_year=default_year,
             y_tol=2.6,
         )
-        return rows, detected_bank, eff_year, True, warnings
+        return rows, detected_bank, eff_year, True, warnings, cover_summary
 
     def _extract_continuation_text(self, wl: _PdfWordLine, bands: list[_PdfColAnchor]) -> str:
-        """Extrae texto limpio de una línea de continuación sin mezclar ruidos numéricos ni resúmenes."""
-        if _MONEY_TOKEN_RE.search(wl.text):
-            return ""
+        """Extrae texto limpio de continuación permitiendo montos dentro de la descripción (Mercantil) pero nunca en columnas numéricas."""
         concept_bands = [b for b in bands if b.role == "concept"]
+        num_bands = [b for b in bands if b.role in ("debit", "credit", "amount", "balance")]
+
+        # Descartar líneas con montos en las columnas numéricas (son totales/saldos, no texto descriptivo)
+        if num_bands:
+            num_left = min(b.left for b in num_bands) - 8.0
+            num_right = max(b.right for b in num_bands) + 12.0
+            for w in wl.words:
+                wtxt = str(w["text"]).strip()
+                if not _MONEY_TOKEN_RE.fullmatch(wtxt):
+                    continue
+                wxc = (float(w["x0"]) + float(w["x1"])) / 2.0
+                in_concept = any(cb.left - 2.0 <= wxc <= cb.right + 2.0 for cb in concept_bands)
+                if not in_concept and num_left <= wxc <= num_right:
+                    return ""
+        elif _MONEY_TOKEN_RE.search(wl.text):
+            return ""
+
         words_in = [
             str(w["text"]).strip()
             for w in wl.words
@@ -2285,8 +2899,10 @@ class BankStatementImporter:
                 for b in concept_bands
             )
         ]
+        if concept_bands and not words_in:
+            return ""
         raw_txt = " ".join(words_in) if words_in else wl.text
-        return _sanitize_cell_text(raw_txt, max_len=140)
+        return _sanitize_cell_text(raw_txt, max_len=220)
 
     def _parse_pdf_word_line(
         self,
@@ -2294,43 +2910,12 @@ class BankStatementImporter:
         bands: list[_PdfColAnchor],
         default_year: int,
         default_month: int | None = None,
+        fallback_date_vet: str | None = None,
     ) -> dict[str, Any] | None:
         """Evalúa una línea visual contra las columnas calibradas y construye ParsedStatementRow si es ancla."""
         date_bands = [b for b in bands if b.role in ("date", "date_alt")]
         if not date_bands:
             return None
-
-        parsed_dt: tuple[str, datetime] | None = None
-        for dband in date_bands:
-            d_words = [
-                str(w["text"]).strip()
-                for w in wl.words
-                if dband.left - 4.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= dband.right + 4.0
-            ]
-            d_str = " ".join(d_words).strip()
-            m_d = _DATE_ANY_RE.search(d_str)
-            if not m_d and d_str:
-                # Rescate si una letra de Descripción quedó pegada sin espacio al inicio de la fecha
-                m_d = re.search(
-                    r"(?<![0-9/.,-])(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})",
-                    d_str,
-                )
-            if m_d:
-                cand_dt = _parse_vet_date(m_d.group(0).strip(), default_year)
-                if cand_dt is not None:
-                    parsed_dt = cand_dt
-                    break
-            elif default_month is not None and re.fullmatch(r"0?[1-9]|[12]\d|3[01]", d_str):
-                cand_dt = _parse_vet_date(
-                    f"{int(d_str):02d}/{default_month:02d}/{default_year}",
-                    default_year,
-                )
-                if cand_dt is not None:
-                    parsed_dt = cand_dt
-                    break
-        if parsed_dt is None:
-            return None
-        date_vet, dt_utc = parsed_dt
 
         num_bands = [b for b in bands if b.role in ("debit", "credit", "amount", "balance")]
         if not num_bands:
@@ -2355,6 +2940,68 @@ class BankStatementImporter:
 
         if not money_words:
             return None
+
+        ref_words = [
+            str(w["text"]).strip()
+            for w in wl.words
+            if any(rb.left - 4.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= rb.right + 3.0 for rb in ref_bands)
+            and re.search(r"\d", str(w["text"]))
+        ]
+        explicit_ref = " ".join(ref_words).strip() or None
+
+        parsed_dt: tuple[str, datetime] | None = None
+        for dband in date_bands:
+            d_words = [
+                str(w["text"]).strip()
+                for w in wl.words
+                if dband.left - 5.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= dband.right + 5.0
+            ]
+            d_str = " ".join(d_words).strip()
+            m_d = _DATE_ANY_RE.search(d_str)
+            if not m_d and d_str and not re.search(r"[A-Za-z]{3}", d_str):
+                # Normalizar confusiones OCR frecuentes solo en fechas numéricas cortas ("0l" -> "01", "O5" -> "05")
+                d_ocr = d_str.translate(str.maketrans("OoIl|", "00111"))
+                m_d = _DATE_ANY_RE.search(d_ocr) or re.search(
+                    r"(?<![0-9/.,-])(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})",
+                    d_ocr,
+                )
+            else:
+                d_ocr = d_str
+            if not m_d and d_str:
+                # Rescate si una letra de Descripción quedó pegada sin espacio al inicio de la fecha
+                m_d = re.search(
+                    r"(?<![0-9/.,-])(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})",
+                    d_str,
+                )
+            if m_d:
+                cand_dt = _parse_vet_date(m_d.group(0).strip(), default_year)
+                if cand_dt is not None:
+                    parsed_dt = cand_dt
+                    break
+            elif default_month is not None and re.fullmatch(r"0?[1-9]|[12]\d|3[01]", d_ocr):
+                cand_dt = _parse_vet_date(
+                    f"{int(d_ocr):02d}/{default_month:02d}/{default_year}",
+                    default_year,
+                )
+                if cand_dt is not None:
+                    parsed_dt = cand_dt
+                    break
+
+        # Rescate seguro para tablas densas de 2 columnas (ej. Banesco OCR) donde se omitió el dígito DIA
+        # pero la fila trae una referencia bancaria numérica explícita (>=6 dígitos) y monto + saldo.
+        if (
+            parsed_dt is None
+            and default_month is not None
+            and fallback_date_vet is not None
+            and explicit_ref is not None
+            and re.search(r"\d{6,}", explicit_ref)
+            and len(money_words) >= 2
+        ):
+            parsed_dt = _parse_vet_date(fallback_date_vet, default_year)
+
+        if parsed_dt is None:
+            return None
+        date_vet, dt_utc = parsed_dt
 
         assigned: dict[str, tuple[float, Literal["DEBIT", "CREDIT"] | None]] = {}
         bal_val: float | None = None
@@ -2410,13 +3057,6 @@ class BankStatementImporter:
 
         mov_type: Literal["DEBIT", "CREDIT"] = "DEBIT" if debit_val > 0.0 else "CREDIT"
         amt_val = debit_val if debit_val > 0.0 else credit_val
-
-        ref_words = [
-            str(w["text"]).strip()
-            for w in wl.words
-            if any(rb.left - 3.0 <= ((float(w["x0"]) + float(w["x1"])) / 2.0) <= rb.right + 3.0 for rb in ref_bands)
-        ]
-        explicit_ref = " ".join(ref_words).strip() or None
 
         concept_words = [
             str(w["text"]).strip()
@@ -2941,13 +3581,83 @@ class BankStatementImporter:
         result.balance_mismatch_count = mismatches
         result.balance_verified = bool(len(with_bal) >= 2 and mismatches == 0)
 
-        # 3. Clasificación base sin BD (comisiones bancarias)
+        # 2b. Verificación contra resumen de portada (fundamental para Mercantil sin columna Saldo por fila y auditoría Banesco)
+        cs = result.cover_summary or {}
+        if cs:
+            cs_open = cs.get("opening_balance")
+            cs_close = cs.get("closing_balance")
+            cs_cred_tot = cs.get("declared_credits_total")
+            cs_deb_tot = cs.get("declared_debits_total")
+            if result.opening_balance is None and isinstance(cs_open, (int, float)):
+                result.opening_balance = round(float(cs_open), 2)
+            if result.closing_balance is None and isinstance(cs_close, (int, float)):
+                result.closing_balance = round(float(cs_close), 2)
+
+            sum_credits = round(sum(r.amount_ves for r in rows if r.movement_type == "CREDIT"), 2)
+            sum_debits = round(sum(r.amount_ves for r in rows if r.movement_type == "DEBIT"), 2)
+
+            if len(with_bal) < 2 and isinstance(cs_open, (int, float)) and isinstance(cs_close, (int, float)):
+                expected_close = round(float(cs_open) + sum_credits - sum_debits, 2)
+                close_ok = abs(expected_close - float(cs_close)) <= 0.05
+                cred_ok = (
+                    not isinstance(cs_cred_tot, (int, float))
+                    or abs(sum_credits - float(cs_cred_tot)) <= 0.05
+                )
+                deb_ok = (
+                    not isinstance(cs_deb_tot, (int, float))
+                    or abs(sum_debits - float(cs_deb_tot)) <= 0.05
+                )
+                if close_ok and cred_ok and deb_ok:
+                    result.balance_verified = True
+                elif isinstance(cs_deb_tot, (int, float)) or isinstance(cs_cred_tot, (int, float)):
+                    decl_cnt = int(cs.get("declared_debits_count") or 0) + int(
+                        cs.get("declared_credits_count") or 0
+                    )
+                    if decl_cnt > len(rows):
+                        result.warnings.append(
+                            f"Portada declara {decl_cnt} movimientos (Créditos Bs. {float(cs_cred_tot or 0.0):.2f}, "
+                            f"Débitos Bs. {float(cs_deb_tot or 0.0):.2f}); se extrajeron {len(rows)} "
+                            f"(Créditos Bs. {sum_credits:.2f}, Débitos Bs. {sum_debits:.2f})."
+                        )
+
+        # 3. Clasificación base sin BD (comisiones bancarias explícitas e implícitas 0.30% de Banesco Pago Móvil)
         fee_count = 0
-        for r in rows:
+        for idx, r in enumerate(chron_rows):
             if r.movement_type == "DEBIT" and _is_bank_fee_concept(r.concept):
                 r.suggested_action = "BANK_FEE"
                 r.bank_fee_ves = r.amount_ves
                 r.notes = "Comisión bancaria deducible detectada"
+                fee_count += 1
+                continue
+
+            # Comisión implícita Banesco: fila inmediata con misma ref y concepto "Banesco Pago Movil" (con o sin espacios OCR) por ~0.30%
+            is_implicit_banesco_fee = False
+            curr_compact = re.sub(r"\s+", "", normalize_text(r.concept))
+            if (
+                idx > 0
+                and r.movement_type == "DEBIT"
+                and r.reference_number != "S/R"
+                and ("BANESCOPAGOMOVIL" in curr_compact or "PAGOMOVIL" in curr_compact)
+            ):
+                prev_r = chron_rows[idx - 1]
+                prev_compact = re.sub(r"\s+", "", normalize_text(prev_r.concept))
+                if (
+                    prev_r.movement_type == "DEBIT"
+                    and prev_r.suggested_action != "BANK_FEE"
+                    and prev_r.date_vet == r.date_vet
+                    and prev_r.reference_number == r.reference_number
+                    and ("BANESCOPAGOMOVIL" in prev_compact or "PAGOMOVIL" in prev_compact)
+                    and 0.0 < r.amount_ves < prev_r.amount_ves
+                ):
+                    expected_fee = round(prev_r.amount_ves * 0.003, 2)
+                    tol = max(0.05, round(prev_r.amount_ves * 0.0005, 2))
+                    if abs(r.amount_ves - expected_fee) <= tol:
+                        is_implicit_banesco_fee = True
+
+            if is_implicit_banesco_fee:
+                r.suggested_action = "BANK_FEE"
+                r.bank_fee_ves = r.amount_ves
+                r.notes = "Comisión bancaria 0.30% Banesco Pago Móvil detectada"
                 fee_count += 1
             else:
                 r.suggested_action = "P2P_UNMATCHED"
@@ -2965,7 +3675,7 @@ class BankStatementImporter:
         column_mapping: dict[str, str] | None = None,
         year_hint: int | None = None,
     ) -> StatementPreviewResult:
-        """Parsea el estado de cuenta y lo cruza contra órdenes P2P y comprobantes previos del usuario."""
+        """Parsea el estado de cuenta y lo cruza contra órdenes P2P y comprobantes previos del usuario en O(1)."""
         preview = self.parse_bytes(
             file_bytes=file_bytes,
             filename=filename,
@@ -2979,17 +3689,31 @@ class BankStatementImporter:
         voucher_repo = BankVoucherRepository(db, user_id=user_id)
         order_repo = OrderRepository(db, user_id=user_id)
 
-        existing_vouchers = voucher_repo.list_all(limit=2000, user_id=user_id)
-        already_matched_orders: set[str] = {
-            str(v.associated_order_number)
-            for v in existing_vouchers
-            if v.associated_order_number
-        }
+        # Acotar consultas al rango real del extracto (±4 días) sin ningún límite truncado de 500/2000 filas
+        row_dates = [r.voucher_datetime_utc for r in preview.rows]
+        min_dt = (min(row_dates) - timedelta(days=4)).astimezone(UTC).replace(tzinfo=None)
+        max_dt = (max(row_dates) + timedelta(days=4)).astimezone(UTC).replace(tzinfo=None)
+
+        already_matched_orders = voucher_repo.list_associated_order_numbers(user_id=user_id)
+        existing_vouchers = voucher_repo.list_by_date_range(min_dt, max_dt, user_id=user_id)
         completed_orders = [
             o
-            for o in order_repo.list_completed(user_id=user_id)
+            for o in order_repo.list_completed(start_date=min_dt, end_date=max_dt, user_id=user_id)
             if str(o.order_number) not in already_matched_orders
         ]
+
+        # Índices en memoria O(1) para alto volumen (6,000–25,000 movimientos/mes)
+        existing_by_ref: dict[str, list[BankVoucher]] = {}
+        for v in existing_vouchers:
+            v_ref = normalize_reference(str(v.reference_number or ""))
+            if v_ref != "S/R":
+                existing_by_ref.setdefault(v_ref, []).append(v)
+
+        orders_by_bucket: dict[tuple[str, int], list[Order]] = {}
+        for ord_item in completed_orders:
+            t_type = str(ord_item.trade_type or "").upper()
+            amt_bucket = round(float(ord_item.fiat_amount or 0.0))
+            orders_by_bucket.setdefault((t_type, amt_bucket), []).append(ord_item)
 
         dup_count = 0
         match_count = 0
@@ -2998,23 +3722,32 @@ class BankStatementImporter:
         used_order_numbers: set[str] = set()
 
         for row in preview.rows:
-            # 1. Deduplicación contra BankVoucher existentes del mismo usuario
-            if self._is_duplicate_voucher(row, preview.bank_name, existing_vouchers):
+            # 1. Deduplicación contra BankVoucher existentes del mismo usuario (O(1) por referencia)
+            norm_ref = normalize_reference(row.reference_number)
+            ref_candidates = existing_by_ref.get(norm_ref, existing_vouchers) if norm_ref != "S/R" else existing_vouchers
+            if self._is_duplicate_voucher(row, preview.bank_name, ref_candidates):
                 row.suggested_action = "DUPLICATE_EXISTING"
                 row.notes = "Ya existe un comprobante con esta referencia/monto"
                 dup_count += 1
                 continue
 
-            # 2. Comisiones bancarias deducibles
+            # 2. Comisiones bancarias deducibles + guardia anti-doble-comisión (Recibo previo + PDF)
             if row.suggested_action == "BANK_FEE":
+                if self._is_fee_already_covered_by_existing_voucher(row, preview.bank_name, ref_candidates):
+                    row.suggested_action = "DUPLICATE_EXISTING"
+                    row.notes = "Comisión bancaria ya contabilizada en comprobante previo"
+                    dup_count += 1
+                    continue
                 fee_count += 1
                 continue
 
-            # 3. Cruce por monto + dirección comercial (DEBIT=BUY, CREDIT=SELL) + proximidad VET
+            # 3. Cruce multi-factorial por monto + sentido + banco + hora exacta VET + contraparte
             matched_order, confidence = self._find_best_order_match(
                 row=row,
                 orders=completed_orders,
                 used_order_numbers=used_order_numbers,
+                bank_name=preview.bank_name,
+                orders_by_bucket=orders_by_bucket,
             )
             if matched_order is not None:
                 used_order_numbers.add(str(matched_order.order_number))
@@ -3035,7 +3768,8 @@ class BankStatementImporter:
         preview.bank_fee_count = fee_count
         preview.unmatched_count = unmatched_count
         avail: list[dict[str, Any]] = []
-        for ord_item in completed_orders[:200]:
+        # Enviar hasta 500 órdenes pendientes del período ordenadas de más reciente a más antigua
+        for ord_item in list(reversed(completed_orders))[:500]:
             o_dt = cast(datetime | None, ord_item.created_at)
             if o_dt is not None:
                 o_vet = (
@@ -3057,6 +3791,44 @@ class BankStatementImporter:
             )
         preview.available_orders = avail
         return preview
+
+    def _is_fee_already_covered_by_existing_voucher(
+        self,
+        row: ParsedStatementRow,
+        bank_name: str,
+        existing_vouchers: list[BankVoucher],
+    ) -> bool:
+        """Evita doble deducción en cuenta 5.2.01 si la comisión de esta referencia ya se imputó en un recibo previo."""
+        norm_row_ref = normalize_reference(row.reference_number)
+        if norm_row_ref == "S/R":
+            return False
+        norm_row_bank = normalize_bank_name(bank_name)
+        row_day = datetime.strptime(row.date_vet, "%Y-%m-%d").date()
+
+        for v in existing_vouchers:
+            v_fee = float(v.bank_fee_ves or 0.0)
+            if v_fee <= 0.0:
+                continue
+            v_ref = normalize_reference(str(v.reference_number or ""))
+            if v_ref == "S/R" or not (
+                norm_row_ref == v_ref or norm_row_ref.endswith(v_ref) or v_ref.endswith(norm_row_ref)
+            ):
+                continue
+            if abs(v_fee - row.amount_ves) > max(0.05, row.amount_ves * 0.05):
+                continue
+            v_dt = cast(datetime | None, v.voucher_date) or cast(datetime | None, v.created_at)
+            if v_dt is not None:
+                v_vet_day = (
+                    v_dt.replace(tzinfo=UTC).astimezone(VET_TZ).date()
+                    if v_dt.tzinfo is None
+                    else v_dt.astimezone(VET_TZ).date()
+                )
+                if abs((row_day - v_vet_day).days) > 3:
+                    continue
+            v_bank = normalize_bank_name(str(v.bank_name or ""))
+            if v_bank in (norm_row_bank, "BANCO DESCONOCIDO") or norm_row_bank == "BANCO DESCONOCIDO":
+                return True
+        return False
 
     def _is_duplicate_voucher(
         self,
@@ -3103,41 +3875,107 @@ class BankStatementImporter:
         row: ParsedStatementRow,
         orders: list[Order],
         used_order_numbers: set[str],
+        bank_name: str = "BANCO DESCONOCIDO",
+        orders_by_bucket: dict[tuple[str, int], list[Order]] | None = None,
     ) -> tuple[Order | None, float]:
         expected_trade = "BUY" if row.movement_type == "DEBIT" else "SELL"
-        candidates: list[tuple[float, float, Order]] = []
+        norm_stmt_bank = normalize_bank_name(bank_name)
+        row_cp_words = (
+            {w for w in normalize_text(row.counterparty_name).split() if len(w) >= 3}
+            if row.counterparty_name
+            else set()
+        )
+        row_cid_digits = re.sub(r"\D", "", row.sender_id or "")
+        row_ref_clean = normalize_reference(row.reference_number)
 
-        for ord_item in orders:
+        if orders_by_bucket is not None:
+            base_amt = round(row.amount_ves)
+            pool: list[Order] = []
+            for b in (base_amt - 1, base_amt, base_amt + 1):
+                pool.extend(orders_by_bucket.get((expected_trade, b), ()))
+        else:
+            pool = orders
+
+        # Tupla ordenable: (score descendente, time_diff_sec ascendente)
+        scored: list[tuple[float, float, int, Order]] = []
+        row_day = datetime.strptime(row.date_vet, "%Y-%m-%d").date()
+        row_utc_naive = (
+            row.voucher_datetime_utc.astimezone(UTC).replace(tzinfo=None)
+            if row.voucher_datetime_utc.tzinfo is not None
+            else row.voucher_datetime_utc
+        )
+
+        for ord_item in pool:
             ord_num = str(ord_item.order_number)
             if ord_num in used_order_numbers:
+                continue
+            if str(ord_item.trade_type or "").upper() != expected_trade:
                 continue
             if abs(float(ord_item.fiat_amount or 0.0) - row.amount_ves) > 0.05:
                 continue
 
             o_dt = cast(datetime | None, ord_item.created_at)
-            day_diff = 0.0
+            day_diff = 0
+            time_diff_sec = 0.0
             if o_dt is not None:
                 o_vet = (
                     o_dt.replace(tzinfo=UTC).astimezone(VET_TZ)
                     if o_dt.tzinfo is None
                     else o_dt.astimezone(VET_TZ)
                 )
-                row_dt = datetime.strptime(row.date_vet, "%Y-%m-%d").replace(tzinfo=VET_TZ)
-                day_diff = abs((o_vet.date() - row_dt.date()).days)
+                day_diff = abs((o_vet.date() - row_day).days)
                 if day_diff > 2:
                     continue
+                o_utc_naive = o_dt.astimezone(UTC).replace(tzinfo=None) if o_dt.tzinfo is not None else o_dt
+                time_diff_sec = abs((o_utc_naive - row_utc_naive).total_seconds())
 
-            same_dir_penalty = 0.0 if str(ord_item.trade_type or "").upper() == expected_trade else 10.0
-            candidates.append((same_dir_penalty, day_diff, ord_item))
+            # Puntuación multi-factorial para desambiguar montos redondos repetidos (ej. 10x 100.000 Bs)
+            score = 60.0 if day_diff == 0 else (50.0 if day_diff == 1 else 38.0)
 
-        if not candidates:
+            # Banco reportado por Binance vs Banco del estado de cuenta
+            o_pm_raw = str(ord_item.payment_method or "").strip()
+            if o_pm_raw and norm_stmt_bank != "BANCO DESCONOCIDO":
+                o_bank = detect_bank_from_text(o_pm_raw)
+                if o_bank is not None:
+                    if o_bank == norm_stmt_bank:
+                        score += 35.0
+                    else:
+                        # La orden explícitamente pertenece a OTRO banco venezolano distinto -> penalizar fuerte
+                        score -= 45.0
+
+            # Proximidad horaria exacta (Mercantil u otros con HH:MM:SS)
+            if row.tx_time_vet and o_dt is not None:
+                if time_diff_sec <= 1800.0:
+                    score += 25.0
+                elif time_diff_sec <= 10800.0:
+                    score += 12.0
+
+            # Nombre de contraparte o cédula
+            o_cp_norm = normalize_text(cast(str | None, ord_item.counterparty_name))
+            if o_cp_norm:
+                if row_cp_words:
+                    o_words = {w for w in o_cp_norm.split() if len(w) >= 3}
+                    if row_cp_words & o_words:
+                        score += 30.0
+                if len(row_cid_digits) >= 6 and row_cid_digits in re.sub(r"\D", "", o_cp_norm):
+                    score += 30.0
+
+            # Referencia exacta en orden
+            if row_ref_clean != "S/R" and len(row_ref_clean) >= 5 and row_ref_clean in ord_num:
+                score += 40.0
+
+            scored.append((score, -time_diff_sec, -day_diff, ord_item))
+
+        if not scored:
             return None, 0.0
 
-        candidates.sort(key=lambda item: (item[0], item[1]))
-        best_penalty, best_days, best_order = candidates[0]
-        if best_penalty > 0.0:
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        best_score, _, neg_days, best_order = scored[0]
+        # Si la única orden disponible pertenecía explícitamente a otro banco y no hubo señal adicional, no forzar cruce
+        if best_score < 20.0:
             return None, 0.0
-        confidence = 99.0 if best_days == 0 else (90.0 if best_days == 1 else 78.0)
+        best_days = -neg_days
+        confidence = min(99.0, max(75.0, round(best_score, 1))) if best_days <= 1 else 78.0
         return best_order, confidence
 
     def commit_rows(
@@ -3147,7 +3985,9 @@ class BankStatementImporter:
         bank_name: str,
         rows: list[StatementCommitRow],
     ) -> StatementCommitResult:
-        """Persiste las filas aprobadas por el usuario y genera sus asientos en partida doble."""
+        """Persiste las filas aprobadas en una sola transacción atómica por lotes preservando la cadena SHA-256."""
+        from sqlalchemy.exc import SQLAlchemyError
+
         norm_bank = normalize_bank_name(bank_name)
         active_rows = [r for r in rows if r.action not in ("IGNORE", "DUPLICATE_EXISTING")]
 
@@ -3169,7 +4009,39 @@ class BankStatementImporter:
         order_repo = OrderRepository(db, user_id=user_id)
         acct_engine = AccountingEngine(db=db, user_id=user_id)
 
-        existing_vouchers = voucher_repo.list_all(limit=2000, user_id=user_id)
+        # Cargar comprobantes previos acotados al rango real de fechas del lote (sin truncar a 2000)
+        parsed_dates: list[datetime] = []
+        for r in active_rows:
+            p_dt = _parse_vet_date(r.date_vet, datetime.now(VET_TZ).year)
+            parsed_dates.append(p_dt[1] if p_dt else datetime.now(UTC))
+
+        if parsed_dates:
+            min_dt = (min(parsed_dates) - timedelta(days=4)).astimezone(UTC).replace(tzinfo=None)
+            max_dt = (max(parsed_dates) + timedelta(days=4)).astimezone(UTC).replace(tzinfo=None)
+            existing_vouchers = voucher_repo.list_by_date_range(min_dt, max_dt, user_id=user_id)
+        else:
+            existing_vouchers = []
+
+        existing_by_ref: dict[str, list[BankVoucher]] = {}
+        for v in existing_vouchers:
+            v_ref = normalize_reference(str(v.reference_number or ""))
+            if v_ref != "S/R":
+                existing_by_ref.setdefault(v_ref, []).append(v)
+
+        # Pre-cargar órdenes referenciadas en el lote en bloques de 500 para eliminar N+1
+        req_order_nums = list({r.order_number.strip() for r in active_rows if r.action == "P2P_MATCH" and r.order_number})
+        orders_map: dict[str, Order] = {}
+        for i in range(0, len(req_order_nums), 500):
+            chunk = req_order_nums[i : i + 500]
+            oq = db.query(Order).filter(Order.order_number.in_(chunk))
+            for ord_obj in _apply_user_scope(db, oq, Order, user_id).all():
+                orders_map[str(ord_obj.order_number)] = ord_obj
+
+        # Inicializar punteros de cadena SHA-256 una sola vez antes del bucle atómico
+        last_entry = acct_engine.journal_repo.get_last_entry(user_id=user_id)
+        next_entry_number = int(last_entry.entry_number) + 1 if last_entry is not None else 1
+        current_prev_hash = str(last_entry.entry_hash) if last_entry is not None else "0" * 64
+
         created_vouchers = 0
         matched_orders = 0
         bank_fees_recorded = 0
@@ -3178,80 +4050,120 @@ class BankStatementImporter:
         ignored_rows = len(rows) - len(active_rows)
         journal_entries_created = 0
 
-        for row in active_rows:
-            parsed_dt = _parse_vet_date(row.date_vet, datetime.now(VET_TZ).year)
-            tx_dt = parsed_dt[1] if parsed_dt else datetime.now(UTC)
+        try:
+            for row, tx_dt in zip(active_rows, parsed_dates, strict=False):
+                amt = round(float(row.amount_ves), 2)
+                fee_amt = round(float(row.bank_fee_ves or (amt if row.action == "BANK_FEE" else 0.0)), 2)
+                if amt <= 0.0 and fee_amt <= 0.0:
+                    ignored_rows += 1
+                    continue
 
-            amt = round(float(row.amount_ves), 2)
-            fee_amt = round(float(row.bank_fee_ves or (amt if row.action == "BANK_FEE" else 0.0)), 2)
-            if amt <= 0.0 and fee_amt <= 0.0:
-                ignored_rows += 1
-                continue
+                # Idempotencia O(1) ante reenvíos simultáneos o repetidos
+                probe_row = ParsedStatementRow(
+                    row_index=row.row_index,
+                    date_vet=row.date_vet,
+                    voucher_datetime_utc=tx_dt,
+                    reference_number=row.reference_number,
+                    concept=row.concept,
+                    movement_type=row.movement_type,
+                    amount_ves=amt,
+                )
+                norm_ref = normalize_reference(row.reference_number)
+                cand_vouchers = (
+                    existing_by_ref.get(norm_ref, existing_vouchers)
+                    if norm_ref != "S/R"
+                    else existing_vouchers
+                )
+                if self._is_duplicate_voucher(probe_row, norm_bank, cand_vouchers):
+                    ignored_rows += 1
+                    continue
 
-            # Idempotencia ante reenvíos simultáneos o repetidos
-            probe_row = ParsedStatementRow(
-                row_index=row.row_index,
-                date_vet=row.date_vet,
-                voucher_datetime_utc=tx_dt,
-                reference_number=row.reference_number,
-                concept=row.concept,
-                movement_type=row.movement_type,
-                amount_ves=amt,
-            )
-            if self._is_duplicate_voucher(probe_row, norm_bank, existing_vouchers):
-                ignored_rows += 1
-                continue
+                safe_ref = (norm_ref if row.reference_number else "S/R")[:50]
+                if safe_ref == "S/R":
+                    safe_ref = f"STMT-{row.date_vet.replace('-', '')}-{row.row_index}"[:50]
+                safe_concept = _sanitize_cell_text(row.concept, max_len=255)
 
-            safe_ref = (normalize_reference(row.reference_number) if row.reference_number else "S/R")[:50]
-            if safe_ref == "S/R":
-                safe_ref = f"STMT-{row.date_vet.replace('-', '')}-{row.row_index}"[:50]
-            safe_concept = _sanitize_cell_text(row.concept, max_len=255)
-
-            matched_order: Order | None = None
-            verif_status = "UNMATCHED"
-            if row.action == "P2P_MATCH" and row.order_number:
-                matched_order = order_repo.get_by_order_number(row.order_number.strip(), user_id=user_id)
-                if matched_order is not None:
+                matched_order: Order | None = None
+                verif_status = "UNMATCHED"
+                if row.action == "P2P_MATCH" and row.order_number:
+                    ord_key = row.order_number.strip()
+                    cand_order = orders_map.get(ord_key) or order_repo.get_by_order_number(ord_key, user_id=user_id)
+                    if (
+                        cand_order is not None
+                        and str(getattr(cand_order, "order_status", "") or "").upper() == "COMPLETED"
+                    ):
+                        matched_order = cand_order
+                        verif_status = "MATCHED"
+                elif row.action in ("BANK_FEE", "INTERNAL_TRANSFER"):
                     verif_status = "MATCHED"
-            elif row.action in ("BANK_FEE", "INTERNAL_TRANSFER"):
-                verif_status = "MATCHED"
 
-            stored_amount = amt
-            total_deb = round(stored_amount + (fee_amt if row.action != "BANK_FEE" else 0.0), 2)
+                stored_amount = amt
+                total_deb = round(stored_amount + (fee_amt if row.action != "BANK_FEE" else 0.0), 2)
 
-            voucher = BankVoucher(
-                user_id=user_id,
-                bank_name=norm_bank[:100],
-                reference_number=safe_ref,
-                amount_ves=stored_amount,
-                bank_fee_ves=fee_amt,
-                total_debited_ves=total_deb if row.movement_type == "DEBIT" else stored_amount,
-                concept=safe_concept or "Movimiento importado de estado de cuenta",
-                payment_method=(row.payment_method or "TRANSFERENCIA")[:30],
-                movement_type=row.movement_type,
-                associated_order_number=str(matched_order.order_number) if matched_order else None,
-                verification_status=verif_status,
-                reconciliation_score=100.0 if verif_status == "MATCHED" else 0.0,
-                voucher_date=tx_dt,
-            )
-            saved_voucher = voucher_repo.create(voucher)
-            existing_vouchers.append(saved_voucher)
-            created_vouchers += 1
+                voucher = BankVoucher(
+                    user_id=user_id,
+                    bank_name=norm_bank[:100],
+                    reference_number=safe_ref,
+                    amount_ves=stored_amount,
+                    bank_fee_ves=fee_amt,
+                    total_debited_ves=total_deb if row.movement_type == "DEBIT" else stored_amount,
+                    concept=safe_concept or "Movimiento importado de estado de cuenta",
+                    payment_method=(row.payment_method or "TRANSFERENCIA")[:30],
+                    movement_type=row.movement_type,
+                    associated_order_number=str(matched_order.order_number) if matched_order else None,
+                    verification_status=verif_status,
+                    reconciliation_score=100.0 if verif_status == "MATCHED" else 0.0,
+                    voucher_date=tx_dt,
+                )
+                saved_voucher = voucher_repo.create(voucher, auto_commit=False)
+                existing_vouchers.append(saved_voucher)
+                if norm_ref != "S/R":
+                    existing_by_ref.setdefault(norm_ref, []).append(saved_voucher)
+                created_vouchers += 1
 
-            if row.action == "BANK_FEE":
-                entries = acct_engine.record_bank_fee_voucher(saved_voucher)
-                bank_fees_recorded += 1
-            elif row.action == "INTERNAL_TRANSFER":
-                entries = acct_engine.record_capital_transfer_voucher(saved_voucher)
-                internal_transfers_recorded += 1
-            elif matched_order is not None:
-                entries = acct_engine.record_p2p_trade(order=matched_order, voucher=saved_voucher)
-                matched_orders += 1
-            else:
-                entries = acct_engine.record_unmatched_voucher(voucher=saved_voucher)
-                unmatched_recorded += 1
+                if row.action == "BANK_FEE":
+                    entries = acct_engine.record_bank_fee_voucher(
+                        saved_voucher,
+                        auto_commit=False,
+                        entry_number_override=next_entry_number,
+                        prev_hash_override=current_prev_hash,
+                    )
+                    bank_fees_recorded += 1
+                elif row.action == "INTERNAL_TRANSFER":
+                    entries = acct_engine.record_capital_transfer_voucher(
+                        saved_voucher,
+                        auto_commit=False,
+                        entry_number_override=next_entry_number,
+                        prev_hash_override=current_prev_hash,
+                    )
+                    internal_transfers_recorded += 1
+                elif matched_order is not None:
+                    entries = acct_engine.record_p2p_trade(
+                        order=matched_order,
+                        voucher=saved_voucher,
+                        auto_commit=False,
+                        entry_number_override=next_entry_number,
+                        prev_hash_override=current_prev_hash,
+                    )
+                    matched_orders += 1
+                else:
+                    entries = acct_engine.record_unmatched_voucher(
+                        voucher=saved_voucher,
+                        auto_commit=False,
+                        entry_number_override=next_entry_number,
+                        prev_hash_override=current_prev_hash,
+                    )
+                    unmatched_recorded += 1
 
-            journal_entries_created += len(entries)
+                if entries:
+                    next_entry_number += 1
+                    current_prev_hash = str(entries[-1].entry_hash)
+                    journal_entries_created += len(entries)
+
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise
 
         logger.info(
             f"Importación estado cuenta completada: banco={norm_bank}, creados={created_vouchers}, "

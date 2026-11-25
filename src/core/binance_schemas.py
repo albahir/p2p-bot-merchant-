@@ -4,8 +4,9 @@ Garantiza validación estricta en tiempo de ejecución de todas las respuestas d
 
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OrderStatusEnum(str, Enum):
@@ -35,7 +36,7 @@ class AdvertisementRoleEnum(str, Enum):
 class BinanceOrderMatchItem(BaseModel):
     """Representación de una orden individual devuelta por GET /sapi/v1/c2c/orderMatch/listUserOrderHistory."""
     orderNumber: str = Field(..., description="Identificador único de la orden en Binance")
-    advNo: str = Field(..., description="Número del anuncio de origen")
+    advNo: str = Field(default="", description="Número del anuncio de origen")
     tradeType: TradeTypeEnum = Field(..., description="Sentido de la orden (BUY/SELL)")
     asset: str = Field(..., description="Criptoactivo (USDT, BTC, etc.)")
     fiat: str = Field(..., description="Divisa fíat (VES, USD, etc.)")
@@ -50,6 +51,41 @@ class BinanceOrderMatchItem(BaseModel):
     takerAmount: str | None = Field(default=None, description="Cantidad ejecutada del taker")
     commission: str | None = Field(default="0", description="Comisión cobrada al maker")
     counterPartNickName: str | None = Field(default="", description="Apodo de la contraparte")
+    payMethodName: str | None = Field(default=None, description="Método de pago o banco reportado por Binance")
+
+    @field_validator("advNo", mode="before")
+    @classmethod
+    def _coerce_adv_no(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("orderStatus", mode="before")
+    @classmethod
+    def _normalize_order_status(cls, value: Any) -> str:
+        if isinstance(value, OrderStatusEnum):
+            return value.value
+        raw = str(value or "PENDING").strip().upper()
+        valid = {member.value for member in OrderStatusEnum}
+        if raw in valid:
+            return raw
+        if "COMPLET" in raw or "SUCCESS" in raw or "FINISH" in raw:
+            return OrderStatusEnum.COMPLETED.value
+        if "CANCEL" in raw or "EXPIR" in raw or "FAIL" in raw or "CLOSED" in raw:
+            return OrderStatusEnum.CANCELLED.value
+        return OrderStatusEnum.PENDING.value
+
+    @field_validator("advertisementRole", mode="before")
+    @classmethod
+    def _coerce_ad_role(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, AdvertisementRoleEnum):
+            return value.value
+        raw = str(value).strip().upper()
+        if raw in ("MAKER", "TAKER"):
+            return raw
+        return None
 
     @property
     def amount_decimal(self) -> Decimal:

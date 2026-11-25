@@ -209,10 +209,12 @@ def render_maker_calculator(st_module: Any = None) -> None:
         col_tier, col_bank = st.columns(2)
 
         tier_map = {
-            "Usuario Normal (0.35%)": 0.0035,
-            "Nivel Bronce (0.25%)": 0.0025,
-            "Nivel Plata (0.20%)": 0.0020,
-            "Nivel Oro / PRO (0.15%)": 0.0015,
+            "Estándar VES (0.25%)": 0.0025,
+            "Nivel Bronce -20% (0.20%)": 0.0020,
+            "Nivel Plata -30% (0.175%)": 0.00175,
+            "Nivel Oro -50% (0.125%)": 0.00125,
+            "Estándar Anterior / Otra Divisa (0.35%)": 0.0035,
+            "Taker Directo (0.00%)": 0.0,
         }
 
         with col_tier:
@@ -221,7 +223,7 @@ def render_maker_calculator(st_module: Any = None) -> None:
                 list(tier_map.keys()),
                 index=0,
             )
-            maker_fee_pct = tier_map.get(selected_tier, 0.0035)
+            maker_fee_pct = tier_map.get(selected_tier, 0.0025)
 
         with col_bank:
             include_pago_movil = st.checkbox(

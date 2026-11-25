@@ -65,7 +65,6 @@ class BankReceiptOCR:
 
     GEMINI_MODELS: ClassVar[tuple[str, ...]] = (
         "gemini-2.0-flash",
-        "gemini-1.5-flash",
         "gemini-flash-lite-latest",
     )
 
@@ -253,12 +252,8 @@ class BankReceiptOCR:
         voucher_repo = BankVoucherRepository(db, user_id=user_id)
         order_repo = OrderRepository(db, user_id=user_id)
 
-        # Excluir órdenes ya conciliadas con otro comprobante para evitar doble imputación
-        already_matched: set[str] = {
-            str(v.associated_order_number)
-            for v in voucher_repo.list_all(user_id=user_id)
-            if v.associated_order_number
-        }
+        # Excluir órdenes ya conciliadas con otro comprobante sin truncar por límite de 500
+        already_matched = voucher_repo.list_associated_order_numbers(user_id=user_id)
         orders = [o for o in order_repo.list_completed(user_id=user_id) if str(o.order_number) not in already_matched]
         matched_order = self.match_receipt_with_orders(extracted, orders)
 
@@ -335,16 +330,13 @@ class BankReceiptOCR:
         if not unmatched_vouchers:
             return 0
 
-        # Obtener todas las órdenes completadas aún no vinculadas
-        already_matched: set[str] = {
-            str(v.associated_order_number)
-            for v in voucher_repo.list_all(user_id=user_id)
-            if v.associated_order_number
-        }
+        # Obtener todas las órdenes completadas aún no vinculadas sin truncar por limit=500
+        already_matched = voucher_repo.list_associated_order_numbers(user_id=user_id)
         completed_orders = [o for o in order_repo.list_completed(user_id=user_id) if str(o.order_number) not in already_matched]
         reconciled_count = 0
 
         from src.reporting.accounting_engine import AccountingEngine
+        from src.reporting.normalizers import normalize_bank_name
 
         acct_engine = AccountingEngine(db=db, user_id=user_id)
 
@@ -354,34 +346,56 @@ class BankReceiptOCR:
         for v in unmatched_vouchers:
             v_raw_dt = cast(datetime | None, v.voucher_date)
             v_date = _to_naive_utc(v_raw_dt or datetime.now(UTC))
+            v_mov = str(getattr(v, "movement_type", "") or "").upper()
+            v_bank = normalize_bank_name(cast(str | None, v.bank_name))
+
+            best_order: Order | None = None
+            best_rank: tuple[int, float] | None = None
             for o in completed_orders:
                 if str(o.order_number) in already_matched:
                     continue
+                # Respetar dirección de flujo: DEBIT -> BUY, CREDIT -> SELL
+                o_type = str(getattr(o, "trade_type", "") or "").upper()
+                if v_mov == "DEBIT" and o_type != "BUY":
+                    continue
+                if v_mov == "CREDIT" and o_type != "SELL":
+                    continue
                 # Comprobar monto idéntico en VES
-                if abs(float(o.fiat_amount) - float(v.amount_ves)) < 0.05:
-                    # Comprobar ventana de tiempo si la orden tiene fecha
-                    o_raw_dt = cast(datetime | None, o.created_at)
-                    if o_raw_dt is not None:
-                        o_date = _to_naive_utc(o_raw_dt)
-                        diff = abs((v_date - o_date).total_seconds())
-                        if diff > (tolerance_hours * 3600):
-                            continue
+                if abs(float(o.fiat_amount) - float(v.amount_ves)) >= 0.05:
+                    continue
+                # Comprobar ventana de tiempo si la orden tiene fecha
+                diff = 0.0
+                o_raw_dt = cast(datetime | None, o.created_at)
+                if o_raw_dt is not None:
+                    o_date = _to_naive_utc(o_raw_dt)
+                    diff = abs((v_date - o_date).total_seconds())
+                    if diff > (tolerance_hours * 3600):
+                        continue
 
-                    # Conciliado
-                    v.associated_order_number = o.order_number  # type: ignore[assignment]
-                    v.verification_status = "MATCHED"  # type: ignore[assignment]
-                    voucher_repo.update(v)
-                    already_matched.add(str(o.order_number))
+                o_bank = normalize_bank_name(cast(str | None, o.payment_method)) if o.payment_method else ""
+                if o_bank and o_bank != "BANCO DESCONOCIDO" and v_bank != "BANCO DESCONOCIDO":
+                    bank_rank = 0 if (v_bank == o_bank or v_bank in o_bank or o_bank in v_bank) else 2
+                else:
+                    bank_rank = 1
 
-                    # Registrar en el Libro Diario formal
-                    try:
-                        acct_engine.record_p2p_trade(order=o, voucher=v)
-                    except (SQLAlchemyError, ValueError, TypeError, KeyError) as e:
-                        logger.warning(f"Error generando asiento contable al auto-conciliar huérfano: {e}")
+                rank = (bank_rank, diff)
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best_order = o
 
+            if best_order is not None:
+                v.associated_order_number = best_order.order_number  # type: ignore[assignment]
+                v.verification_status = "MATCHED"  # type: ignore[assignment]
+                voucher_repo.update(v)
+                already_matched.add(str(best_order.order_number))
 
-                    reconciled_count += 1
-                    break
+                # Registrar en el Libro Diario formal
+                try:
+                    acct_engine.record_p2p_trade(order=best_order, voucher=v)
+                except (SQLAlchemyError, ValueError, TypeError, KeyError) as e:
+                    logger.warning(f"Error generando asiento contable al auto-conciliar huérfano: {e}")
+
+                reconciled_count += 1
 
         return reconciled_count
 

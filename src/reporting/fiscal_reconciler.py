@@ -87,27 +87,27 @@ class FiscalReconciler:
         month = int(parts[1])
         _, last_day = calendar.monthrange(year, month)
 
-        if (
-            cutoff_start_date is not None
-            and cutoff_start_date.year == year
-            and cutoff_start_date.month == month
-            and cutoff_start_date.day > 1
-        ):
-            vet_tz = timezone(timedelta(hours=-4))
-            start_dt = (
-                datetime(year, month, cutoff_start_date.day, 0, 0, 0, tzinfo=vet_tz)
-                .astimezone(UTC)
-                .replace(tzinfo=None)
+        vet_tz = timezone(timedelta(hours=-4))
+        start_day = (
+            cutoff_start_date.day
+            if (
+                cutoff_start_date is not None
+                and cutoff_start_date.year == year
+                and cutoff_start_date.month == month
+                and cutoff_start_date.day > 1
             )
-            end_dt = (
-                datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz)
-                .astimezone(UTC)
-                .replace(tzinfo=None)
-            )
-            return start_dt, end_dt
-
-        start_dt = datetime(year, month, 1, 0, 0, 0, tzinfo=UTC)
-        end_dt = datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=UTC)
+            else 1
+        )
+        start_dt = (
+            datetime(year, month, start_day, 0, 0, 0, tzinfo=vet_tz)
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+        )
+        end_dt = (
+            datetime(year, month, last_day, 23, 59, 59, 999999, tzinfo=vet_tz)
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+        )
         return start_dt, end_dt
 
     def reconcile_period(
