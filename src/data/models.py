@@ -91,6 +91,7 @@ class WalletMovement(Base):
     network = Column(String(30), nullable=True)         # TRC20, BSC, MATIC
     txid = Column(String(128), unique=True, index=True, nullable=True)
     address = Column(String(128), nullable=True)
+    note = Column(String(255), nullable=True)
     status = Column(String(30), nullable=False)         # Success, Completed
     timestamp = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
@@ -153,6 +154,7 @@ class AccountingPeriodBalance(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, index=True, nullable=True)
     period = Column(String(16), index=True, nullable=False)  # YYYY-MM
+    cutoff_start_date = Column(Date, nullable=True)  # Fecha opcional de inicio de operaciones dentro del mes
     initial_usdt = Column(Float, default=0.0, nullable=False)
     initial_usdt_cost_ves = Column(Float, default=0.0, nullable=False)
     initial_banks_json = Column(Text, nullable=True)  # {"Banesco": 50000.0, ...}

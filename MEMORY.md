@@ -957,6 +957,20 @@
     - **Verificación Post-Edición**:
       - `tsc -p frontend/tsconfig.json --noEmit` (`0` errores) y `npm --prefix frontend run build` (`Next.js 14.2.35`, `15/15` páginas estáticas generadas sin advertencias).
 
+74. **Corte de Inicio por Período, Movimientos USDT (Binance Pay / Binance ID), Hardening Telegram RBAC y Jerarquía Visual Sobria (ADR 074)**:
+    - **Ocultamiento del Prefijo de Token de Bot para `TRADER` ([`src/api/routes/settings.py`](file:///c:/p2p-bot-merchant/src/api/routes/settings.py))**:
+      - `GET /api/settings/telegram` devuelve únicamente `"Activo"` a usuarios con rol `TRADER` (sin exponer prefijo/sufijo del token del bot), reservando el diagnóstico enmascarado exclusivamente para `ADMIN`.
+      - En [`frontend/src/app/settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx), cuando la API de Binance ya está guardada, el formulario permanece colapsado tras el botón/título **`Cambiar API`**.
+    - **Fecha de Inicio de Corte por Período (`cutoff_start_date`) ([`models.py`](file:///c:/p2p-bot-merchant/src/data/models.py), [`database.py`](file:///c:/p2p-bot-merchant/src/data/database.py), [`accounting.py`](file:///c:/p2p-bot-merchant/src/api/routes/accounting.py), [`orders.py`](file:///c:/p2p-bot-merchant/src/api/routes/orders.py), [`fiscal.py`](file:///c:/p2p-bot-merchant/src/api/routes/fiscal.py), [`binance_history_syncer.py`](file:///c:/p2p-bot-merchant/src/core/binance_history_syncer.py))**:
+      - Columna `cutoff_start_date` en `accounting_period_balances` (con migración idempotente en `init_db()`), selector de fecha en `/accounting` acotado al mes activo, valoración BCV por fecha de corte y filtrado consistente VET (`UTC-4`) en sincronización de Binance, saldo en vivo, Libro Mayor, reconciliación de 6 piezas y exportaciones Excel/PDF.
+    - **Movimientos USDT no-P2P (Binance Pay / Binance ID / Depósitos / Retiros) ([`binance_client.py`](file:///c:/p2p-bot-merchant/src/core/binance_client.py), [`accounting.py`](file:///c:/p2p-bot-merchant/src/api/routes/accounting.py), [`accounting_engine.py`](file:///c:/p2p-bot-merchant/src/reporting/accounting_engine.py), [`excel_reporter.py`](file:///c:/p2p-bot-merchant/src/reporting/excel_reporter.py), [`pdf_reporter.py`](file:///c:/p2p-bot-merchant/src/reporting/pdf_reporter.py))**:
+      - Endpoints `GET/POST/DELETE /api/accounting/wallet-movements` con aislamiento estricto por `user_id` (protección anti-IDOR OWASP A01) y `POST /api/accounting/wallet-movements/sync-binance-pay` sobre `GET /sapi/v1/pay/transactions` (idempotente por `txid`, cooldown 60s por usuario para proteger cuota UID 3,000).
+      - Integrados en `SALDO USDT`, pestaña `Movimientos USDT`, Kardex USDT y Balance General (BA VEN-NIF N° 12) **sin** inflar el `Enriquecimiento Neto Gravable ISLR` (validación `venezuela-tax-cpa`).
+    - **Jerarquía Visual Sobria Sin Colores Fluorescentes ([`tailwind.config.ts`](file:///c:/p2p-bot-merchant/frontend/tailwind.config.ts), [`globals.css`](file:///c:/p2p-bot-merchant/frontend/src/app/globals.css), [`app-shell.tsx`](file:///c:/p2p-bot-merchant/frontend/src/components/app-shell.tsx), [`accounting/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/accounting/page.tsx), [`settings/page.tsx`](file:///c:/p2p-bot-merchant/frontend/src/app/settings/page.tsx))**:
+      - Sustitución de tonos neón (`#4cd7f6`, `#10b981`, `#f59e0b`) por paleta institucional sobria (`#86a8c6`, `#5ea88a`, `#c98b2c`), cifras principales en blanco nítido, botones secundarios monocromos y un único CTA primario por vista.
+    - **Verificación Post-Edición**:
+      - `34 passed` (incluyendo `4/4` TDD nuevos en [`tests/unit/test_cutoff_wallet_movements_and_rbac.py`](file:///c:/p2p-bot-merchant/tests/unit/test_cutoff_wallet_movements_and_rbac.py)), `ruff check` (`0` errores), `mypy` (`0` errores en 13 archivos), `tsc --noEmit` (`0` errores) y `npm --prefix frontend run build` limpio.
+
 ---
 
 ## 🎯 Guía Operativa Actual

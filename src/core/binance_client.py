@@ -290,3 +290,44 @@ class BinanceP2PClient:
     def pause_ad(self, ad_no: str) -> dict[str, Any]:
         """Pausa un anuncio propio."""
         return self.update_ad(ad_no=ad_no, update_payload={"advStatus": "PAUSED"})
+
+    def get_pay_transactions(
+        self,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Consulta el historial de Binance Pay (Binance ID / correo / Pay) en modo solo lectura.
+
+        Endpoint oficial: GET /sapi/v1/pay/transactions (ventana máxima 90 días, peso UID 3000).
+        """
+        ninety_days_ms = 90 * 24 * 60 * 60 * 1000
+        if (
+            start_timestamp is not None
+            and end_timestamp is not None
+            and (end_timestamp - start_timestamp) > ninety_days_ms
+        ):
+            raise ValueError("FAIL-CLOSED: La consulta de Binance Pay no puede superar 90 días.")
+
+        url = f"{self.base_url}/sapi/v1/pay/transactions"
+        params: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 100)),
+            "recvWindow": self.recv_window,
+            "timestamp": self.get_synced_timestamp(),
+        }
+        if start_timestamp is not None:
+            params["startTime"] = int(start_timestamp)
+        if end_timestamp is not None:
+            params["endTime"] = int(end_timestamp)
+
+        signed_params = self.sign_params(params)
+        headers = {"X-MBX-APIKEY": self.api_key}
+
+        with httpx.Client(timeout=12.0) as client:
+            response = client.get(url, params=signed_params, headers=headers)
+            self.check_weight(response.headers)
+            raw_data = self._handle_response_errors(response)
+            items = raw_data.get("data")
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+            return []

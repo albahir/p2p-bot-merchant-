@@ -59,11 +59,14 @@ def sync_binance_orders(
     current_user: Annotated[User, Depends(require_trader)],
 ) -> SyncOrdersResponse:
     """Extrae el historial oficial de órdenes de Binance P2P vía API oficial."""
+    from datetime import date as date_cls
+
     from sqlalchemy.orm import sessionmaker
 
     from config.settings import Settings
     from src.api.routes.settings import _user_binance_key_names
     from src.core.binance_client import BinanceP2PClient
+    from src.data.models import AccountingPeriodBalance
     from src.security.api_key_manager import ApiKeyManager
 
     settings = Settings()
@@ -79,6 +82,24 @@ def sync_binance_orders(
     except (ValueError, KeyError, OSError, RuntimeError, TypeError):
         pass
 
+    eff_start_date: date_cls | None = None
+    if req.start_date:
+        try:
+            eff_start_date = date_cls.fromisoformat(req.start_date.strip())
+        except ValueError as err:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Formato inválido para start_date (use YYYY-MM-DD).",
+            ) from err
+    elif req.year is not None and req.month is not None:
+        period_str = f"{req.year}-{req.month:02d}"
+        cfg_q = db.query(AccountingPeriodBalance).filter(AccountingPeriodBalance.period == period_str)
+        if uid is not None:
+            cfg_q = cfg_q.filter(AccountingPeriodBalance.user_id == uid)
+        cfg_row = cfg_q.first()
+        if cfg_row is not None and cfg_row.cutoff_start_date is not None:
+            eff_start_date = cfg_row.cutoff_start_date  # type: ignore[assignment]
+
     client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
     syncer = BinanceHistorySyncer()
     result = syncer.sync_orders(
@@ -89,6 +110,7 @@ def sync_binance_orders(
         user_id=uid,
         year=req.year,
         month=req.month,
+        start_date=eff_start_date,
     )
 
     if not result.success:

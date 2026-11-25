@@ -8,7 +8,7 @@ idempotente en la base de datos y generar reportes exportables en CSV.
 import calendar
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
 
 import httpx
@@ -180,13 +180,19 @@ class BinanceHistorySyncer:
         user_id: int | None = None,
         year: int | None = None,
         month: int | None = None,
+        start_date: date | None = None,
     ) -> SyncHistoryResult:
         """Extrae el historial de órdenes desde Binance API en ventanas <= 30 días, con tasa BCV histórica por fecha."""
         now_dt = datetime.now(UTC)
         vet_tz = timezone(timedelta(hours=-4))
         if year is not None and month is not None:
             last_day = calendar.monthrange(year, month)[1]
-            start_vet = datetime(year, month, 1, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC)
+            start_day = (
+                start_date.day
+                if (start_date is not None and start_date.year == year and start_date.month == month)
+                else 1
+            )
+            start_vet = datetime(year, month, start_day, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC)
             end_vet = min(
                 datetime(year, month, last_day, 23, 59, 59, 999000, tzinfo=vet_tz).astimezone(UTC),
                 now_dt,

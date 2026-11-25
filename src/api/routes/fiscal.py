@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_db, require_trader
-from src.data.models import User
+from src.data.models import AccountingPeriodBalance, User
 from src.reporting.bcv_service import BCVService
 from src.reporting.fiscal_reconciler import FiscalReconciler
 
@@ -30,8 +30,10 @@ class FiscalReconciliationRequest(BaseModel):
 class FiscalReconciliationResponse(BaseModel):
     period: str
     initial_balance: float
+    inflows_deposits: float = 0.0
     inflows_p2p_buys: float
     total_inflows: float
+    outflows_withdrawals: float = 0.0
     outflows_p2p_sells: float
     total_outflows: float
     volume_operated: float
@@ -66,19 +68,27 @@ def get_fiscal_summary(
         uid = int(current_user.id) if current_user and current_user.id is not None else None
         bcv_svc = BCVService()
         reconciler = FiscalReconciler(db_session=db, bcv_service=bcv_svc, user_id=uid)
+        cfg_q = db.query(AccountingPeriodBalance).filter(AccountingPeriodBalance.period == period)
+        if uid is not None:
+            cfg_q = cfg_q.filter(AccountingPeriodBalance.user_id == uid)
+        cfg_row = cfg_q.first()
+        cutoff_dt = cfg_row.cutoff_start_date if cfg_row is not None else None
         res = reconciler.reconcile_period(
             period=period,
             initial_balance=initial_balance,
             actual_final_balance=actual_final_balance,
             cost_method=cost_method,
+            cutoff_start_date=cutoff_dt,  # type: ignore[arg-type]
         )
         bcv_val = bcv_svc.fetch_current_rate() or 0.0
 
         return FiscalReconciliationResponse(
             period=res.period,
             initial_balance=res.initial_balance,
+            inflows_deposits=res.inflows_deposits,
             inflows_p2p_buys=res.inflows_p2p_buys,
             total_inflows=res.total_inflows,
+            outflows_withdrawals=res.outflows_withdrawals,
             outflows_p2p_sells=res.outflows_p2p_sells,
             total_outflows=res.total_outflows,
             volume_operated=res.volume_operated,
@@ -122,12 +132,18 @@ def execute_fiscal_reconciliation(
         uid = int(current_user.id) if current_user and current_user.id is not None else None
         bcv_svc = BCVService()
         reconciler = FiscalReconciler(db_session=db, bcv_service=bcv_svc, user_id=uid)
+        cfg_q = db.query(AccountingPeriodBalance).filter(AccountingPeriodBalance.period == req.period)
+        if uid is not None:
+            cfg_q = cfg_q.filter(AccountingPeriodBalance.user_id == uid)
+        cfg_row = cfg_q.first()
+        cutoff_dt = cfg_row.cutoff_start_date if cfg_row is not None else None
         res = reconciler.reconcile_period(
             period=req.period,
             initial_balance=req.initial_balance,
             actual_final_balance=req.actual_final_balance,
             asset=req.asset,
             cost_method=req.cost_method,
+            cutoff_start_date=cutoff_dt,  # type: ignore[arg-type]
         )
         reconciler.save_snapshot(res)
         bcv_val = bcv_svc.fetch_current_rate() or 0.0
@@ -135,8 +151,10 @@ def execute_fiscal_reconciliation(
         return FiscalReconciliationResponse(
             period=res.period,
             initial_balance=res.initial_balance,
+            inflows_deposits=res.inflows_deposits,
             inflows_p2p_buys=res.inflows_p2p_buys,
             total_inflows=res.total_inflows,
+            outflows_withdrawals=res.outflows_withdrawals,
             outflows_p2p_sells=res.outflows_p2p_sells,
             total_outflows=res.total_outflows,
             volume_operated=res.volume_operated,

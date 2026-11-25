@@ -39,6 +39,7 @@ class SyncOrdersRequest(BaseModel):
     trade_type: str | None = Field(default=None, pattern="^(BUY|SELL)$")
     year: int | None = Field(default=None, ge=2020, le=2100)
     month: int | None = Field(default=None, ge=1, le=12)
+    start_date: str | None = Field(default=None, description="Fecha opcional de corte YYYY-MM-DD dentro del mes")
 
 
 class SyncOrdersResponse(BaseModel):

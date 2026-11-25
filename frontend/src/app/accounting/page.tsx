@@ -15,10 +15,13 @@ import {
   UploadVoucherResponse,
   User,
   VENEZUELAN_BANK_CATALOG,
+  WalletMovementItem,
   bankMatchesProfile,
   canonicalBankName,
   closeFiscalPeriod,
   createManualVoucher,
+  createWalletMovement,
+  deleteWalletMovement,
   downloadAccountingExcel,
   downloadAccountingPdf,
   getAccountingPeriodConfig,
@@ -31,16 +34,18 @@ import {
   getLedgerSummaries,
   getLiveBalance,
   getUserBanksSettings,
+  listWalletMovements,
   matchVoucherWithOrder,
   previewBankStatement,
   reconcileOrphanVouchers,
   saveAccountingPeriodConfig,
   saveUserBanksSettings,
+  syncBinancePayMovements,
   syncOrders,
   uploadVoucherFile,
 } from "@/lib/api";
 
-type AccountingTab = "JOURNAL" | "LEDGER" | "FISCAL_6";
+type AccountingTab = "JOURNAL" | "LEDGER" | "FISCAL_6" | "WALLET";
 
 interface BankBreakdownItem {
   bank_name: string;
@@ -56,6 +61,8 @@ interface LiveBalanceState {
   initial_usdt: number;
   inflow_usdt: number;
   outflow_usdt: number;
+  other_inflow_usdt?: number;
+  other_outflow_usdt?: number;
   theoretical_usdt: number;
   total_initial_ves: number;
   total_inflows_ves: number;
@@ -122,7 +129,26 @@ export default function AccountingPage() {
   const [committedUsdt, setCommittedUsdt] = useState<number>(0);
   const [initialUsdtCostVes, setInitialUsdtCostVes] = useState<number>(0);
   const [periodConfig, setPeriodConfig] = useState<AccountingPeriodConfig | null>(null);
+  const [cutoffStartDate, setCutoffStartDate] = useState<string>("");
   const [syncingPeriodOrders, setSyncingPeriodOrders] = useState<boolean>(false);
+  const [syncingBinancePay, setSyncingBinancePay] = useState<boolean>(false);
+  const [walletMovements, setWalletMovements] = useState<WalletMovementItem[]>([]);
+  const [showWalletModal, setShowWalletModal] = useState<boolean>(false);
+  const [savingWallet, setSavingWallet] = useState<boolean>(false);
+  const [wmType, setWmType] = useState<"DEPOSIT" | "WITHDRAWAL">("DEPOSIT");
+  const [wmChannel, setWmChannel] = useState<
+    "BINANCE_PAY" | "BINANCE_ID" | "TRC20" | "BSC" | "INTERNAL" | "MANUAL"
+  >("BINANCE_PAY");
+  const [wmAmount, setWmAmount] = useState<number>(0);
+  const [wmFee, setWmFee] = useState<number>(0);
+  const [wmCounterparty, setWmCounterparty] = useState<string>("");
+  const [wmNote, setWmNote] = useState<string>("");
+  const [wmDateVet, setWmDateVet] = useState<string>(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate()
+    ).padStart(2, "0")}`;
+  });
   const [closeActualUsdt, setCloseActualUsdt] = useState<number>(0);
   const [closeActualBanks, setCloseActualBanks] = useState<Record<string, number>>({});
   const reqSeqRef = useRef<number>(0);
@@ -199,6 +225,7 @@ export default function AccountingPage() {
       .then((cfg) => {
         if (cancelled) return;
         setPeriodConfig(cfg);
+        setCutoffStartDate(cfg.cutoff_start_date || "");
         setBankInitialMap(cfg.initial_banks || {});
         setCommittedBankMap(cfg.initial_banks || {});
         setInitialUsdt(cfg.initial_usdt || 0);
@@ -220,7 +247,12 @@ export default function AccountingPage() {
   }, [year, month]);
 
   const persistCurrentPeriodOpening = useCallback(
-    (nextBanks: Record<string, number>, nextUsdt: number, nextCostVes?: number) => {
+    (
+      nextBanks: Record<string, number>,
+      nextUsdt: number,
+      nextCostVes?: number,
+      nextCutoff?: string | null
+    ) => {
       if (periodHydratingRef.current) return;
       const bcvDay1 = periodConfig?.bcv_day1_rate || 0;
       const effCost =
@@ -231,17 +263,22 @@ export default function AccountingPage() {
           : nextUsdt > 0 && bcvDay1 > 0
           ? Number((nextUsdt * bcvDay1).toFixed(2))
           : 0;
+      const effCutoff = nextCutoff !== undefined ? nextCutoff : cutoffStartDate || null;
       void saveAccountingPeriodConfig({
         year,
         month,
+        cutoff_start_date: effCutoff,
         initial_usdt: nextUsdt,
         initial_usdt_cost_ves: effCost,
         initial_banks: nextBanks,
       })
-        .then((saved) => setPeriodConfig(saved))
+        .then((saved) => {
+          setPeriodConfig(saved);
+          setCutoffStartDate(saved.cutoff_start_date || "");
+        })
         .catch(() => null);
     },
-    [year, month, initialUsdtCostVes, periodConfig?.bcv_day1_rate]
+    [year, month, initialUsdtCostVes, periodConfig?.bcv_day1_rate, cutoffStartDate]
   );
 
   // Debounce de 750ms para saldos iniciales por banco aislados al período actual
@@ -294,12 +331,42 @@ export default function AccountingPage() {
     });
   }
 
+  async function handleChangeCutoffDate(nextVal: string) {
+    const periodPrefix = `${year}-${String(month).padStart(2, "0")}`;
+    const cleaned = nextVal && nextVal.startsWith(periodPrefix) ? nextVal : "";
+    setCutoffStartDate(cleaned);
+    try {
+      const saved = await saveAccountingPeriodConfig({
+        year,
+        month,
+        cutoff_start_date: cleaned || null,
+        initial_usdt: initialUsdt,
+        initial_usdt_cost_ves: initialUsdtCostVes,
+        initial_banks: bankInitialMap,
+      });
+      setPeriodConfig(saved);
+      setCutoffStartDate(saved.cutoff_start_date || "");
+      setFeedback({
+        type: "success",
+        text: saved.cutoff_start_date
+          ? `Fecha de corte ajustada al ${saved.cutoff_start_date}. Solo se contabilizan y sincronizan operaciones desde esa fecha.`
+          : `Corte restablecido al mes completo (${periodPrefix}-01).`,
+      });
+      await loadAccountingData(saved.cutoff_start_date || "");
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo guardar la fecha de inicio de corte.",
+      });
+    }
+  }
+
   async function handleSyncPeriodOrders() {
     setFeedback(null);
     setSyncingPeriodOrders(true);
     const mLabel = MONTHS.find((m) => m.value === month)?.label || String(month);
     try {
-      const res = await syncOrders(31, undefined, year, month);
+      const res = await syncOrders(31, undefined, year, month, cutoffStartDate || null);
       setFeedback({
         type: "success",
         text:
@@ -318,6 +385,87 @@ export default function AccountingPage() {
       });
     } finally {
       setSyncingPeriodOrders(false);
+    }
+  }
+
+  async function handleSyncBinancePay() {
+    setFeedback(null);
+    setSyncingBinancePay(true);
+    try {
+      const res = await syncBinancePayMovements(year, month);
+      setFeedback({
+        type: "success",
+        text: res.message,
+      });
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo sincronizar Binance Pay.",
+      });
+    } finally {
+      setSyncingBinancePay(false);
+    }
+  }
+
+  async function handleCreateWalletMovement(e: React.FormEvent) {
+    e.preventDefault();
+    if (!wmAmount || wmAmount <= 0) {
+      setFeedback({
+        type: "error",
+        text: "Ingresa un monto mayor a 0 USDT.",
+      });
+      return;
+    }
+    setFeedback(null);
+    setSavingWallet(true);
+    try {
+      await createWalletMovement({
+        movement_type: wmType,
+        asset: "USDT",
+        amount: wmAmount,
+        fee: wmType === "WITHDRAWAL" ? wmFee : 0,
+        channel: wmChannel,
+        counterparty: wmCounterparty.trim() || undefined,
+        note: wmNote.trim() || undefined,
+        date_vet: wmDateVet || undefined,
+      });
+      setShowWalletModal(false);
+      setWmAmount(0);
+      setWmFee(0);
+      setWmCounterparty("");
+      setWmNote("");
+      setFeedback({
+        type: "success",
+        text: `Movimiento USDT (${wmType === "DEPOSIT" ? "Entrada" : "Salida"} · ${wmAmount.toFixed(
+          2
+        )} USDT) registrado en el Kardex.`,
+      });
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "Error al registrar movimiento USDT.",
+      });
+    } finally {
+      setSavingWallet(false);
+    }
+  }
+
+  async function handleDeleteWalletMovement(id: number) {
+    setFeedback(null);
+    try {
+      await deleteWalletMovement(id);
+      setFeedback({
+        type: "success",
+        text: "Movimiento USDT eliminado del período.",
+      });
+      await loadAccountingData();
+    } catch (err: any) {
+      setFeedback({
+        type: "error",
+        text: err.message || "No se pudo eliminar el movimiento.",
+      });
     }
   }
 
@@ -348,52 +496,60 @@ export default function AccountingPage() {
     });
   }
 
-  const loadAccountingData = useCallback(async () => {
-    const current = getCurrentUser();
-    setUser(current);
-    if (!current || current.role === "INVITADO") {
-      setLoading(false);
-      return;
-    }
-
-    const seq = ++reqSeqRef.current;
-    setLoading(true);
-    const periodStr = `${year}-${String(month).padStart(2, "0")}`;
-    const startDate = `${periodStr}-01`;
-    const lastDay = new Date(year, month, 0).getDate();
-    const endDate = `${periodStr}-${String(lastDay).padStart(2, "0")}T23:59:59`;
-
-    try {
-      const [liveRes, journalRes, ledgerRes, fiscalRes, snapshotRes] = await Promise.all([
-        getLiveBalance(year, month, committedUsdt, committedVes, committedBankMap).catch(
-          () => null
-        ),
-        getJournalEntries(startDate, endDate).catch(() => []),
-        getLedgerSummaries(year, month, undefined, committedVes).catch(() => []),
-        getFiscalSummary(periodStr, committedUsdt).catch(() => null),
-        getFiscalSnapshot(periodStr).catch(() => null),
-      ]);
-
-      // Descartar respuestas antiguas fuera de orden (evita que un dígito previo sobrescriba la tarjeta)
-      if (seq !== reqSeqRef.current) return;
-
-      if (liveRes) setLiveBalance(liveRes);
-      setJournalEntries(journalRes || []);
-      setLedgerSummaries(ledgerRes || []);
-      if (fiscalRes) setFiscalSummary(fiscalRes);
-      setPeriodClosed(Boolean(snapshotRes?.is_closed));
-    } catch (err: any) {
-      if (seq !== reqSeqRef.current) return;
-      setFeedback({
-        type: "error",
-        text: err.message || "Error al consultar el motor contable SENIAT.",
-      });
-    } finally {
-      if (seq === reqSeqRef.current) {
+  const loadAccountingData = useCallback(
+    async (cutoffOverride?: string) => {
+      const current = getCurrentUser();
+      setUser(current);
+      if (!current || current.role === "INVITADO") {
         setLoading(false);
+        return;
       }
-    }
-  }, [year, month, committedUsdt, committedVes, committedBankMap]);
+
+      const seq = ++reqSeqRef.current;
+      setLoading(true);
+      const periodStr = `${year}-${String(month).padStart(2, "0")}`;
+      const effCutoff = cutoffOverride !== undefined ? cutoffOverride : cutoffStartDate;
+      const startDate =
+        effCutoff && effCutoff.startsWith(periodStr) ? effCutoff : `${periodStr}-01`;
+      const lastDay = new Date(year, month, 0).getDate();
+      const endDate = `${periodStr}-${String(lastDay).padStart(2, "0")}T23:59:59`;
+
+      try {
+        const [liveRes, journalRes, ledgerRes, fiscalRes, snapshotRes, wmRes] =
+          await Promise.all([
+            getLiveBalance(year, month, committedUsdt, committedVes, committedBankMap).catch(
+              () => null
+            ),
+            getJournalEntries(startDate, endDate).catch(() => []),
+            getLedgerSummaries(year, month, undefined, committedVes).catch(() => []),
+            getFiscalSummary(periodStr, committedUsdt).catch(() => null),
+            getFiscalSnapshot(periodStr).catch(() => null),
+            listWalletMovements(year, month).catch(() => []),
+          ]);
+
+        // Descartar respuestas antiguas fuera de orden (evita que un dígito previo sobrescriba la tarjeta)
+        if (seq !== reqSeqRef.current) return;
+
+        if (liveRes) setLiveBalance(liveRes);
+        setJournalEntries(journalRes || []);
+        setLedgerSummaries(ledgerRes || []);
+        if (fiscalRes) setFiscalSummary(fiscalRes);
+        setPeriodClosed(Boolean(snapshotRes?.is_closed));
+        setWalletMovements(wmRes || []);
+      } catch (err: any) {
+        if (seq !== reqSeqRef.current) return;
+        setFeedback({
+          type: "error",
+          text: err.message || "Error al consultar el motor contable SENIAT.",
+        });
+      } finally {
+        if (seq === reqSeqRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [year, month, committedUsdt, committedVes, committedBankMap, cutoffStartDate]
+  );
 
   useEffect(() => {
     loadAccountingData();
@@ -594,9 +750,23 @@ export default function AccountingPage() {
     (liveBalance?.total_inflows_ves ?? 0) - (liveBalance?.total_outflows_ves ?? 0);
   const displayedTheoreticalVes = initialVes + netFlowVes;
 
+  const otherInflowUsdt = liveBalance?.other_inflow_usdt ?? 0;
+  const otherOutflowUsdt = liveBalance?.other_outflow_usdt ?? 0;
   const netFlowUsdt =
-    (liveBalance?.inflow_usdt ?? 0) - (liveBalance?.outflow_usdt ?? 0);
+    (liveBalance?.inflow_usdt ?? 0) +
+    otherInflowUsdt -
+    (liveBalance?.outflow_usdt ?? 0) -
+    otherOutflowUsdt;
   const displayedTheoreticalUsdt = initialUsdt + netFlowUsdt;
+
+  const periodPrefix = `${year}-${String(month).padStart(2, "0")}`;
+  const periodLastDay = new Date(year, month, 0).getDate();
+  const minCutoffDate = `${periodPrefix}-01`;
+  const maxCutoffDate = `${periodPrefix}-${String(periodLastDay).padStart(2, "0")}`;
+  const effectiveCutoffDisplay =
+    cutoffStartDate && cutoffStartDate.startsWith(periodPrefix)
+      ? cutoffStartDate
+      : minCutoffDate;
 
   // Subcajas dinámicas por cada banco registrado del usuario con su saldo inicial + entradas - salidas
   const bankBoxes: BankBreakdownItem[] = userBanks.map((bName) => {
@@ -663,9 +833,9 @@ export default function AccountingPage() {
                   });
                 }
               }}
-              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-tertiary/15 border border-tertiary/35 text-tertiary text-xs font-mono font-semibold hover:bg-tertiary/25 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-slate-200 text-xs font-mono font-medium flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
             >
-              <span className="material-symbols-outlined text-[15px]">grid_on</span>
+              <span className="material-symbols-outlined text-[15px] text-slate-400">grid_on</span>
               <span>Excel</span>
             </button>
 
@@ -681,9 +851,9 @@ export default function AccountingPage() {
                   });
                 }
               }}
-              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-secondary/50 text-slate-200 text-xs font-mono flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-slate-200 text-xs font-mono font-medium flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
             >
-              <span className="material-symbols-outlined text-[15px] text-secondary">
+              <span className="material-symbols-outlined text-[15px] text-slate-400">
                 picture_as_pdf
               </span>
               <span>PDF</span>
@@ -747,56 +917,72 @@ export default function AccountingPage() {
           </div>
         )}
 
-        {/* Barra compacta de Modo del Período (Histórico vs En vivo) + Flujo en 4 Pasos */}
+        {/* Barra compacta de Modo del Período (Histórico vs En vivo) + Fecha de Corte + Flujo en 4 Pasos */}
         <section className="p-3 sm:p-3.5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 flex-wrap">
-              <span
-                className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border ${
-                  periodConfig?.is_historical_month
-                    ? "bg-secondary/15 border-secondary/35 text-secondary"
-                    : "bg-tertiary/15 border-tertiary/35 text-tertiary"
-                }`}
-              >
+              <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-medium bg-surface-container border border-[#283140] text-slate-200 flex items-center gap-1.5">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    periodConfig?.is_historical_month ? "bg-secondary" : "bg-tertiary"
+                  }`}
+                />
                 {periodConfig?.is_historical_month
                   ? `AUDITORÍA HISTÓRICA · ${MONTHS.find((m) => m.value === month)?.label?.toUpperCase()} ${year}`
                   : `MES EN CURSO · ${MONTHS.find((m) => m.value === month)?.label?.toUpperCase()} ${year}`}
               </span>
               {periodConfig?.source === "carried_over" && periodConfig.carried_from && (
-                <span className="text-[10px] font-mono text-primary bg-primary-container/10 border border-primary-container/30 px-2 py-0.5 rounded-md">
-                  Saldo inicial heredado de {periodConfig.carried_from}
+                <span className="text-[10px] font-mono text-slate-300 bg-surface-container border border-[#283140] px-2 py-0.5 rounded-md">
+                  Saldo heredado de {periodConfig.carried_from}
                 </span>
               )}
               {periodConfig && periodConfig.bcv_day1_rate > 0 && (
                 <span className="text-[10px] font-mono text-slate-400">
-                  BCV día 1: Bs. {periodConfig.bcv_day1_rate.toFixed(4)}
+                  {cutoffStartDate ? "BCV corte:" : "BCV día 1:"} Bs.{" "}
+                  {periodConfig.bcv_day1_rate.toFixed(4)}
                 </span>
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={handleSyncPeriodOrders}
-              disabled={syncingPeriodOrders}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-semibold border flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
-                (periodConfig?.orders_count_in_period ?? 0) === 0
-                  ? "bg-primary-container/15 border-primary-container/50 text-primary hover:bg-primary-container/25"
-                  : "bg-surface-container border-[#1e2430] text-slate-200 hover:border-primary-container/40"
-              }`}
-            >
-              <span
-                className={`material-symbols-outlined text-[14px] ${
-                  syncingPeriodOrders ? "animate-spin" : ""
-                }`}
+            <div className="flex items-center gap-2 flex-wrap">
+              <label
+                htmlFor="cutoff-start-date"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-surface-container border border-[#283140] text-[10px] font-mono text-slate-400"
+                title="Si empiezas a mitad de mes, elige desde qué fecha contar órdenes y saldos"
               >
-                cloud_sync
-              </span>
-              <span>
-                {syncingPeriodOrders
-                  ? `Sincronizando ${MONTHS.find((m) => m.value === month)?.label}...`
-                  : `Sincronizar ${MONTHS.find((m) => m.value === month)?.label} (${periodConfig?.orders_count_in_period ?? 0} órd.)`}
-              </span>
-            </button>
+                <span>Corte desde:</span>
+                <input
+                  id="cutoff-start-date"
+                  type="date"
+                  min={minCutoffDate}
+                  max={maxCutoffDate}
+                  value={effectiveCutoffDisplay}
+                  disabled={periodClosed}
+                  onChange={(e) => void handleChangeCutoffDate(e.target.value)}
+                  className="bg-transparent text-slate-100 font-mono text-[11px] focus:outline-hidden cursor-pointer disabled:opacity-50"
+                />
+              </label>
+
+              <button
+                type="button"
+                onClick={handleSyncPeriodOrders}
+                disabled={syncingPeriodOrders}
+                className="px-2.5 py-1 rounded-lg text-[11px] font-mono font-medium border border-[#283140] bg-surface-container text-slate-200 hover:border-slate-500 flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <span
+                  className={`material-symbols-outlined text-[14px] text-slate-400 ${
+                    syncingPeriodOrders ? "animate-spin" : ""
+                  }`}
+                >
+                  cloud_sync
+                </span>
+                <span>
+                  {syncingPeriodOrders
+                    ? `Sincronizando ${MONTHS.find((m) => m.value === month)?.label}...`
+                    : `Sincronizar ${MONTHS.find((m) => m.value === month)?.label} (${periodConfig?.orders_count_in_period ?? 0} órd.)`}
+                </span>
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] font-mono">
@@ -826,18 +1012,20 @@ export default function AccountingPage() {
                 key={s.n}
                 className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 truncate ${
                   s.done
-                    ? "bg-tertiary/10 border-tertiary/30 text-tertiary"
-                    : "bg-surface-container border-[#1e2430] text-slate-400"
+                    ? "bg-surface-container border-[#283140] text-slate-200"
+                    : "bg-surface-container/50 border-[#1e2430] text-slate-500"
                 }`}
               >
-                <span className="font-bold">{s.done ? "✓" : `${s.n}.`}</span>
+                <span className={`font-bold ${s.done ? "text-tertiary" : "text-slate-500"}`}>
+                  {s.done ? "✓" : `${s.n}.`}
+                </span>
                 <span className="truncate">{s.label}</span>
               </div>
             ))}
           </div>
         </section>
 
-        {/* 3 Tarjetas Bento de Saldos y Conciliación OCR (En móvil: Saldos VES y USDT lado a lado en una línea) */}
+        {/* 3 Tarjetas Bento de Saldos y Conciliación OCR */}
         <section className="grid grid-cols-2 lg:grid-cols-12 gap-2.5 sm:gap-4">
           {/* Card 1: Saldo Bancario Desglosado por los Bancos del Usuario */}
           <div className="col-span-2 lg:col-span-5 p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0 flex flex-col justify-between gap-2.5 sm:gap-3.5">
@@ -865,13 +1053,13 @@ export default function AccountingPage() {
                 type="button"
                 onClick={() => setShowBankSelector((prev) => !prev)}
                 aria-expanded={showBankSelector}
-                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-semibold flex items-center gap-1.5 border transition-colors shrink-0 cursor-pointer ${
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-medium flex items-center gap-1.5 border transition-colors shrink-0 cursor-pointer ${
                   showBankSelector
-                    ? "bg-primary-container text-on-primary border-primary-container"
-                    : "bg-surface-container border-[#1e2430] text-primary hover:border-primary-container/50"
+                    ? "bg-surface-container-high text-white border-slate-500"
+                    : "bg-surface-container border-[#283140] text-slate-200 hover:border-slate-500"
                 }`}
               >
-                <span className="material-symbols-outlined text-[15px]" aria-hidden="true">
+                <span className="material-symbols-outlined text-[15px] text-slate-400" aria-hidden="true">
                   account_balance
                 </span>
                 <span>Mis bancos ({userBanks.length})</span>
@@ -879,10 +1067,10 @@ export default function AccountingPage() {
             </div>
 
             {showBankSelector && (
-              <div className="p-2.5 rounded-xl bg-surface-container-lowest border border-primary-container/30 space-y-2">
+              <div className="p-2.5 rounded-xl bg-surface-container-lowest border border-[#283140] space-y-2">
                 <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-slate-300">
                   <span>Selecciona los bancos con los que trabajas:</span>
-                  <span className="text-primary">{userBanks.length} activos</span>
+                  <span className="text-slate-400">{userBanks.length} activos</span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {VENEZUELAN_BANK_CATALOG.map((bankOpt) => {
@@ -895,11 +1083,11 @@ export default function AccountingPage() {
                         aria-pressed={active}
                         className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition-colors flex items-center gap-1 cursor-pointer ${
                           active
-                            ? "bg-primary-container text-on-primary font-bold"
+                            ? "bg-surface-container-high text-white border border-slate-500 font-semibold"
                             : "bg-surface-container text-slate-400 hover:text-white border border-[#1e2430]"
                         }`}
                       >
-                        <span>{active ? "✓" : "+"}</span>
+                        <span className={active ? "text-tertiary" : ""}>{active ? "✓" : "+"}</span>
                         <span>{bankOpt}</span>
                       </button>
                     );
@@ -919,12 +1107,12 @@ export default function AccountingPage() {
                   >
                     <div className="flex items-center justify-between gap-1 min-w-0">
                       <span
-                        className="text-[10px] font-mono uppercase text-primary truncate font-bold"
+                        className="text-[10px] font-mono uppercase text-slate-300 truncate font-semibold"
                         title={b.bank_name}
                       >
                         {b.bank_name}
                       </span>
-                      <span className="text-[9px] font-mono text-slate-400 tabular-nums shrink-0">
+                      <span className="text-[9px] font-mono text-slate-500 tabular-nums shrink-0">
                         +{b.inflows_ves.toFixed(0)} / -{b.outflows_ves.toFixed(0)}
                       </span>
                     </div>
@@ -950,7 +1138,7 @@ export default function AccountingPage() {
                         onChange={(val) => handleUpdateBankInitial(b.bank_name, val)}
                         onCommit={(val) => handleCommitBankInitial(b.bank_name, val)}
                         ariaLabel={`Saldo inicial en ${b.bank_name} (VES)`}
-                        className="w-full max-w-[125px] px-2 py-0.5 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-[11px] font-mono text-primary tabular-nums"
+                        className="w-full max-w-[125px] px-2 py-0.5 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-slate-500 focus:outline-hidden text-right text-[11px] font-mono text-slate-100 tabular-nums"
                       />
                     </div>
                   </div>
@@ -959,14 +1147,14 @@ export default function AccountingPage() {
             </div>
           </div>
 
-          {/* Card 2: Saldo USDT */}
-          <div className="col-span-2 lg:col-span-3 p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0 flex flex-col justify-between gap-2.5 sm:gap-4">
+          {/* Card 2: Saldo USDT (P2P + Binance Pay / Depósitos / Retiros) */}
+          <div className="col-span-2 lg:col-span-3 p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0 flex flex-col justify-between gap-2.5 sm:gap-3">
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 min-w-0">
               <div className="min-w-0">
                 <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
                   Saldo USDT
                 </div>
-                <div className="mt-0.5 sm:mt-1 text-base sm:text-2xl font-mono font-bold text-tertiary tabular-nums truncate">
+                <div className="mt-0.5 sm:mt-1 text-base sm:text-2xl font-mono font-bold text-white tabular-nums truncate">
                   {displayedTheoreticalUsdt.toFixed(2)} USDT
                 </div>
               </div>
@@ -979,31 +1167,62 @@ export default function AccountingPage() {
                   onChange={setInitialUsdt}
                   onCommit={setCommittedUsdt}
                   ariaLabel="Saldo Inicial USDT"
-                  className="w-full sm:w-24 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-tertiary tabular-nums"
+                  className="w-full sm:w-24 mt-0.5 px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] focus:border-slate-500 focus:outline-hidden text-right text-xs font-mono text-slate-100 tabular-nums"
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-1.5 sm:gap-2 text-[11px] sm:text-xs font-mono tabular-nums">
-              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
-                <div className="text-[9px] text-slate-400 uppercase truncate">Compras</div>
-                <div className="text-tertiary font-semibold mt-0.5 truncate">
-                  +{(liveBalance?.inflow_usdt ?? 0).toFixed(2)}
+            <div className="space-y-1.5">
+              <div className="grid grid-cols-2 gap-1.5 text-[11px] sm:text-xs font-mono tabular-nums">
+                <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
+                  <div className="text-[9px] text-slate-400 uppercase truncate">Compras P2P</div>
+                  <div className="text-tertiary font-semibold mt-0.5 truncate">
+                    +{(liveBalance?.inflow_usdt ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
+                  <div className="text-[9px] text-slate-400 uppercase truncate">Ventas P2P</div>
+                  <div className="text-slate-200 font-semibold mt-0.5 truncate">
+                    -{(liveBalance?.outflow_usdt ?? 0).toFixed(2)}
+                  </div>
                 </div>
               </div>
-              <div className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
-                <div className="text-[9px] text-slate-400 uppercase truncate">Ventas</div>
-                <div className="text-primary font-semibold mt-0.5 truncate">
-                  -{(liveBalance?.outflow_usdt ?? 0).toFixed(2)}
+
+              <div className="px-2 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center justify-between gap-2 text-[10px] font-mono">
+                <div className="min-w-0 truncate text-slate-400">
+                  Pay / Otros:{" "}
+                  <span className="text-slate-200 tabular-nums">
+                    +{otherInflowUsdt.toFixed(2)} / -{otherOutflowUsdt.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    disabled={periodClosed}
+                    onClick={() => setShowWalletModal(true)}
+                    className="px-1.5 py-0.5 rounded bg-surface-container-high border border-[#283140] hover:border-slate-500 text-slate-200 text-[10px] cursor-pointer disabled:opacity-50"
+                    title="Registrar entrada o salida USDT (Binance ID, correo, depósito o retiro)"
+                  >
+                    + Mov.
+                  </button>
+                  <button
+                    type="button"
+                    disabled={syncingBinancePay || periodClosed}
+                    onClick={handleSyncBinancePay}
+                    className="px-1.5 py-0.5 rounded bg-surface-container-high border border-[#283140] hover:border-slate-500 text-slate-300 text-[10px] cursor-pointer disabled:opacity-50"
+                    title="Sincronizar transferencias Binance Pay / Binance ID (solo lectura)"
+                  >
+                    {syncingBinancePay ? "..." : "Pay"}
+                  </button>
                 </div>
               </div>
             </div>
           </div>
 
           {/* Card 3: Conciliación */}
-          <div className="col-span-2 lg:col-span-4 p-3.5 sm:p-4 rounded-xl bg-surface-container border border-[#1e2430] min-w-0 flex flex-col justify-between gap-3">
+          <div className="col-span-2 lg:col-span-4 p-3.5 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0 flex flex-col justify-between gap-3">
             <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-[18px] text-secondary">
+              <span className="material-symbols-outlined text-[18px] text-slate-400">
                 document_scanner
               </span>
               <span className="text-xs font-bold text-white">
@@ -1048,9 +1267,9 @@ export default function AccountingPage() {
                 type="button"
                 onClick={() => statementInputRef.current?.click()}
                 disabled={uploadingStatement || periodClosed}
-                className="px-3 py-2 rounded-lg bg-secondary/15 border border-secondary/35 text-secondary text-xs font-bold hover:bg-secondary/25 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-slate-200 text-xs font-medium disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[16px]">
+                <span className="material-symbols-outlined text-[16px] text-slate-400">
                   account_balance
                 </span>
                 <span>{uploadingStatement ? "Analizando..." : "Estado bancario"}</span>
@@ -1061,9 +1280,9 @@ export default function AccountingPage() {
                 onClick={() => setShowManualModal(true)}
                 disabled={periodClosed}
                 title="Atajo: Alt+N"
-                className="px-3 py-2 rounded-lg bg-surface-container-high border border-slate-700 hover:border-primary-container/60 text-xs font-mono text-white flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-xs font-mono text-slate-200 flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[16px] text-primary">
+                <span className="material-symbols-outlined text-[16px] text-slate-400">
                   keyboard
                 </span>
                 <span>Manual</span>
@@ -1073,9 +1292,9 @@ export default function AccountingPage() {
                 type="button"
                 onClick={handleAutoReconcile}
                 disabled={reconciling || periodClosed}
-                className="px-3 py-2 rounded-lg bg-surface-container-high border border-[#1e2430] hover:border-secondary/50 text-xs font-mono text-slate-200 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="px-3 py-2 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-xs font-mono text-slate-200 flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[16px] text-secondary">
+                <span className="material-symbols-outlined text-[16px] text-slate-400">
                   auto_fix_high
                 </span>
                 <span>{reconciling ? "Cruzando..." : "Auto-conciliar"}</span>
@@ -1135,16 +1354,16 @@ export default function AccountingPage() {
           </section>
         )}
 
-        {/* Pestañas Contables: Libro Diario | Libro Mayor | Ecuación Fiscal 6 Piezas */}
+        {/* Pestañas Contables: Libro Diario | Libro Mayor | Cuadre Mensual | Movimientos USDT */}
         <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden defer-render">
           <div className="px-4 py-3 border-b border-[#1e2430] flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430] text-xs font-mono">
+            <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430] text-xs font-mono overflow-x-auto no-scrollbar">
               <button
                 type="button"
                 onClick={() => setActiveTab("JOURNAL")}
-                className={`px-3 py-1 rounded-md transition-colors ${
+                className={`px-3 py-1 rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                   activeTab === "JOURNAL"
-                    ? "bg-primary-container text-on-primary font-bold"
+                    ? "bg-surface-container-high text-white font-semibold"
                     : "text-slate-400 hover:text-white"
                 }`}
               >
@@ -1153,9 +1372,9 @@ export default function AccountingPage() {
               <button
                 type="button"
                 onClick={() => setActiveTab("LEDGER")}
-                className={`px-3 py-1 rounded-md transition-colors ${
+                className={`px-3 py-1 rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                   activeTab === "LEDGER"
-                    ? "bg-primary-container text-on-primary font-bold"
+                    ? "bg-surface-container-high text-white font-semibold"
                     : "text-slate-400 hover:text-white"
                 }`}
               >
@@ -1164,15 +1383,47 @@ export default function AccountingPage() {
               <button
                 type="button"
                 onClick={() => setActiveTab("FISCAL_6")}
-                className={`px-3 py-1 rounded-md transition-colors ${
+                className={`px-3 py-1 rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                   activeTab === "FISCAL_6"
-                    ? "bg-primary-container text-on-primary font-bold"
+                    ? "bg-surface-container-high text-white font-semibold"
                     : "text-slate-400 hover:text-white"
                 }`}
               >
                 Cuadre mensual
               </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("WALLET")}
+                className={`px-3 py-1 rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                  activeTab === "WALLET"
+                    ? "bg-surface-container-high text-white font-semibold"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Movimientos USDT ({walletMovements.length})
+              </button>
             </div>
+
+            {activeTab === "WALLET" && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={syncingBinancePay || periodClosed}
+                  onClick={handleSyncBinancePay}
+                  className="px-2.5 py-1 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-xs font-mono text-slate-200 cursor-pointer disabled:opacity-50"
+                >
+                  {syncingBinancePay ? "Sincronizando Pay..." : "Sincronizar Binance Pay"}
+                </button>
+                <button
+                  type="button"
+                  disabled={periodClosed}
+                  onClick={() => setShowWalletModal(true)}
+                  className="px-2.5 py-1 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 cursor-pointer disabled:opacity-50"
+                >
+                  + Registrar movimiento
+                </button>
+              </div>
+            )}
           </div>
 
           <div
@@ -1219,7 +1470,7 @@ export default function AccountingPage() {
                           </div>
                         </td>
                         <td className="py-3 px-4">
-                          <span className="font-mono text-primary text-[11px] mr-1.5">
+                          <span className="font-mono text-slate-400 text-[11px] mr-1.5">
                             {entry.account_code}
                           </span>
                           <span className="text-white font-medium">
@@ -1232,10 +1483,10 @@ export default function AccountingPage() {
                             Ref: {entry.reference}
                           </div>
                         </td>
-                        <td className="py-3 px-4 text-right font-mono tabular-nums text-tertiary font-semibold">
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-100 font-semibold">
                           {entry.debit > 0 ? `Bs. ${entry.debit.toFixed(2)}` : "-"}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono tabular-nums text-primary font-semibold">
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-300 font-semibold">
                           {entry.credit > 0 ? `Bs. ${entry.credit.toFixed(2)}` : "-"}
                         </td>
                       </tr>
@@ -1277,7 +1528,7 @@ export default function AccountingPage() {
                         key={l.account_code}
                         className="hover:bg-surface-container/70 transition-colors"
                       >
-                        <td className="py-3 px-4 font-mono text-primary font-semibold">
+                        <td className="py-3 px-4 font-mono text-slate-300 font-semibold">
                           {l.account_code}
                         </td>
                         <td className="py-3 px-4 text-white font-medium">
@@ -1286,10 +1537,10 @@ export default function AccountingPage() {
                         <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
                           Bs. {l.initial_balance.toFixed(2)}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono tabular-nums text-tertiary">
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-200">
                           Bs. {l.total_debit.toFixed(2)}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono tabular-nums text-primary">
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-300">
                           Bs. {l.total_credit.toFixed(2)}
                         </td>
                         <td className="py-3 px-4 text-right font-mono tabular-nums text-white font-bold">
@@ -1320,34 +1571,34 @@ export default function AccountingPage() {
                   tone: "text-white",
                 },
                 {
-                  title: "2. Entradas Operativas (Compras/Depósitos USDT)",
+                  title: "2. Entradas Operativas (P2P + Pay/Depósitos)",
                   val: fiscalSummary?.total_inflows ?? 0,
                   unit: "USDT",
-                  tone: "text-tertiary",
+                  tone: "text-white",
                 },
                 {
-                  title: "3. Salidas Operativas (Ventas/Retiros USDT)",
+                  title: "3. Salidas Operativas (P2P + Pay/Retiros)",
                   val: fiscalSummary?.total_outflows ?? 0,
                   unit: "USDT",
-                  tone: "text-primary",
+                  tone: "text-slate-200",
                 },
                 {
                   title: "4. Comisiones Cripto Deducibles (USDT)",
                   val: fiscalSummary?.total_fees ?? 0,
                   unit: "USDT",
-                  tone: "text-slate-200",
+                  tone: "text-slate-300",
                 },
                 {
                   title: "5. Saldo Final Teórico (USDT)",
                   val: fiscalSummary?.calculated_final_balance ?? 0,
                   unit: "USDT",
-                  tone: "text-secondary",
+                  tone: "text-white",
                 },
                 {
-                  title: "6. Utilidad Neta Fiscal (VES)",
+                  title: "6. Utilidad Neta Fiscal PEPS (VES)",
                   val: fiscalSummary?.net_profit_ves ?? 0,
                   unit: "VES",
-                  tone: "text-tertiary",
+                  tone: (fiscalSummary?.net_profit_ves ?? 0) >= 0 ? "text-tertiary" : "text-error",
                 },
               ].map((piece) => (
                 <div
@@ -1374,7 +1625,248 @@ export default function AccountingPage() {
               ))}
             </div>
           </div>
+
+          <div
+            role="tabpanel"
+            aria-hidden={activeTab !== "WALLET"}
+            className={`spa-tab-panel ${activeTab === "WALLET" ? "" : "inactive"}`}
+          >
+            <div className="overflow-x-auto overscroll-x-contain">
+              <table className="w-full text-left border-collapse">
+                <thead className="sticky top-0 z-10 bg-surface-container">
+                  <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                    <th scope="col" className="py-3 px-4">Fecha (VET)</th>
+                    <th scope="col" className="py-3 px-4">Canal</th>
+                    <th scope="col" className="py-3 px-4">Contraparte / Detalle</th>
+                    <th scope="col" className="py-3 px-4 text-right">Monto</th>
+                    <th scope="col" className="py-3 px-4 text-right">Comisión</th>
+                    <th scope="col" className="py-3 px-4 text-right">Acción</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1e2430]/70 text-xs">
+                  {walletMovements.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-slate-400 font-mono">
+                        Sin transferencias Binance Pay, Binance ID ni depósitos/retiros en este período.
+                      </td>
+                    </tr>
+                  ) : (
+                    walletMovements.map((wm) => (
+                      <tr key={wm.id} className="hover:bg-surface-container/70 transition-colors">
+                        <td className="py-3 px-4 font-mono tabular-nums text-slate-300">
+                          {wm.date_vet}
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-[10px] font-mono text-slate-300">
+                            {wm.channel}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-slate-300 max-w-xs truncate">
+                          <div className="text-white font-medium truncate">
+                            {wm.counterparty || (wm.movement_type === "DEPOSIT" ? "Entrada de fondos" : "Salida de fondos")}
+                          </div>
+                          {wm.note && (
+                            <div className="text-[10px] text-slate-500 truncate">{wm.note}</div>
+                          )}
+                        </td>
+                        <td
+                          className={`py-3 px-4 text-right font-mono tabular-nums font-semibold ${
+                            wm.movement_type === "DEPOSIT" ? "text-tertiary" : "text-slate-200"
+                          }`}
+                        >
+                          {wm.movement_type === "DEPOSIT" ? "+" : "-"}
+                          {wm.amount.toFixed(4)} {wm.asset}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
+                          {wm.fee > 0 ? `${wm.fee.toFixed(4)} ${wm.asset}` : "-"}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <button
+                            type="button"
+                            disabled={periodClosed}
+                            onClick={() => void handleDeleteWalletMovement(wm.id)}
+                            className="text-[11px] font-mono text-slate-400 hover:text-error disabled:opacity-40 cursor-pointer"
+                          >
+                            Eliminar
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </section>
+
+        {/* Modal de Registro de Movimiento USDT (Binance Pay / Binance ID / Depósito / Retiro) */}
+        {showWalletModal && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Registrar movimiento USDT"
+            className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 overscroll-contain"
+          >
+            <form
+              onSubmit={handleCreateWalletMovement}
+              className="w-full max-w-md rounded-2xl bg-surface-container-low border border-[#283140] p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-white">
+                  Movimiento USDT (Binance Pay / Depósito / Retiro)
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowWalletModal(false)}
+                  aria-label="Cerrar modal"
+                  className="text-slate-400 hover:text-white text-xs cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Registra entradas o salidas por Binance ID, correo, Binance Pay o red externa. Ajusta tu inventario USDT y Kardex sin alterar la ganancia P2P gravable ISLR.
+              </p>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="wm-type" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Tipo *
+                  </label>
+                  <select
+                    id="wm-type"
+                    value={wmType}
+                    onChange={(e) => setWmType(e.target.value as "DEPOSIT" | "WITHDRAWAL")}
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  >
+                    <option value="DEPOSIT">Entrada (+ USDT)</option>
+                    <option value="WITHDRAWAL">Salida (- USDT)</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="wm-channel" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Canal *
+                  </label>
+                  <select
+                    id="wm-channel"
+                    value={wmChannel}
+                    onChange={(e) =>
+                      setWmChannel(
+                        e.target.value as
+                          | "BINANCE_PAY"
+                          | "BINANCE_ID"
+                          | "TRC20"
+                          | "BSC"
+                          | "INTERNAL"
+                          | "MANUAL"
+                      )
+                    }
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  >
+                    <option value="BINANCE_PAY">Binance Pay</option>
+                    <option value="BINANCE_ID">Binance ID / Correo</option>
+                    <option value="TRC20">Red TRC20</option>
+                    <option value="BSC">Red BSC (BEP20)</option>
+                    <option value="INTERNAL">Transferencia interna</option>
+                    <option value="MANUAL">Ajuste manual</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="wm-amount" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Monto (USDT) *
+                  </label>
+                  <BankAmountInput
+                    id="wm-amount"
+                    required
+                    value={wmAmount}
+                    onChange={setWmAmount}
+                    ariaLabel="Monto en USDT"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-slate-500 focus:outline-hidden text-xs font-mono text-white font-bold text-right tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="wm-date" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Fecha (VET)
+                  </label>
+                  <input
+                    id="wm-date"
+                    type="date"
+                    min={minCutoffDate}
+                    max={maxCutoffDate}
+                    value={wmDateVet}
+                    onChange={(e) => setWmDateVet(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  />
+                </div>
+              </div>
+
+              {wmType === "WITHDRAWAL" && (
+                <div>
+                  <label htmlFor="wm-fee" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Comisión de red (USDT)
+                  </label>
+                  <BankAmountInput
+                    id="wm-fee"
+                    value={wmFee}
+                    onChange={setWmFee}
+                    ariaLabel="Comisión de red en USDT"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white text-right tabular-nums"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="wm-party" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                  Binance ID, correo o dirección (opcional)
+                </label>
+                <input
+                  id="wm-party"
+                  type="text"
+                  autoComplete="off"
+                  value={wmCounterparty}
+                  onChange={(e) => setWmCounterparty(e.target.value)}
+                  placeholder="Ej. ID 23456789 o correo@ejemplo.com"
+                  className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="wm-note" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                  Concepto / Nota (opcional)
+                </label>
+                <input
+                  id="wm-note"
+                  type="text"
+                  autoComplete="off"
+                  value={wmNote}
+                  onChange={(e) => setWmNote(e.target.value)}
+                  placeholder="Ej. Capital transferido por Binance ID"
+                  className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowWalletModal(false)}
+                  className="px-3.5 py-2 rounded-lg bg-surface-container border border-[#283140] text-xs text-slate-300 hover:text-white cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingWallet}
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                >
+                  {savingWallet ? "Guardando..." : "Guardar movimiento"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
 
         {/* Modal de Conciliación Manual Ultrarrápida (<5s sin mouse • Atajo Alt+N) */}
         {showManualModal && (
@@ -1678,6 +2170,7 @@ export default function AccountingPage() {
                         const savedCfg = await saveAccountingPeriodConfig({
                           year,
                           month,
+                          cutoff_start_date: cutoffStartDate || null,
                           initial_usdt: initialUsdt,
                           initial_usdt_cost_ves: initialUsdtCostVes,
                           initial_banks: bankInitialMap,

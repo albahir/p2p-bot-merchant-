@@ -682,10 +682,18 @@ def get_telegram_status(
     raw_token = (settings.TELEGRAM_BOT_TOKEN or "").strip()
     is_configured = bool(raw_token and ":" in raw_token)
     linked_chat = str(current_user.telegram_id or "").strip() or None
+    is_admin = str(getattr(current_user, "role", "") or "").upper() == "ADMIN"
+
+    if not is_configured:
+        bot_label = "Sin configurar"
+    elif is_admin:
+        bot_label = _mask_bot_token(raw_token)
+    else:
+        bot_label = "Activo"
 
     return TelegramStatusResponse(
         is_configured=is_configured,
-        bot_token_masked=_mask_bot_token(raw_token) if is_configured else "Sin configurar",
+        bot_token_masked=bot_label,
         linked_chat_id=linked_chat,
         fail_closed_5xx_enabled=True,
         weight_pause_enabled=True,
