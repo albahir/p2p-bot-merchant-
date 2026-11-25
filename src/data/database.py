@@ -164,6 +164,104 @@ def init_db() -> None:
                     "Verificación de columna %s.%s: %s", table_name, col_name, err
                 )
 
+    # Endurecimiento relacional no destructivo para PostgreSQL (FKs + UNIQUE por usuario sin borrar usuarios)
+    if not _IS_SQLITE:
+        pg_constraints = [
+            (
+                "fk_orders_user_id",
+                (
+                    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_id "
+                    "FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE RESTRICT NOT VALID"
+                ),
+            ),
+            (
+                "fk_bank_vouchers_user_id",
+                (
+                    "ALTER TABLE bank_vouchers ADD CONSTRAINT fk_bank_vouchers_user_id "
+                    "FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE RESTRICT NOT VALID"
+                ),
+            ),
+            (
+                "fk_wallet_movements_user_id",
+                (
+                    "ALTER TABLE wallet_movements ADD CONSTRAINT fk_wallet_movements_user_id "
+                    "FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE RESTRICT NOT VALID"
+                ),
+            ),
+            (
+                "fk_journal_entries_user_id",
+                (
+                    "ALTER TABLE journal_entries ADD CONSTRAINT fk_journal_entries_user_id "
+                    "FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE RESTRICT NOT VALID"
+                ),
+            ),
+            (
+                "fk_journal_entries_voucher_id",
+                (
+                    "ALTER TABLE journal_entries ADD CONSTRAINT fk_journal_entries_voucher_id "
+                    "FOREIGN KEY (voucher_id) REFERENCES bank_vouchers(id) ON DELETE SET NULL NOT VALID"
+                ),
+            ),
+            (
+                "fk_fiscal_snapshots_user_id",
+                (
+                    "ALTER TABLE fiscal_period_snapshots ADD CONSTRAINT fk_fiscal_snapshots_user_id "
+                    "FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE RESTRICT NOT VALID"
+                ),
+            ),
+            (
+                "fk_accounting_period_user_id",
+                (
+                    "ALTER TABLE accounting_period_balances ADD CONSTRAINT fk_accounting_period_user_id "
+                    "FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE RESTRICT NOT VALID"
+                ),
+            ),
+            (
+                "uq_orders_user_order_number",
+                "ALTER TABLE orders ADD CONSTRAINT uq_orders_user_order_number UNIQUE (user_id, order_number)",
+            ),
+            (
+                "uq_wallet_movements_user_txid",
+                "ALTER TABLE wallet_movements ADD CONSTRAINT uq_wallet_movements_user_txid UNIQUE (user_id, txid)",
+            ),
+            (
+                "uq_fiscal_snapshot_user_period",
+                "ALTER TABLE fiscal_period_snapshots ADD CONSTRAINT uq_fiscal_snapshot_user_period UNIQUE (user_id, period)",
+            ),
+            (
+                "uq_accounting_period_user_period",
+                "ALTER TABLE accounting_period_balances ADD CONSTRAINT uq_accounting_period_user_period UNIQUE (user_id, period)",
+            ),
+        ]
+        # Reemplazar antiguos índices únicos globales por índices únicos compuestos (user_id, ...)
+        for drop_sql in (
+            "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_number_key",
+            "DROP INDEX IF EXISTS ix_orders_order_number",
+            "CREATE INDEX IF NOT EXISTS ix_orders_order_number ON orders (order_number)",
+            "ALTER TABLE wallet_movements DROP CONSTRAINT IF EXISTS wallet_movements_txid_key",
+            "DROP INDEX IF EXISTS ix_wallet_movements_txid",
+            "CREATE INDEX IF NOT EXISTS ix_wallet_movements_txid ON wallet_movements (txid)",
+        ):
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(drop_sql))
+                    conn.commit()
+            except SQLAlchemyError as err:
+                logging.getLogger("database").debug("Migración índice PG: %s", err)
+
+        for cname, ddl in pg_constraints:
+            try:
+                with engine.connect() as conn:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM pg_constraint WHERE conname = :c"),
+                        {"c": cname},
+                    ).first()
+                    if not exists:
+                        conn.execute(text(ddl))
+                        conn.commit()
+            except SQLAlchemyError as err:
+                logging.getLogger("database").debug("Constraint PG %s: %s", cname, err)
+
     # Sembrar historial oficial BCV local (60 fechas valor) de forma idempotente
     try:
         from src.reporting.bcv_history_service import BCVHistoryService

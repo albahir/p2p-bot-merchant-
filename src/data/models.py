@@ -4,7 +4,18 @@ Incluye modelos para eventos de seguridad (auditoría append-only), secretos cif
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 
 from src.data.database import Base
 
@@ -44,10 +55,13 @@ class EncryptedSecret(Base):
 class Order(Base):
     """Histórico de órdenes de Binance P2P con campos para motor fiscal."""
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint("user_id", "order_number", name="uq_orders_user_order_number"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial de la orden
-    order_number = Column(String(50), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="RESTRICT"), index=True, nullable=True)  # Propietario confidencial de la orden
+    order_number = Column(String(50), index=True, nullable=False)
     trade_type = Column(String(10), nullable=False)  # BUY, SELL
     asset = Column(String(20), nullable=False)        # USDT, BTC
     fiat = Column(String(10), nullable=False)         # VES, USD
@@ -79,17 +93,20 @@ class IdentityCache(Base):
 
 
 class WalletMovement(Base):
-    """Movimientos de entrada y salida on-chain de criptoactivos (Depósitos y Retiros)."""
+    """Movimientos de entrada y salida on-chain o Binance Pay de criptoactivos (Depósitos y Retiros)."""
     __tablename__ = "wallet_movements"
+    __table_args__ = (
+        UniqueConstraint("user_id", "txid", name="uq_wallet_movements_user_txid"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del movimiento
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="RESTRICT"), index=True, nullable=True)  # Propietario confidencial del movimiento
     movement_type = Column(String(20), nullable=False)  # DEPOSIT, WITHDRAWAL
     asset = Column(String(20), nullable=False)          # USDT, BTC, ETH
     amount = Column(Float, nullable=False)
     fee = Column(Float, default=0.0, nullable=False)
-    network = Column(String(30), nullable=True)         # TRC20, BSC, MATIC
-    txid = Column(String(128), unique=True, index=True, nullable=True)
+    network = Column(String(30), nullable=True)         # TRC20, BSC, MATIC, BINANCE_PAY
+    txid = Column(String(128), index=True, nullable=True)
     address = Column(String(128), nullable=True)
     note = Column(String(255), nullable=True)
     status = Column(String(30), nullable=False)         # Success, Completed
@@ -102,7 +119,7 @@ class BankVoucher(Base):
     __tablename__ = "bank_vouchers"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del comprobante
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="RESTRICT"), index=True, nullable=True)  # Propietario confidencial del comprobante
     bank_name = Column(String(100), nullable=False)     # Banco de Venezuela, Banesco, etc.
     destination_bank = Column(String(100), nullable=True) # Banco receptor del pago
     reference_number = Column(String(50), index=True, nullable=False)
@@ -125,9 +142,12 @@ class BankVoucher(Base):
 class FiscalPeriodSnapshot(Base):
     """Snapshots mensuales de balance e inventario para la reconciliación de 6 piezas."""
     __tablename__ = "fiscal_period_snapshots"
+    __table_args__ = (
+        UniqueConstraint("user_id", "period", name="uq_fiscal_snapshot_user_period"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del cierre
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="RESTRICT"), index=True, nullable=True)  # Propietario confidencial del cierre
     period = Column(String(32), index=True, nullable=False)  # YYYY-MM
     initial_balance = Column(Float, default=0.0, nullable=False)
     inflows_deposits = Column(Float, default=0.0, nullable=False)
@@ -150,9 +170,12 @@ class FiscalPeriodSnapshot(Base):
 class AccountingPeriodBalance(Base):
     """Saldos iniciales (apertura) y arqueo final real por período mensual (YYYY-MM) y usuario."""
     __tablename__ = "accounting_period_balances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "period", name="uq_accounting_period_user_period"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    user_id = Column(Integer, index=True, nullable=True)
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="RESTRICT"), index=True, nullable=True)
     period = Column(String(16), index=True, nullable=False)  # YYYY-MM
     cutoff_start_date = Column(Date, nullable=True)  # Fecha opcional de inicio de operaciones dentro del mes
     initial_usdt = Column(Float, default=0.0, nullable=False)
@@ -287,7 +310,7 @@ class JournalEntry(Base):
     __tablename__ = "journal_entries"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    user_id = Column(Integer, index=True, nullable=True)  # Propietario confidencial del asiento
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="RESTRICT"), index=True, nullable=True)  # Propietario confidencial del asiento
     entry_number = Column(Integer, index=True, nullable=False)
     date_time = Column(DateTime, index=True, nullable=False)
     account_code = Column(String(30), nullable=False)   # 1.1.01, 1.1.05, 5.2.01, etc.
@@ -296,7 +319,7 @@ class JournalEntry(Base):
     credit = Column(Float, default=0.0, nullable=False)
     reference = Column(String(50), nullable=False)
     description = Column(Text, nullable=False)
-    voucher_id = Column(Integer, nullable=True)
+    voucher_id = Column(Integer, ForeignKey("bank_vouchers.id", ondelete="SET NULL"), nullable=True)
     order_number = Column(String(50), nullable=True)
     prev_hash = Column(String(64), nullable=True)
     entry_hash = Column(String(64), nullable=False)

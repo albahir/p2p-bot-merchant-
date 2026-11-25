@@ -971,6 +971,19 @@
     - **Verificación Post-Edición**:
       - `34 passed` (incluyendo `4/4` TDD nuevos en [`tests/unit/test_cutoff_wallet_movements_and_rbac.py`](file:///c:/p2p-bot-merchant/tests/unit/test_cutoff_wallet_movements_and_rbac.py)), `ruff check` (`0` errores), `mypy` (`0` errores en 13 archivos), `tsc --noEmit` (`0` errores) y `npm --prefix frontend run build` limpio.
 
+75. **Integridad Relacional Multiusuario (FKs + UNIQUE por Usuario), Bloqueo Real de Sandbox y Corrección BCV de Fecha Valor Vespertina (ADR 075)**:
+    - **Claves Foráneas Reales y Restricciones Compuestas ([`models.py`](file:///c:/p2p-bot-merchant/src/data/models.py), [`database.py`](file:///c:/p2p-bot-merchant/src/data/database.py))**:
+      - Añadidas `ForeignKey("app_users.id", ondelete="RESTRICT")` en `orders`, `bank_vouchers`, `wallet_movements`, `journal_entries`, `fiscal_period_snapshots` y `accounting_period_balances`, además de `journal_entries.voucher_id -> bank_vouchers.id (ON DELETE SET NULL)`.
+      - Sustituido `UNIQUE (order_number)` global por `UNIQUE (user_id, order_number)` (y `UNIQUE (user_id, txid)` / `UNIQUE (user_id, period)`), permitiendo que dos usuarios de la misma plataforma que operan entre sí en Binance P2P registren su contraparte sin colisión. Migración no destructiva en `init_db()` para PostgreSQL sin tocar `app_users`.
+    - **Aislamiento Estricto sin Fuga de Filas `NULL` ([`repositories.py`](file:///c:/p2p-bot-merchant/src/data/repositories.py))**:
+      - Eliminado el fallback `OR user_id IS NULL` en `_apply_user_scope`: toda consulta de usuario autenticado filtra estrictamente `user_id == uid`.
+    - **Apagado Real del Simulador Sandbox en Producción ([`src/main.py`](file:///c:/p2p-bot-merchant/src/main.py))**:
+      - Con `USE_SANDBOX=False`, `P2PBotEngine._setup_binance_client()` ya no cae a `MockBinanceP2PClient` cuando no existe llave global heredada; evita reinyección de órdenes simuladas sin dueño.
+    - **Regla Legal BCV Fecha Valor Vespertina ([`bcv_history_service.py`](file:///c:/p2p-bot-merchant/src/reporting/bcv_history_service.py))**:
+      - Corregido bug en `get_or_fetch_current_rates()` donde la tasa publicada por el BCV en la tarde con Fecha Valor del día hábil siguiente sobrescribía el registro del día actual antes de las `00:00:00 VET`. Ahora persiste exclusivamente bajo `parsed_fv` futuro y devuelve la tasa vigente del día en curso.
+    - **Verificación Post-Edición**:
+      - `32 passed` (incluyendo `5/5` TDD nuevos en [`tests/unit/test_relational_schema_and_bcv_fecha_valor.py`](file:///c:/p2p-bot-merchant/tests/unit/test_relational_schema_and_bcv_fecha_valor.py)), `ruff check` (`0` errores) y `mypy` (`0` errores).
+
 ---
 
 ## 🎯 Guía Operativa Actual
