@@ -408,12 +408,15 @@ def test_accounting_ocr_hash_chain_multi_bank_and_close_month_persistence(sim_en
         "/api/auth/login",
         json={"username": "admin_master", "password": "AdminPassword2026!"},
     )
-    headers = {"Authorization": f"Bearer {login_res.json()['access_token']}"}
+    login_data = login_res.json()
+    admin_id = int(login_data["user"]["id"])
+    headers = {"Authorization": f"Bearer {login_data['access_token']}"}
 
     # Sembrar 2 órdenes completadas (Compra por Banesco y Venta por Mercantil)
     db.add_all(
         [
             Order(
+                user_id=admin_id,
                 order_number="ORD-ACC-BUY",
                 trade_type="BUY",
                 asset="USDT",
@@ -428,6 +431,7 @@ def test_accounting_ocr_hash_chain_multi_bank_and_close_month_persistence(sim_en
                 created_at=datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC),
             ),
             Order(
+                user_id=admin_id,
                 order_number="ORD-ACC-SELL",
                 trade_type="SELL",
                 asset="USDT",

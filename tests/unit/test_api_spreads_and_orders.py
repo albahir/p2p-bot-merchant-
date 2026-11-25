@@ -106,6 +106,7 @@ def test_orders_list_paginated_and_auth(app_client, test_db):
     user = auth_svc.ensure_default_admin(default_username="trader1")
 
     order = Order(
+        user_id=int(user.id),
         order_number="ORDER12345",
         trade_type="BUY",
         asset="USDT",

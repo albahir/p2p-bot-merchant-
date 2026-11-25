@@ -1409,10 +1409,23 @@ def sync_binance_pay_movements(
     client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
     try:
         raw_items = client.get_pay_transactions(start_timestamp=start_ms, end_timestamp=end_ms, limit=100)
-    except (BinanceAuthError, BinanceWeightExceededError, RuntimeError, ValueError, OSError) as exc:
+    except BinanceAuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"No se pudo consultar Binance Pay: {exc}",
+            detail="Binance rechazó la autenticación para Binance Pay. Verifica tu API Key e IP autorizada.",
+        ) from exc
+    except BinanceWeightExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Cuota de Binance API temporalmente agotada. Intenta nuevamente en 60 segundos.",
+        ) from exc
+    except (RuntimeError, ValueError, OSError) as exc:
+        import logging
+
+        logging.getLogger("accounting_route").warning("Error consultando Binance Pay: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo consultar Binance Pay en este momento. Verifica permisos de lectura e intenta de nuevo.",
         ) from exc
 
     repo = WalletMovementRepository(db, user_id=uid or None)

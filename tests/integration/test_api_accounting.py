@@ -59,6 +59,7 @@ def test_get_journal_entries_empty_and_populated(test_db, current_trader):
     # 2. Poblar con un asiento contable
     now = datetime(2026, 11, 3, 12, 0, 0, tzinfo=UTC)
     entry = JournalEntry(
+        user_id=current_trader.id,
         entry_number=1,
         date_time=now,
         account_code="1.1.01",
@@ -117,6 +118,7 @@ def test_export_excel_and_pdf(test_db, current_trader):
 def test_manual_voucher_match(test_db, current_trader):
     now = datetime(2026, 11, 3, 14, 0, 0, tzinfo=UTC)
     order = Order(
+        user_id=current_trader.id,
         order_number="ORD-MATCH-API",
         trade_type="BUY",
         asset="USDT",
@@ -128,6 +130,7 @@ def test_manual_voucher_match(test_db, current_trader):
         created_at=now,
     )
     voucher = BankVoucher(
+        user_id=current_trader.id,
         bank_name="Banco de Venezuela",
         reference_number="0102123456",
         amount_ves=2000.0,

@@ -44,13 +44,25 @@ jobs:
   codeql:
     name: CodeQL Static Code Analysis
     runs-on: ubuntu-latest
+    env:
+      CODEQL_EXTRACTOR_PYTHON_ANALYSIS_VERSION: "3.12"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: python
+          config: |
+            paths-ignore:
+              - frontend/**
+              - docs/**
+              - .venv/**
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
@@ -77,19 +89,19 @@ jobs:
         run: |
           pip-audit -r requirements.txt --format json --output pip-audit.json || {
             echo "Evaluando severidad de vulnerabilidades detectadas..."
-            python -c "
+            python - <<'PY'
           import json, sys
           try:
-              data = json.load(open('pip-audit.json'))
-              vulns = [v for pkg in data.get('dependencies', []) for v in pkg.get('vulns', [])]
-              crit = [v for v in vulns if any(fix in v.get('aliases', []) for fix in ['GHSA', 'CVE'])]
+              data = json.load(open("pip-audit.json", encoding="utf-8"))
+              vulns = [v for pkg in data.get("dependencies", []) for v in pkg.get("vulns", [])]
+              crit = [v for v in vulns if any(fix in v.get("aliases", []) for fix in ["GHSA", "CVE"])]
               if crit:
-                  print(f'Vulnerabilidades criticas encontradas: {len(crit)}')
+                  print(f"Vulnerabilidades criticas encontradas: {len(crit)}")
                   sys.exit(1)
           except Exception as e:
-              print(f'Error procesando pip-audit: {e}')
+              print(f"Error procesando pip-audit: {e}")
               sys.exit(1)
-          "
+          PY
           }
 
       - name: Upload Audit Report

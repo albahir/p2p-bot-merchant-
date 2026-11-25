@@ -295,14 +295,22 @@ class P2PBotEngine:
         except (KeyError, ValueError):
             has_real_keys = False
 
-        if not has_real_keys or self.use_sandbox:
+        if self.use_sandbox:
             self.client = MockBinanceP2PClient(enable_default_orders=True)
-            if not has_real_keys:
-                self.use_sandbox = True
-                self.notifier.use_sandbox = True
-                logger.info("🧪 Modo Sandbox activo: No se encontraron credenciales reales de Binance en la DB.")
-            else:
-                logger.info("🧪 Modo Sandbox forzado por configuración (USE_SANDBOX=True).")
+            self.notifier.use_sandbox = True
+            logger.info("🧪 Modo Sandbox activo por configuración (USE_SANDBOX=True).")
+            return
+
+        if not has_real_keys:
+            # En modo producción multiusuario (USE_SANDBOX=False), cada operador sincroniza con su
+            # propia clave personal cifrada (user_<id>:binance_api_key). Jamás inyectar órdenes Sandbox.
+            self.client = None
+            self.use_sandbox = False
+            self.notifier.use_sandbox = False
+            logger.info(
+                "🟢 Modo PRODUCCIÓN multiusuario activo (USE_SANDBOX=False): "
+                "sin clave global heredada; simulador Sandbox deshabilitado."
+            )
             return
 
         try:
@@ -311,10 +319,10 @@ class P2PBotEngine:
             self.notifier.use_sandbox = False
             logger.info("🟢 Cliente oficial de Binance P2P inicializado con credenciales cifradas (MODO PRODUCCIÓN).")
         except (ValueError, KeyError, RuntimeError, BinanceAuthError) as e:
-            logger.error(f"Error inicializando cliente real de Binance: {e}. Activando Sandbox de respaldo.")
-            self.use_sandbox = True
-            self.notifier.use_sandbox = True
-            self.client = MockBinanceP2PClient(enable_default_orders=True)
+            logger.error(f"FAIL-CLOSED: Error inicializando cliente real de Binance: {e}. Motor sin cliente simulado.")
+            self.client = None
+            self.use_sandbox = False
+            self.notifier.use_sandbox = False
 
     def run_cycle(self):
         """Ejecuta una iteración de sincronización y monitoreo."""

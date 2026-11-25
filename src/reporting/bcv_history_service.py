@@ -138,32 +138,72 @@ class BCVHistoryService:
         fecha_valor_str = str(full_rates.get("fecha_valor") or effective_date.strftime("%Y-%m-%d"))
 
         if usd_val > 0:
+            parsed_fv: date | None = None
             try:
                 from src.core.rate_alert_service import parse_fecha_valor
 
-                self.repo.upsert_rate(
-                    BCVRateHistory(
-                        fecha_valor=effective_date,
-                        usd_rate=usd_rate if (usd_rate := usd_val) else usd_val,
-                        eur_rate=eur_val,
-                        source="bcv_official",
-                    )
-                )
                 parsed_fv = parse_fecha_valor(fecha_valor_str)
-                if parsed_fv and parsed_fv != effective_date:
+            except (ValueError, ImportError, TypeError):
+                parsed_fv = None
+
+            is_future_fecha_valor = parsed_fv is not None and parsed_fv > effective_date
+            try:
+                if is_future_fecha_valor and parsed_fv is not None:
+                    # Regla legal BCV: la tasa publicada por la tarde con Fecha Valor futura
+                    # se persiste únicamente bajo su fecha futura sin sobrescribir la tasa vigente de hoy.
                     self.repo.upsert_rate(
                         BCVRateHistory(
                             fecha_valor=parsed_fv,
                             usd_rate=usd_val,
-                            eur_rate=eur_val,
+                            eur_rate=eur_val or 0.0,
                             source="bcv_official",
                         )
                     )
-                logger.info(
-                    f"Tasa BCV persistida en bcv_rate_history para Fecha Valor {effective_date}: USD={usd_val}, EUR={eur_val}"
-                )
+                    logger.info(
+                        "Tasa BCV futura persistida para Fecha Valor %s (USD=%s) preservando tasa vigente de %s.",
+                        parsed_fv,
+                        usd_val,
+                        effective_date,
+                    )
+                else:
+                    self.repo.upsert_rate(
+                        BCVRateHistory(
+                            fecha_valor=effective_date,
+                            usd_rate=usd_val,
+                            eur_rate=eur_val or 0.0,
+                            source="bcv_official",
+                        )
+                    )
+                    if parsed_fv and parsed_fv != effective_date:
+                        self.repo.upsert_rate(
+                            BCVRateHistory(
+                                fecha_valor=parsed_fv,
+                                usd_rate=usd_val,
+                                eur_rate=eur_val or 0.0,
+                                source="bcv_official",
+                            )
+                        )
+                    logger.info(
+                        "Tasa BCV persistida en bcv_rate_history para Fecha Valor %s: USD=%s, EUR=%s",
+                        effective_date,
+                        usd_val,
+                        eur_val,
+                    )
             except (SQLAlchemyError, ValueError, OSError, RuntimeError) as e:
                 logger.warning(f"No se pudo persistir tasa BCV en bcv_rate_history: {e}")
+
+            if is_future_fecha_valor:
+                if not self._seed_checked:
+                    self.seed_historical_rates_if_missing()
+                today_rec = self.repo.get_rate_by_date(effective_date)
+                if today_rec and float(today_rec.usd_rate) > 0:
+                    return {
+                        "usd": float(today_rec.usd_rate),
+                        "eur": float(today_rec.eur_rate) if today_rec.eur_rate else eur_val,
+                        "cny": cny_val,
+                        "fecha_valor": effective_date.strftime("%Y-%m-%d"),
+                        "source": str(today_rec.source or "bcv_db_history"),
+                    }
 
             return {
                 "usd": usd_val,

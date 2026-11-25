@@ -23,19 +23,12 @@ from src.data.models import (
 
 def _apply_user_scope(db: Session, query: Any, model_cls: Any, user_id: int | None) -> Any:
     """Aisla estrictamente las consultas por propietario confidencial (user_id).
-    Un usuario (incluso ADMIN) jamás puede leer registros cuyo user_id pertenezca a otro operador.
+    Un usuario autenticado jamás lee registros de otro operador ni filas huérfanas (user_id IS NULL).
     """
+    _ = db
     if user_id is None:
         return query
-    has_other_user_rows = (
-        db.query(model_cls.id)
-        .filter(model_cls.user_id.is_not(None), model_cls.user_id != user_id)
-        .first()
-        is not None
-    )
-    if has_other_user_rows:
-        return query.filter(model_cls.user_id == user_id)
-    return query.filter((model_cls.user_id == user_id) | (model_cls.user_id.is_(None)))
+    return query.filter(model_cls.user_id == user_id)
 
 
 class OrderRepository:
