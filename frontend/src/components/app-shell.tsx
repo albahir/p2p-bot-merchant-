@@ -468,6 +468,18 @@ export function AppShell({ children, title, subtitle, badge, actions }: AppShell
         {/* Área de Contenido Denso */}
         <main className="flex-1 px-4 lg:px-6 py-4 pb-24 lg:pb-8">{children}</main>
 
+        <footer className="hidden lg:flex items-center justify-between px-6 py-3 border-t border-[#1e2430]/70 text-[11px] text-slate-500">
+          <span>Comerciante P2P</span>
+          <div className="flex items-center gap-4">
+            <Link href="/privacy" className="hover:text-slate-300 transition-colors">
+              Política de Privacidad
+            </Link>
+            <Link href="/terms" className="hover:text-slate-300 transition-colors">
+              Condiciones del Servicio
+            </Link>
+          </div>
+        </footer>
+
         {/* Barra Táctica Móvil Simplificada (Calculadora + Confirmación de Fondos + Matriz + Menú) */}
         <nav
           aria-label="Navegación rápida móvil"
