@@ -12,7 +12,7 @@ import hmac
 import logging
 import time
 import urllib.parse
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import httpx
 from cryptography.hazmat.primitives import hashes
@@ -42,6 +42,10 @@ class BinanceAuthError(Exception):
     """Excepción crítica lanzada cuando la API Key o firma es rechazada (Fail-Closed)."""
 
 
+class BinanceTransientError(Exception):
+    """Excepción transitoria (5xx, timeout o deriva -1021 recuperable) apta para reintento."""
+
+
 class BinanceP2PClient:
     """Cliente oficial para operaciones P2P en Binance con firma Ed25519 y compensación de drift."""
 
@@ -58,19 +62,38 @@ class BinanceP2PClient:
         self.recv_window = recv_window
         self.last_used_weight = 0
         self.time_offset_ms = 0  # serverTime - localTime
+        self._http_client: httpx.Client | None = None
+
+    def _get_http_client(self, timeout: float = 15.0) -> httpx.Client:
+        """Retorna una sesión HTTP persistente reutilizable (Keep-Alive) para evitar handshakes TLS repetidos."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.Client(timeout=timeout)
+        return self._http_client
+
+    def close(self) -> None:
+        """Cierra limpiamente la sesión HTTP subyacente si está abierta."""
+        if self._http_client is not None and not self._http_client.is_closed:
+            self._http_client.close()
+        self._http_client = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
     def sync_time(self) -> int:
         """Sincroniza el reloj local con el servidor de Binance para evitar el error -1021."""
         url = f"{self.base_url}/api/v3/time"
         try:
-            with httpx.Client(timeout=5.0) as client:
-                res = client.get(url)
-                if res.status_code == 200:
-                    data = BinanceServerTime.model_validate(res.json())
-                    local_now = int(time.time() * 1000)
-                    self.time_offset_ms = data.serverTime - local_now
-                    logger.info(f"Sincronización horaria con Binance exitosa. Offset: {self.time_offset_ms}ms")
-                    return self.time_offset_ms
+            client = self._get_http_client(timeout=6.0)
+            res = client.get(url)
+            if res.status_code == 200:
+                data = BinanceServerTime.model_validate(res.json())
+                local_now = int(time.time() * 1000)
+                self.time_offset_ms = data.serverTime - local_now
+                logger.info(f"Sincronización horaria con Binance exitosa. Offset: {self.time_offset_ms}ms")
+                return self.time_offset_ms
         except (httpx.RequestError, ValueError) as e:
             logger.warning(f"No se pudo consultar /api/v3/time ({e}). Usando hora local.")
         return 0
@@ -130,24 +153,70 @@ class BinanceP2PClient:
                 )
 
     def _handle_response_errors(self, response: httpx.Response) -> dict[str, Any]:
-        """Procesa y clasifica de forma segura los códigos de error de Binance."""
-        if response.status_code in (401, 403):
+        """Procesa y clasifica de forma segura los códigos de error de Binance (incluyendo 4xx con JSON)."""
+        if response.status_code == 451:
             raise BinanceAuthError(
-                f"FAIL-CLOSED: Rechazo de autenticación Binance (HTTP {response.status_code}): {response.text}"
+                "FAIL-CLOSED: Binance restringió el acceso desde la región/IP de este servidor (HTTP 451)."
             )
-        response.raise_for_status()
 
-        data = cast(dict[str, Any], response.json())
-        code = str(data.get("code", "000000"))
-        if code not in ("000000", "0", "200"):
-            msg = data.get("message") or data.get("msg") or "Error desconocido de API Binance"
+        if response.status_code in (418, 429):
+            raise BinanceWeightExceededError(
+                f"FAIL-CLOSED: Límite de tasa o bloqueo temporal de Binance (HTTP {response.status_code})."
+            )
+
+        if response.status_code in (401, 403):
+            detail_msg = response.text
+            try:
+                err_body = response.json()
+                if isinstance(err_body, dict):
+                    err_code = str(err_body.get("code", ""))
+                    err_txt = str(err_body.get("msg") or err_body.get("message") or detail_msg)
+                    detail_msg = f"[{err_code}] {err_txt}" if err_code else err_txt
+            except ValueError:
+                pass
+            raise BinanceAuthError(
+                f"FAIL-CLOSED: Rechazo de autenticación Binance (HTTP {response.status_code}): {detail_msg}"
+            )
+
+        if response.status_code >= 500:
+            response.raise_for_status()
+
+        # En 400/4xx Binance suele enviar JSON estructurado con códigos (-2015, -1021, -1022, etc.)
+        data: dict[str, Any] | None = None
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict):
+                data = cast(dict[str, Any], parsed)
+        except ValueError:
+            data = None
+
+        if response.status_code >= 400:
+            if data is None:
+                raise RuntimeError(f"Error HTTP {response.status_code} de Binance.")
+            code = str(data.get("code", response.status_code))
+            msg = str(data.get("message") or data.get("msg") or f"Error HTTP {response.status_code}")
             if code in ("-1003", "100001003"):
                 raise BinanceWeightExceededError(f"Rate limit de Binance alcanzado: {msg}")
-            if code in ("-2014", "-2015", "100001004", "100001005"):
-                raise BinanceAuthError(f"FAIL-CLOSED: Clave rechazada o IP no autorizada: {msg}")
+            if code in ("-2014", "-2015", "-1022", "100001004", "100001005"):
+                raise BinanceAuthError(f"FAIL-CLOSED: Clave rechazada, firma inválida o IP no autorizada ({code}): {msg}")
             if code in ("-1021", "100001006"):
-                # Intentar sincronizar hora ante error de timestamp
                 self.sync_time()
+                raise BinanceTransientError(f"Desfase de reloj con Binance [{code}]: {msg}")
+            raise RuntimeError(f"Error Binance [{code}]: {msg}")
+
+        if data is None:
+            raise RuntimeError("Respuesta JSON inválida de Binance API.")
+
+        code = str(data.get("code", "000000"))
+        if code not in ("000000", "0", "200"):
+            msg = str(data.get("message") or data.get("msg") or "Error desconocido de API Binance")
+            if code in ("-1003", "100001003"):
+                raise BinanceWeightExceededError(f"Rate limit de Binance alcanzado: {msg}")
+            if code in ("-2014", "-2015", "-1022", "100001004", "100001005"):
+                raise BinanceAuthError(f"FAIL-CLOSED: Clave rechazada, firma inválida o IP no autorizada ({code}): {msg}")
+            if code in ("-1021", "100001006"):
+                self.sync_time()
+                raise BinanceTransientError(f"Desfase de reloj con Binance [{code}]: {msg}")
             raise RuntimeError(f"Error Binance [{code}]: {msg}")
         return data
 
@@ -223,38 +292,45 @@ class BinanceP2PClient:
             merchant_check=merchant_check,
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError, BinanceTransientError)),
+        reraise=True,
+    )
     def get_order_history(
         self,
         trade_type: str,
         start_timestamp: int,
         end_timestamp: int,
         page: int = 1,
-        rows: int = 50
+        rows: int = 100
     ) -> BinanceOrderHistoryResponse:
-        """Consulta el histórico de órdenes con paginación de 30 días y validación de tipos."""
+        """Consulta el histórico de órdenes con paginación de 30 días, Keep-Alive y reintento ante fallos transitorios."""
         thirty_days_ms = 30 * 24 * 60 * 60 * 1000
         if (end_timestamp - start_timestamp) > thirty_days_ms:
             raise ValueError("FAIL-CLOSED: La ventana de consulta histórica no puede superar los 30 días.")
 
+        safe_rows = max(1, min(int(rows), 100))
         url = f"{self.base_url}/sapi/v1/c2c/orderMatch/listUserOrderHistory"
         params: dict[str, Any] = {
             "tradeType": trade_type,
             "startTimestamp": start_timestamp,
             "endTimestamp": end_timestamp,
             "page": page,
-            "rows": rows,
+            "rows": safe_rows,
             "recvWindow": self.recv_window,
             "timestamp": self.get_synced_timestamp()
         }
         signed_params = self.sign_params(params)
         headers = {"X-MBX-APIKEY": self.api_key}
 
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(url, params=signed_params, headers=headers)
-            self.check_weight(response.headers)
-            raw_data = self._handle_response_errors(response)
-            validated_history = BinanceOrderHistoryResponse.model_validate(raw_data)
-            return cast(BinanceOrderHistoryResponse, validated_history)
+        client = self._get_http_client(timeout=15.0)
+        response = client.get(url, params=signed_params, headers=headers)
+        self.check_weight(response.headers)
+        raw_data = self._handle_response_errors(response)
+        validated_history = BinanceOrderHistoryResponse.model_validate(raw_data)
+        return cast(BinanceOrderHistoryResponse, validated_history)
 
     def create_ad(self, ad_payload: dict[str, Any]) -> dict[str, Any]:
         """Crea un anuncio en Binance P2P."""

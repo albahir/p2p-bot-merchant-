@@ -19,14 +19,15 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, PdfObject
 
-MAX_STATEMENT_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB (extractos largos / escaneados de alta calidad)
+MAX_STATEMENT_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB (extractos mensuales de alto volumen / 250-500 págs)
 MAX_VOUCHER_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB por comprobante individual
 MAX_ORDERS_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB por histórico Excel/CSV de órdenes
 
 MAX_OCR_IMAGE_LONG_EDGE = 32_000  # Soporta capturas largas móviles con desplazamiento (scroll)
 MAX_OCR_IMAGE_PIXELS = 60_000_000  # 60 MP máx. en memoria antes de decodificar (~180 MB RGB máx.)
 
-MAX_PDF_SCAN_OBJECTS = 30_000
+MAX_PDF_SCAN_OBJECTS = 120_000
+MAX_PDF_GUARD_PAGES = 500
 MAX_PDF_SCAN_DEPTH = 32
 MAX_PDF_PAGE_POINT_DIM = 200_000.0
 MAX_PDF_RENDER_PIXELS = 12_000_000.0
@@ -216,7 +217,7 @@ def validate_pdf_safety(file_bytes: bytes) -> None:
 
     _scan_pdf_object_tree(reader)
 
-    for page in reader.pages[:150]:
+    for page in reader.pages[:MAX_PDF_GUARD_PAGES]:
         try:
             box = page.mediabox
             w_pt = abs(float(box.width))
@@ -332,7 +333,7 @@ def validate_xls_safety(file_bytes: bytes) -> Literal["OLE2", "XLSX", "HTML"]:
 class _StdlibHtmlTableParser(HTMLParser):
     """Parser minimalista sin dependencias externas para exportes .xls basados en HTML bancario."""
 
-    def __init__(self, max_rows: int = 5050) -> None:
+    def __init__(self, max_rows: int = 25050) -> None:
         super().__init__(convert_charrefs=True)
         self.max_rows = max_rows
         self.rows: list[list[str]] = []
@@ -365,7 +366,7 @@ class _StdlibHtmlTableParser(HTMLParser):
                 self.rows.append(self._cur_row)
 
 
-def parse_html_table_rows(file_bytes: bytes, max_rows: int = 5050) -> list[list[str]]:
+def parse_html_table_rows(file_bytes: bytes, max_rows: int = 25050) -> list[list[str]]:
     """Extrae filas de tablas HTML exportadas como .xls usando solo html.parser estándar."""
     text = ""
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):

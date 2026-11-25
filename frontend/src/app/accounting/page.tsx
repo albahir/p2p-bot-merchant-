@@ -194,6 +194,14 @@ export default function AccountingPage() {
     "PAGO_MOVIL" | "TRANSFER" | "INTERBANK"
   >("PAGO_MOVIL");
   const [manualOrderLink, setManualOrderLink] = useState<string>("");
+  const [manualDateVet, setManualDateVet] = useState<string>(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate()
+    ).padStart(2, "0")}`;
+  });
+  const [manualAction, setManualAction] = useState<"P2P" | "BANK_FEE" | "INTERNAL_TRANSFER">("P2P");
+  const [manualFeeVes, setManualFeeVes] = useState<string>("");
 
   const [feedback, setFeedback] = useState<{
     type: "success" | "error";
@@ -571,6 +579,20 @@ export default function AccountingPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [periodClosed, showManualModal]);
 
+  // Mantener la fecha del modal manual dentro del mes/año seleccionado
+  useEffect(() => {
+    const pfx = `${year}-${String(month).padStart(2, "0")}`;
+    setManualDateVet((prev) => {
+      if (prev && prev.startsWith(pfx)) return prev;
+      const today = new Date();
+      if (today.getFullYear() === year && today.getMonth() + 1 === month) {
+        return `${pfx}-${String(today.getDate()).padStart(2, "0")}`;
+      }
+      const lastD = new Date(year, month, 0).getDate();
+      return `${pfx}-${String(lastD).padStart(2, "0")}`;
+    });
+  }, [year, month]);
+
   async function handleCreateManualVoucher(e: React.FormEvent) {
     e.preventDefault();
     const amountNum = Number(manualAmountVes);
@@ -585,18 +607,24 @@ export default function AccountingPage() {
     setFeedback(null);
     setSavingManual(true);
     try {
+      const parsedFee = manualFeeVes.trim() !== "" ? Number(manualFeeVes.replace(",", ".")) : undefined;
       const res = await createManualVoucher({
         bank_name: manualBank,
         reference_number: manualRef.trim(),
         amount_ves: amountNum,
-        movement_type: manualMovementType,
+        movement_type: manualAction === "BANK_FEE" ? "DEBIT" : manualMovementType,
         payment_method: manualPaymentMethod,
-        order_number: manualOrderLink.trim() || undefined,
+        order_number: manualAction === "P2P" && manualOrderLink.trim() ? manualOrderLink.trim() : undefined,
+        date_vet: manualDateVet || undefined,
+        action: manualAction,
+        bank_fee_ves: parsedFee !== undefined && !Number.isNaN(parsedFee) && parsedFee >= 0 ? parsedFee : undefined,
       });
       setShowManualModal(false);
       setManualRef("");
       setManualAmountVes(0);
       setManualOrderLink("");
+      setManualFeeVes("");
+      setManualAction("P2P");
       setFeedback({
         type: "success",
         text: `Pago manual #${res.reference_number} (${res.bank_name} • Bs. ${res.amount_ves.toFixed(
@@ -651,10 +679,10 @@ export default function AccountingPage() {
   async function handleUploadStatement(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 25 * 1024 * 1024) {
+    if (file.size > 50 * 1024 * 1024) {
       setFeedback({
         type: "error",
-        text: "El estado de cuenta supera el límite de 25 MB. Divide el período o sube el PDF/captura optimizada.",
+        text: "El estado de cuenta supera el límite de 50 MB. Divide el período o sube el PDF/captura optimizada.",
       });
       if (statementInputRef.current) statementInputRef.current.value = "";
       return;
@@ -1253,26 +1281,26 @@ export default function AccountingPage() {
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => voucherInputRef.current?.click()}
-                disabled={uploadingOcr || periodClosed}
+                onClick={() => statementInputRef.current?.click()}
+                disabled={uploadingStatement || periodClosed}
                 className="px-3 py-2 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px]">
-                  add_photo_alternate
+                  account_balance
                 </span>
-                <span>{uploadingOcr ? "Leyendo..." : "Subir recibo"}</span>
+                <span>{uploadingStatement ? "Analizando..." : "Estado bancario"}</span>
               </button>
 
               <button
                 type="button"
-                onClick={() => statementInputRef.current?.click()}
-                disabled={uploadingStatement || periodClosed}
+                onClick={() => voucherInputRef.current?.click()}
+                disabled={uploadingOcr || periodClosed}
                 className="px-3 py-2 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-slate-200 text-xs font-medium disabled:opacity-50 flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
               >
                 <span className="material-symbols-outlined text-[16px] text-slate-400">
-                  account_balance
+                  add_photo_alternate
                 </span>
-                <span>{uploadingStatement ? "Analizando..." : "Estado bancario"}</span>
+                <span>{uploadingOcr ? "Leyendo..." : "Subir recibo"}</span>
               </button>
 
               <button
@@ -2007,23 +2035,85 @@ export default function AccountingPage() {
                 </div>
               </div>
 
-              <div>
-                <label
-                  htmlFor="manual-order-link"
-                  className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
-                >
-                  Nº Orden Binance P2P (Opcional — si se omite, cruza por monto)
-                </label>
-                <input
-                  id="manual-order-link"
-                  type="text"
-                  autoComplete="off"
-                  enterKeyHint="done"
-                  value={manualOrderLink}
-                  onChange={(e) => setManualOrderLink(e.target.value)}
-                  placeholder="Ej. 20261114000123"
-                  className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white"
-                />
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label
+                    htmlFor="manual-date-vet"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
+                    Fecha (VET) *
+                  </label>
+                  <input
+                    id="manual-date-vet"
+                    type="date"
+                    required
+                    value={manualDateVet}
+                    onChange={(e) => setManualDateVet(e.target.value)}
+                    className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="manual-action"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
+                    Naturaleza contable
+                  </label>
+                  <select
+                    id="manual-action"
+                    value={manualAction}
+                    onChange={(e) =>
+                      setManualAction(
+                        e.target.value as "P2P" | "BANK_FEE" | "INTERNAL_TRANSFER"
+                      )
+                    }
+                    className="w-full px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
+                  >
+                    <option value="P2P">Pago / Cobro P2P</option>
+                    <option value="BANK_FEE">Comisión Bancaria (5.2.01)</option>
+                    <option value="INTERNAL_TRANSFER">Traspaso Propio / Capital</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label
+                    htmlFor="manual-fee-ves"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
+                    Comisión (Bs.) — vacío = auto
+                  </label>
+                  <input
+                    id="manual-fee-ves"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={manualFeeVes}
+                    onChange={(e) => setManualFeeVes(e.target.value)}
+                    placeholder="Auto (0.3% PM/Interb.)"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="manual-order-link"
+                    className="block text-[10px] font-mono uppercase text-slate-300 mb-1"
+                  >
+                    Nº Orden Binance (Opcional)
+                  </label>
+                  <input
+                    id="manual-order-link"
+                    type="text"
+                    autoComplete="off"
+                    enterKeyHint="done"
+                    disabled={manualAction !== "P2P"}
+                    value={manualOrderLink}
+                    onChange={(e) => setManualOrderLink(e.target.value)}
+                    placeholder="Ej. 20261114000123"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-xs font-mono text-white disabled:opacity-45"
+                  />
+                </div>
               </div>
 
               <div className="flex justify-end gap-2 pt-2">

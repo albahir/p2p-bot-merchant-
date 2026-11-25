@@ -198,6 +198,15 @@ export interface FilteredOrderbook {
   recommended_mode: "MAKER" | "TAKER" | "NONE" | string;
   net_profit_ves: number;
   net_profit_usdt: number;
+  total_buy_ads?: number;
+  total_sell_ads?: number;
+  buy_ads_share_pct?: number;
+  sell_ads_share_pct?: number;
+  buy_merchants_count?: number;
+  sell_merchants_count?: number;
+  buy_month_orders_sum?: number;
+  sell_month_orders_sum?: number;
+  market_pressure_label?: string;
   buy_ads: OrderbookAd[];
   sell_ads: OrderbookAd[];
   source: string;
@@ -218,6 +227,7 @@ export interface OrderItem {
   bcv_rate: number;
   order_status: string;
   counterparty_name?: string | null;
+  payment_method?: string | null;
   created_at: string;
 }
 
@@ -555,7 +565,7 @@ export function warmAuthenticatedSession(): void {
     void getSheetsSettings(false).catch(() => {});
     void apiRequest("/api/settings/binance", { priority: "low", cacheTtlMs: 45_000 }).catch(() => {});
     void apiRequest("/api/settings/telegram", { priority: "low", cacheTtlMs: 45_000 }).catch(() => {});
-    void apiRequest("/api/orders?page=1&page_size=20", { priority: "low", cacheTtlMs: 30_000 }).catch(() => {});
+    void apiRequest("/api/orders?page=1&page_size=20&order_status=COMPLETED", { priority: "low", cacheTtlMs: 30_000 }).catch(() => {});
     void apiRequest("/api/fiscal/summary?cost_method=FIFO", { priority: "low", cacheTtlMs: 30_000 }).catch(() => {});
 
     const now = new Date();
@@ -590,7 +600,7 @@ export function prefetchRouteData(href: string): void {
   }
   if (!hasTrader) return;
   if (href === "/orders") {
-    void apiRequest("/api/orders?page=1&page_size=20", { priority: "low" }).catch(() => {});
+    void apiRequest("/api/orders?page=1&page_size=20&order_status=COMPLETED", { priority: "low" }).catch(() => {});
     void apiRequest("/api/fiscal/summary?cost_method=FIFO", { priority: "low" }).catch(() => {});
   } else if (href === "/sheets") {
     void getSheetsSettings(false).catch(() => {});
@@ -672,19 +682,68 @@ export async function getFilteredOrderbook(params: {
   return apiRequest<FilteredOrderbook>(`/api/spreads/orderbook?${query.toString()}`);
 }
 
+export interface SyncOrdersResponse {
+  success: boolean;
+  total_fetched: number;
+  orders_inserted: number;
+  orders_existing: number;
+  orders_updated?: number;
+  cancelled_skipped?: number;
+  reconciled_vouchers?: number;
+  buy_orders: number;
+  sell_orders: number;
+  total_volume_usdt: number;
+  total_volume_fiat: number;
+  effective_days?: number;
+  days_clamped?: boolean;
+  warnings?: string[];
+  message: string;
+}
+
+export type OrderSortBy =
+  | "date_desc"
+  | "date_asc"
+  | "amount_desc"
+  | "amount_asc"
+  | "price_desc"
+  | "price_asc";
+
 // Métodos de órdenes
 export async function getOrders(params: {
   page?: number;
   page_size?: number;
   trade_type?: string;
+  order_status?: string;
+  payment_method?: string;
+  date_from?: string;
+  date_to?: string;
+  min_amount?: number;
+  max_amount?: number;
+  sort_by?: OrderSortBy;
   search?: string;
+  fresh?: boolean;
 }): Promise<OrderListResponse> {
   const query = new URLSearchParams();
   if (params.page) query.set("page", params.page.toString());
   if (params.page_size) query.set("page_size", params.page_size.toString());
   if (params.trade_type) query.set("trade_type", params.trade_type);
+  if (params.order_status) query.set("order_status", params.order_status);
+  if (params.payment_method) query.set("payment_method", params.payment_method);
+  if (params.date_from) query.set("date_from", params.date_from);
+  if (params.date_to) query.set("date_to", params.date_to);
+  if (params.min_amount !== undefined && !Number.isNaN(params.min_amount)) {
+    query.set("min_amount", String(params.min_amount));
+  }
+  if (params.max_amount !== undefined && !Number.isNaN(params.max_amount)) {
+    query.set("max_amount", String(params.max_amount));
+  }
+  if (params.sort_by && params.sort_by !== "date_desc") {
+    query.set("sort_by", params.sort_by);
+  }
   if (params.search) query.set("search", params.search);
-  return apiRequest<OrderListResponse>(`/api/orders?${query.toString()}`);
+  return apiRequest<OrderListResponse>(`/api/orders?${query.toString()}`, {
+    fresh: params.fresh,
+  });
 }
 
 export async function syncOrders(
@@ -692,9 +751,10 @@ export async function syncOrders(
   trade_type?: string,
   year?: number,
   month?: number,
-  start_date?: string | null
-): Promise<any> {
-  return apiRequest("/api/orders/sync", {
+  start_date?: string | null,
+  only_completed = true
+): Promise<SyncOrdersResponse> {
+  return apiRequest<SyncOrdersResponse>("/api/orders/sync", {
     method: "POST",
     body: JSON.stringify({
       days,
@@ -702,6 +762,7 @@ export async function syncOrders(
       year: year ?? undefined,
       month: month ?? undefined,
       start_date: start_date || undefined,
+      only_completed,
     }),
   });
 }
@@ -1596,6 +1657,8 @@ export interface ManualVoucherPayload {
   sender_id?: string;
   bank_fee_ves?: number;
   order_number?: string;
+  date_vet?: string;
+  action?: "P2P" | "BANK_FEE" | "INTERNAL_TRANSFER";
 }
 
 export async function createManualVoucher(
@@ -1842,6 +1905,21 @@ export interface MarketBankCell {
   sustained_high_pc: number | null;
   vol_buy: number;
   vol_sell: number;
+  buy_ads_count?: number;
+  sell_ads_count?: number;
+}
+
+export interface MarketOrderFlow {
+  bank_filter: string;
+  total_buy_ads: number;
+  total_sell_ads: number;
+  buy_ads_share_pct: number;
+  sell_ads_share_pct: number;
+  buy_merchants_count: number;
+  sell_merchants_count: number;
+  buy_month_orders_sum: number;
+  sell_month_orders_sum: number;
+  pressure_label: string;
 }
 
 export interface MarketAnalyticsResponse {
@@ -1850,6 +1928,7 @@ export interface MarketAnalyticsResponse {
   ema5_vs_ema20_pct: number | null;
   brecha_velocity: number | null;
   depth_summary: MarketDepthSummary;
+  order_flow?: MarketOrderFlow;
   vwap_buy: MarketTicketVwap;
   vwap_sell: MarketTicketVwap;
   liquidity_alert: MarketLiquidityAlert;

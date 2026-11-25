@@ -157,15 +157,21 @@ def verify_binance_connection(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[Session, Depends(get_db)],
 ) -> VerifyBinanceResponse:
-    """Realiza un diagnóstico en caliente de la API personal del usuario: ping, deriva horaria y API weight."""
+    """Realiza un diagnóstico en caliente de la API personal del usuario: ping, deriva, firma y permisos C2C reales."""
+    from src.core.binance_client import BinanceAuthError, BinanceP2PClient
+
     factory = sessionmaker(bind=db.get_bind())
     km = ApiKeyManager(master_key=settings.MASTER_ENCRYPTION_KEY, db_session_factory=factory)
     uid = int(_current_user.id) if _current_user and _current_user.id is not None else None
-    k_api, _, _ = _user_binance_key_names(uid)
+    k_api, k_priv, _ = _user_binance_key_names(uid)
     try:
-        api_key = km.get_secret(k_api)
+        api_key = (km.get_secret(k_api) or "").strip()
     except (KeyError, RuntimeError):
         api_key = ""
+    try:
+        private_key = (km.get_secret(k_priv) or "").strip()
+    except (KeyError, RuntimeError):
+        private_key = ""
 
     if not api_key:
         return VerifyBinanceResponse(
@@ -184,11 +190,24 @@ def verify_binance_connection(
     local_before = int(time.time() * 1000)
 
     try:
-        with httpx.Client(timeout=6.0) as client:
+        with httpx.Client(timeout=8.0) as client:
             headers = {"X-MBX-APIKEY": api_key}
             res = client.get("https://api.binance.com/api/v3/time", headers=headers)
             t1 = time.perf_counter()
             latency_ms = round((t1 - t0) * 1000, 2)
+
+            if res.status_code == 451:
+                return VerifyBinanceResponse(
+                    success=False,
+                    is_connected=False,
+                    latency_ms=latency_ms,
+                    clock_drift_ms=0,
+                    used_weight=0,
+                    max_weight=5000,
+                    is_weight_safe=True,
+                    server_time_utc=None,
+                    message="Binance bloqueó la conexión desde la ubicación/IP del servidor (HTTP 451).",
+                )
 
             if res.status_code != 200:
                 return VerifyBinanceResponse(
@@ -200,17 +219,109 @@ def verify_binance_connection(
                     max_weight=5000,
                     is_weight_safe=True,
                     server_time_utc=None,
-                    message=f"Binance respondió con código de estado HTTP {res.status_code}: {res.text}",
+                    message=f"Binance respondió con código de estado HTTP {res.status_code}.",
                 )
 
             data = res.json()
             server_time_ms = int(data.get("serverTime", local_before))
             clock_drift_ms = server_time_ms - local_before
 
-            # Extraer headers de cuota
             weight_header = res.headers.get("x-mbx-used-weight-1m") or res.headers.get("x-mbx-used-weight")
             used_weight = int(weight_header) if weight_header and weight_header.isdigit() else 1
             server_dt = datetime.fromtimestamp(server_time_ms / 1000.0, tz=UTC)
+
+            # Prueba autenticada real contra el endpoint C2C para detectar firma inválida, IP no autorizada o falta de permiso Reading
+            if private_key:
+                signer = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
+                signer.time_offset_ms = clock_drift_ms
+                try:
+                    probe_params = signer.sign_params(
+                        {
+                            "tradeType": "BUY",
+                            "page": 1,
+                            "rows": 1,
+                            "recvWindow": 5000,
+                            "timestamp": signer.get_synced_timestamp(),
+                        }
+                    )
+                except BinanceAuthError as auth_err:
+                    return VerifyBinanceResponse(
+                        success=False,
+                        is_connected=False,
+                        latency_ms=latency_ms,
+                        clock_drift_ms=clock_drift_ms,
+                        used_weight=used_weight,
+                        max_weight=5000,
+                        is_weight_safe=used_weight < 5000,
+                        server_time_utc=server_dt,
+                        message=f"Error en formato de clave privada/secreta: {auth_err}",
+                    )
+
+                auth_res = client.get(
+                    "https://api.binance.com/sapi/v1/c2c/orderMatch/listUserOrderHistory",
+                    params=probe_params,
+                    headers=headers,
+                )
+                auth_weight = auth_res.headers.get("x-mbx-used-weight-1m") or auth_res.headers.get("x-mbx-used-weight")
+                if auth_weight and auth_weight.isdigit():
+                    used_weight = int(auth_weight)
+
+                auth_body: dict[str, object] = {}
+                try:
+                    parsed_auth = auth_res.json()
+                    if isinstance(parsed_auth, dict):
+                        auth_body = parsed_auth
+                except ValueError:
+                    auth_body = {}
+
+                auth_code = str(auth_body.get("code", "000000"))
+                auth_msg = str(auth_body.get("msg") or auth_body.get("message") or "").strip()
+
+                if auth_res.status_code == 451:
+                    return VerifyBinanceResponse(
+                        success=False,
+                        is_connected=False,
+                        latency_ms=latency_ms,
+                        clock_drift_ms=clock_drift_ms,
+                        used_weight=used_weight,
+                        max_weight=5000,
+                        is_weight_safe=used_weight < 5000,
+                        server_time_utc=server_dt,
+                        message="Binance restringió el acceso C2C desde la IP/región del servidor (HTTP 451).",
+                    )
+
+                if auth_res.status_code in (401, 403) or auth_code in ("-2014", "-2015", "-1022", "100001004", "100001005"):
+                    return VerifyBinanceResponse(
+                        success=False,
+                        is_connected=False,
+                        latency_ms=latency_ms,
+                        clock_drift_ms=clock_drift_ms,
+                        used_weight=used_weight,
+                        max_weight=5000,
+                        is_weight_safe=used_weight < 5000,
+                        server_time_utc=server_dt,
+                        message=(
+                            "Binance rechazó la autenticación de tu API Key "
+                            f"({auth_code or auth_res.status_code}). Verifica la clave secreta/firma, "
+                            "el permiso 'Enable Reading' y la Whitelist de IP en Binance."
+                        ),
+                    )
+
+                if auth_res.status_code >= 400 or auth_code not in ("000000", "0", "200"):
+                    return VerifyBinanceResponse(
+                        success=False,
+                        is_connected=False,
+                        latency_ms=latency_ms,
+                        clock_drift_ms=clock_drift_ms,
+                        used_weight=used_weight,
+                        max_weight=5000,
+                        is_weight_safe=used_weight < 5000,
+                        server_time_utc=server_dt,
+                        message=(
+                            f"Error de permisos/consulta en Binance C2C [{auth_code or auth_res.status_code}]: "
+                            f"{auth_msg or 'Revisa permisos de lectura de tu API Key.'}"
+                        ),
+                    )
 
             is_safe = used_weight < 5000
 
@@ -224,7 +335,7 @@ def verify_binance_connection(
                 is_weight_safe=is_safe,
                 server_time_utc=server_dt,
                 message=(
-                    f"Conexión Binance 100% activa. Latencia: {latency_ms}ms, "
+                    f"Conexión Binance 100% activa (firma y lectura P2P verificadas). Latencia: {latency_ms}ms, "
                     f"Deriva: {clock_drift_ms}ms, Peso API: {used_weight}/5000."
                 ),
             )
@@ -238,7 +349,7 @@ def verify_binance_connection(
             max_weight=5000,
             is_weight_safe=True,
             server_time_utc=None,
-            message="Tiempo de espera agotado al conectar con Binance API (Timeout de 6s).",
+            message="Tiempo de espera agotado al conectar con Binance API (Timeout de 8s).",
         )
     except (httpx.RequestError, ValueError, OSError) as exc:
         logger.warning("Error verificando conexión con Binance: %s", exc)

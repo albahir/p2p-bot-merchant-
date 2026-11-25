@@ -3,6 +3,7 @@
 from datetime import date, datetime
 from typing import Any, cast
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from src.data.models import (
@@ -77,13 +78,28 @@ class OrderRepository:
         end_date: datetime | None = None,
         search: str | None = None,
         user_id: int | None = None,
+        payment_method: str | None = None,
+        min_amount: float | None = None,
+        max_amount: float | None = None,
+        sort_by: str = "date_desc",
     ) -> tuple[int, list[Order]]:
         uid = user_id if user_id is not None else self.user_id
         query = _apply_user_scope(self.db, self.db.query(Order), Order, uid)
         if trade_type:
             query = query.filter(Order.trade_type == trade_type.upper())
         if order_status:
-            query = query.filter(Order.order_status == order_status.upper())
+            norm_status = order_status.strip().upper()
+            if norm_status == "CANCELLED":
+                query = query.filter(Order.order_status.in_(["CANCELLED", "CANCELLED_BY_SYSTEM"]))
+            else:
+                query = query.filter(Order.order_status == norm_status)
+        if payment_method and payment_method.strip():
+            pm_pattern = f"%{payment_method.strip()}%"
+            query = query.filter(Order.payment_method.ilike(pm_pattern))
+        if min_amount is not None:
+            query = query.filter(Order.crypto_amount >= float(min_amount))  # type: ignore[arg-type]
+        if max_amount is not None:
+            query = query.filter(Order.crypto_amount <= float(max_amount))  # type: ignore[arg-type]
         if start_date:
             query = query.filter(Order.created_at >= start_date)  # type: ignore[arg-type]
         if end_date:
@@ -91,10 +107,21 @@ class OrderRepository:
         if search:
             s = f"%{search}%"
             query = query.filter(
-                (Order.order_number.like(s)) | (Order.counterparty_name.like(s))
+                (Order.order_number.ilike(s))
+                | (Order.counterparty_name.ilike(s))
+                | (Order.payment_method.ilike(s))
             )
         total = query.count()
-        items = query.order_by(Order.created_at.desc()).offset(skip).limit(limit).all()
+        sort_map = {
+            "date_desc": Order.created_at.desc(),
+            "date_asc": Order.created_at.asc(),
+            "amount_desc": Order.crypto_amount.desc(),
+            "amount_asc": Order.crypto_amount.asc(),
+            "price_desc": Order.unit_price.desc(),
+            "price_asc": Order.unit_price.asc(),
+        }
+        order_clause = sort_map.get(sort_by, Order.created_at.desc())
+        items = query.order_by(order_clause, Order.id.desc()).offset(skip).limit(limit).all()
         return total, items
 
 
@@ -205,12 +232,15 @@ class BankVoucherRepository:
         self.db = db
         self.user_id = user_id
 
-    def create(self, voucher: BankVoucher) -> BankVoucher:
+    def create(self, voucher: BankVoucher, auto_commit: bool = True) -> BankVoucher:
         if voucher.user_id is None and self.user_id is not None:
             voucher.user_id = self.user_id  # type: ignore[assignment]
         self.db.add(voucher)
-        self.db.commit()
-        self.db.refresh(voucher)
+        if auto_commit:
+            self.db.commit()
+            self.db.refresh(voucher)
+        else:
+            self.db.flush()
         return voucher
 
     def get_by_reference(self, reference_number: str, user_id: int | None = None) -> BankVoucher | None:
@@ -250,6 +280,40 @@ class BankVoucherRepository:
         uid = user_id if user_id is not None else self.user_id
         q = _apply_user_scope(self.db, self.db.query(BankVoucher), BankVoucher, uid)
         return q.order_by(BankVoucher.created_at.desc()).limit(limit).all()
+
+    def list_associated_order_numbers(self, user_id: int | None = None) -> set[str]:
+        """Retorna el conjunto completo de órdenes ya conciliadas del usuario sin truncar por límite de filas."""
+        uid = user_id if user_id is not None else self.user_id
+        q: Any = self.db.query(BankVoucher.associated_order_number).filter(
+            cast(Any, BankVoucher.associated_order_number).is_not(None)
+        )
+        q = _apply_user_scope(self.db, q, BankVoucher, uid)
+        return {str(row[0]) for row in q.distinct().all() if row[0]}
+
+    def list_by_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        user_id: int | None = None,
+    ) -> list[BankVoucher]:
+        """Retorna todos los comprobantes del usuario dentro de una ventana temporal (sin límite arbitrario)."""
+        uid = user_id if user_id is not None else self.user_id
+        q = self.db.query(BankVoucher).filter(
+            or_(
+                and_(
+                    cast(Any, BankVoucher.voucher_date).is_not(None),
+                    cast(Any, BankVoucher.voucher_date >= start_date),
+                    cast(Any, BankVoucher.voucher_date <= end_date),
+                ),
+                and_(
+                    cast(Any, BankVoucher.voucher_date).is_(None),
+                    cast(Any, BankVoucher.created_at >= start_date),
+                    cast(Any, BankVoucher.created_at <= end_date),
+                ),
+            )
+        )
+        q = _apply_user_scope(self.db, q, BankVoucher, uid)
+        return q.order_by(BankVoucher.created_at.desc()).all()
 
 
 class FiscalSnapshotRepository:
@@ -546,13 +610,14 @@ class JournalEntryRepository:
         self.db = db
         self.user_id = user_id
 
-    def create_entry(self, entry: JournalEntry) -> JournalEntry:
+    def create_entry(self, entry: JournalEntry, auto_commit: bool = True) -> JournalEntry:
         """Persiste un asiento contable en el Libro Diario."""
         if entry.user_id is None and self.user_id is not None:
             entry.user_id = self.user_id  # type: ignore[assignment]
         self.db.add(entry)
-        self.db.commit()
-        self.db.refresh(entry)
+        if auto_commit:
+            self.db.commit()
+            self.db.refresh(entry)
         return entry
 
     def get_next_entry_number(self, user_id: int | None = None) -> int:

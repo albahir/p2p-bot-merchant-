@@ -145,6 +145,22 @@ class BankHourCellOut(BaseModel):
     sustained_high_pc: float | None = None
     vol_buy: float
     vol_sell: float
+    buy_ads_count: int = 0
+    sell_ads_count: int = 0
+
+
+class MarketOrderFlowOut(BaseModel):
+    """Conteo en vivo de anuncios/órdenes Compra vs Venta para el banco seleccionado."""
+    bank_filter: str
+    total_buy_ads: int
+    total_sell_ads: int
+    buy_ads_share_pct: float
+    sell_ads_share_pct: float
+    buy_merchants_count: int
+    sell_merchants_count: int
+    buy_month_orders_sum: int
+    sell_month_orders_sum: int
+    pressure_label: str
 
 
 class MarketAnalyticsResponse(BaseModel):
@@ -153,6 +169,7 @@ class MarketAnalyticsResponse(BaseModel):
     ema5_vs_ema20_pct: float | None = None
     brecha_velocity: float | None = None
     depth_summary: DepthSummaryOut
+    order_flow: MarketOrderFlowOut
     vwap_buy: TicketVwapOut
     vwap_sell: TicketVwapOut
     liquidity_alert: LiquidityAlertOut
@@ -426,6 +443,7 @@ def get_market_analytics(
     mapped_bank = "Todos" if not bank or bank.strip() in ("*", "Todos") else bank.strip()
     buy_ads: list[dict[str, Any]] = []
     sell_ads: list[dict[str, Any]] = []
+    book: dict[str, Any] = {}
     live_p2p_buy = 0.0
     live_p2p_sell = 0.0
 
@@ -536,8 +554,69 @@ def get_market_analytics(
                 sustained_high_pc=sustained_map.get(b_name),
                 vol_buy=st["vol_buy"],
                 vol_sell=st["vol_sell"],
+                buy_ads_count=int(st.get("buy_ads_count") or 0),
+                sell_ads_count=int(st.get("sell_ads_count") or 0),
             )
         )
+
+    total_buy_ads = int(book.get("total_buy_ads") or len(buy_ads))
+    total_sell_ads = int(book.get("total_sell_ads") or len(sell_ads))
+    tot_flow = total_buy_ads + total_sell_ads
+    buy_share = (
+        float(book["buy_ads_share_pct"])
+        if "buy_ads_share_pct" in book
+        else (round((total_buy_ads / tot_flow) * 100.0, 1) if tot_flow > 0 else 50.0)
+    )
+    sell_share = (
+        float(book["sell_ads_share_pct"])
+        if "sell_ads_share_pct" in book
+        else (round(100.0 - buy_share, 1) if tot_flow > 0 else 50.0)
+    )
+    buy_merchants = int(
+        book["buy_merchants_count"]
+        if book.get("buy_merchants_count") is not None
+        else sum(1 for a in buy_ads if a.get("is_merchant"))
+    )
+    sell_merchants = int(
+        book["sell_merchants_count"]
+        if book.get("sell_merchants_count") is not None
+        else sum(1 for a in sell_ads if a.get("is_merchant"))
+    )
+    buy_m_orders = int(
+        book["buy_month_orders_sum"]
+        if book.get("buy_month_orders_sum") is not None
+        else sum(int(a.get("month_orders") or 0) for a in buy_ads)
+    )
+    sell_m_orders = int(
+        book["sell_month_orders_sum"]
+        if book.get("sell_month_orders_sum") is not None
+        else sum(int(a.get("month_orders") or 0) for a in sell_ads)
+    )
+    default_pressure = (
+        "Sin anuncios activos para este banco"
+        if tot_flow == 0
+        else (
+            f"Mayor demanda de compra ({sell_share:.0f}% Venta vs {buy_share:.0f}% Compra)"
+            if sell_share >= 58.0
+            else (
+                f"Mayor oferta disponible ({buy_share:.0f}% Compra vs {sell_share:.0f}% Venta)"
+                if buy_share >= 58.0
+                else f"Libro equilibrado ({buy_share:.0f}% Compra · {sell_share:.0f}% Venta)"
+            )
+        )
+    )
+    order_flow = MarketOrderFlowOut(
+        bank_filter=mapped_bank,
+        total_buy_ads=total_buy_ads,
+        total_sell_ads=total_sell_ads,
+        buy_ads_share_pct=buy_share,
+        sell_ads_share_pct=sell_share,
+        buy_merchants_count=buy_merchants,
+        sell_merchants_count=sell_merchants,
+        buy_month_orders_sum=buy_m_orders,
+        sell_month_orders_sum=sell_m_orders,
+        pressure_label=str(book.get("market_pressure_label") or default_pressure),
+    )
 
     if maturity["days_count"] < MIN_PREDICTION_DAYS:
         warnings.append(
@@ -562,6 +641,7 @@ def get_market_analytics(
             top20=DepthBucketOut(**depth_dict["top20"]),
             imbalance=float(depth_dict["imbalance"]),
         ),
+        order_flow=order_flow,
         vwap_buy=TicketVwapOut(**vwap_buy_dict),
         vwap_sell=TicketVwapOut(**vwap_sell_dict),
         liquidity_alert=LiquidityAlertOut(**liq_alert),

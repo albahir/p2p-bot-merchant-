@@ -22,6 +22,7 @@ class OrderItemResponse(BaseModel):
     bcv_rate: float
     order_status: str
     counterparty_name: str | None = None
+    payment_method: str | None = None
     created_at: datetime
 
 
@@ -40,6 +41,10 @@ class SyncOrdersRequest(BaseModel):
     year: int | None = Field(default=None, ge=2020, le=2100)
     month: int | None = Field(default=None, ge=1, le=12)
     start_date: str | None = Field(default=None, description="Fecha opcional de corte YYYY-MM-DD dentro del mes")
+    only_completed: bool = Field(
+        default=True,
+        description="Si es True (recomendado), omite órdenes canceladas/expiradas para mantener limpia la conciliación",
+    )
 
 
 class SyncOrdersResponse(BaseModel):
@@ -48,8 +53,14 @@ class SyncOrdersResponse(BaseModel):
     total_fetched: int
     orders_inserted: int
     orders_existing: int
+    orders_updated: int = 0
+    cancelled_skipped: int = 0
+    reconciled_vouchers: int = 0
     buy_orders: int
     sell_orders: int
     total_volume_usdt: float
     total_volume_fiat: float
+    effective_days: int = 0
+    days_clamped: bool = False
+    warnings: list[str] = Field(default_factory=list)
     message: str

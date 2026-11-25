@@ -623,6 +623,79 @@ export default function MarketPage() {
               </p>
             </div>
 
+            {/* Conteo de Órdenes / Anuncios Compra vs Venta por Banco */}
+            <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-100">
+                    Órdenes Compra vs Venta
+                  </h2>
+                  <div className="text-[11px] font-mono text-amber-300/90 mt-0.5">
+                    Banco: {analytics?.order_flow?.bank_filter || (bank === "*" ? "Todos" : bank)}
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 tabular-nums">
+                  {((analytics?.order_flow?.total_buy_ads ?? 0) + (analytics?.order_flow?.total_sell_ads ?? 0)).toLocaleString("es-VE")} activos
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div className="rounded-lg border border-sky-500/25 bg-sky-500/5 p-3">
+                  <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                    <span>COMPRA (Oferta)</span>
+                    <span className="text-sky-400 font-bold">
+                      {analytics?.order_flow ? `${analytics.order_flow.buy_ads_share_pct.toFixed(0)}%` : "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xl font-mono font-bold text-sky-400 tabular-nums">
+                    {analytics?.order_flow ? analytics.order_flow.total_buy_ads.toLocaleString("es-VE") : "—"}
+                  </div>
+                  <div className="mt-0.5 text-[10px] font-mono text-slate-400 tabular-nums">
+                    {analytics?.order_flow
+                      ? `${analytics.order_flow.buy_merchants_count} verif. · ${analytics.order_flow.buy_month_orders_sum.toLocaleString("es-VE")} órds/mes`
+                      : "—"}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
+                  <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                    <span>VENTA (Demanda)</span>
+                    <span className="text-emerald-400 font-bold">
+                      {analytics?.order_flow ? `${analytics.order_flow.sell_ads_share_pct.toFixed(0)}%` : "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xl font-mono font-bold text-emerald-400 tabular-nums">
+                    {analytics?.order_flow ? analytics.order_flow.total_sell_ads.toLocaleString("es-VE") : "—"}
+                  </div>
+                  <div className="mt-0.5 text-[10px] font-mono text-slate-400 tabular-nums">
+                    {analytics?.order_flow
+                      ? `${analytics.order_flow.sell_merchants_count} verif. · ${analytics.order_flow.sell_month_orders_sum.toLocaleString("es-VE")} órds/mes`
+                      : "—"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="h-2.5 w-full rounded-full bg-slate-800 overflow-hidden flex">
+                  <div
+                    className="h-full bg-sky-400/85 transition-all"
+                    style={{
+                      width: `${analytics?.order_flow?.buy_ads_share_pct ?? 50}%`,
+                    }}
+                  />
+                  <div
+                    className="h-full bg-emerald-400/85 transition-all"
+                    style={{
+                      width: `${analytics?.order_flow?.sell_ads_share_pct ?? 50}%`,
+                    }}
+                  />
+                </div>
+                <div className="text-[11px] font-mono text-slate-300">
+                  {analytics?.order_flow?.pressure_label || "Consultando comportamiento del libro..."}
+                </div>
+              </div>
+            </div>
+
             {/* Dinero Disponible en el Libro */}
             <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-4 space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -763,7 +836,7 @@ export default function MarketPage() {
                       {row.bank}
                     </span>
                     <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0">
-                      Liq: {fmtNum(row.vol_buy + row.vol_sell, 0)} USDT
+                      C:{row.buy_ads_count ?? 0} · V:{row.sell_ads_count ?? 0} · {fmtNum(row.vol_buy + row.vol_sell, 0)} U
                     </span>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
@@ -801,13 +874,14 @@ export default function MarketPage() {
                     Techo firme (1h)
                   </th>
                   <th className="py-2 px-2 text-right font-medium">Si compras USDT</th>
+                  <th className="py-2 px-2 text-right font-medium">Anuncios (C / V)</th>
                   <th className="py-2 pl-2 text-right font-medium">Liquidez USDT</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
                 {(analytics?.banks_snapshot ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-4 text-center text-slate-500">
+                    <td colSpan={7} className="py-4 text-center text-slate-500">
                       Sin desglose bancario activo todavía.
                     </td>
                   </tr>
@@ -830,6 +904,11 @@ export default function MarketPage() {
                         {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
                       </td>
                       <td className="py-2 px-2 text-right text-sky-400">{fmtNum(row.buy_best)} Bs</td>
+                      <td className="py-2 px-2 text-right">
+                        <span className="text-sky-400">{row.buy_ads_count ?? 0}</span>
+                        <span className="text-slate-600"> / </span>
+                        <span className="text-emerald-400">{row.sell_ads_count ?? 0}</span>
+                      </td>
                       <td className="py-2 pl-2 text-right text-slate-300">
                         {fmtNum(row.vol_buy + row.vol_sell, 0)}
                       </td>

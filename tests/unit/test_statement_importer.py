@@ -735,7 +735,7 @@ def test_parse_pdf_over_60_pages_not_truncated_and_chunked_ai_fallback():
     assert preview.balance_verified is True
     assert not any("primeras 60" in w.lower() for w in preview.warnings)
 
-    # Scanned 6-page PDF without text -> Gemini batching (4 pages + 2 pages = 2 API calls)
+    # Scanned 6-page PDF without text -> Gemini batching (2 + 2 + 2 pages = 3 API calls para no truncar salidas densas)
     from unittest.mock import MagicMock
 
     from src.integrations.ai_assistant import AIKeyPool
@@ -779,8 +779,26 @@ def test_parse_pdf_over_60_pages_not_truncated_and_chunked_ai_fallback():
             }
         ]
     }
+    resp3 = MagicMock()
+    resp3.status_code = 200
+    resp3.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                '[{"date": "2026-11-03", "reference": "100003", '
+                                '"concept": "ABONO LOTE 3", "debit": 0.0, "credit": 100.0, "balance": 1850.0}]'
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
     mock_client = MagicMock()
-    mock_client.post.side_effect = [resp1, resp2]
+    mock_client.post.side_effect = [resp1, resp2, resp3]
 
     ai_importer = BankStatementImporter(
         key_pool=AIKeyPool(["AIzaFakeRealTestKey12345"]),
@@ -793,9 +811,9 @@ def test_parse_pdf_over_60_pages_not_truncated_and_chunked_ai_fallback():
     )
 
     assert ai_preview.extraction_method == "PDF_AI_FALLBACK"
-    assert ai_preview.total_rows == 2
+    assert ai_preview.total_rows == 3
     assert ai_preview.balance_verified is True
-    assert mock_client.post.call_count == 2
+    assert mock_client.post.call_count == 3
 
 
 def test_parse_banesco_split_panel_day_only_negative_balance_and_cheques_table():

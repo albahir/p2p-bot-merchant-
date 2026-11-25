@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { BankAmountInput } from "@/components/bank-amount-input";
+import { BinanceTierBadge } from "@/components/binance-tier-badge";
 import {
   ArbitrageMatrix,
   BCVRates,
@@ -13,9 +14,40 @@ import {
   getBCVRates,
   getCachedApiResponse,
 } from "@/lib/api";
+import {
+  BankTransferType,
+  DEFAULT_VES_BASE_MAKER_FEE_PCT,
+  LEGACY_BASE_MAKER_FEE_PCT,
+  MERCHANT_TIERS,
+  MerchantTier,
+  OrderRole,
+  calculateP2PCycle,
+  compareMerchantTiers,
+  formatFeePct,
+  getMerchantTierConfig,
+} from "@/lib/p2p-calculator";
 
-type OrderRole = "MAKER" | "TAKER";
-type BankTransferType = "SAME_BANK" | "INTERBANK_PM";
+const STORAGE_TIER_KEY = "p2p_calc_merchant_tier";
+const STORAGE_BASE_FEE_KEY = "p2p_calc_base_maker_pct";
+const STORAGE_CUSTOM_FEE_KEY = "p2p_calc_custom_maker_pct";
+
+function getTierBadgeClasses(tier: MerchantTier, active: boolean): string {
+  if (!active) {
+    return "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white hover:border-slate-600";
+  }
+  switch (tier) {
+    case "BRONZE":
+      return "bg-amber-700/25 border-amber-500/70 text-amber-200 font-bold";
+    case "SILVER":
+      return "bg-slate-400/20 border-slate-300/70 text-white font-bold";
+    case "GOLD":
+      return "bg-yellow-500/20 border-yellow-400/80 text-yellow-200 font-bold";
+    case "CUSTOM":
+      return "bg-secondary/20 border-secondary/70 text-secondary font-bold";
+    default:
+      return "bg-primary-container/20 border-primary-container text-primary font-bold";
+  }
+}
 
 function CalculatorContent() {
   const searchParams = useSearchParams();
@@ -36,6 +68,13 @@ function CalculatorContent() {
     Number(searchParams.get("sellRate")) || 0
   );
 
+  const [merchantTier, setMerchantTier] = useState<MerchantTier>("STANDARD");
+  const [baseMakerFeePct, setBaseMakerFeePct] = useState<number>(
+    DEFAULT_VES_BASE_MAKER_FEE_PCT
+  );
+  const [customMakerFeePct, setCustomMakerFeePct] = useState<number>(
+    DEFAULT_VES_BASE_MAKER_FEE_PCT
+  );
   const [buyRole, setBuyRole] = useState<OrderRole>("MAKER");
   const [sellRole, setSellRole] = useState<OrderRole>("MAKER");
   const [bankTransferType, setBankTransferType] = useState<BankTransferType>(
@@ -46,6 +85,46 @@ function CalculatorContent() {
       : "INTERBANK_PM"
   );
   const [cyclesPerDay, setCyclesPerDay] = useState<number>(3);
+
+  // Restaurar nivel VIP de comerciante guardado en el navegador
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const savedTier = localStorage.getItem(STORAGE_TIER_KEY) as MerchantTier | null;
+    if (savedTier && MERCHANT_TIERS.some((t) => t.id === savedTier)) {
+      setMerchantTier(savedTier);
+    }
+    const savedBase = Number(localStorage.getItem(STORAGE_BASE_FEE_KEY));
+    if (Number.isFinite(savedBase) && savedBase > 0 && savedBase <= 5) {
+      setBaseMakerFeePct(savedBase);
+    }
+    const savedCustom = Number(localStorage.getItem(STORAGE_CUSTOM_FEE_KEY));
+    if (Number.isFinite(savedCustom) && savedCustom >= 0 && savedCustom <= 5) {
+      setCustomMakerFeePct(savedCustom);
+    }
+  }, []);
+
+  function handleSelectTier(nextTier: MerchantTier) {
+    setMerchantTier(nextTier);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(STORAGE_TIER_KEY, nextTier);
+    }
+  }
+
+  function handleSelectBaseFee(nextBase: number) {
+    setBaseMakerFeePct(nextBase);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(STORAGE_BASE_FEE_KEY, String(nextBase));
+    }
+  }
+
+  function handleChangeCustomFee(rawVal: string) {
+    const parsed = Number(rawVal.replace(",", "."));
+    const safe = Number.isFinite(parsed) ? Math.min(5, Math.max(0, parsed)) : 0;
+    setCustomMakerFeePct(safe);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(STORAGE_CUSTOM_FEE_KEY, String(safe));
+    }
+  }
 
   const initialMatrix =
     typeof window !== "undefined"
@@ -107,79 +186,67 @@ function CalculatorContent() {
     setBankTransferType(buyBank === name ? "SAME_BANK" : "INTERBANK_PM");
   }
 
-  // Motor matemático exacto de ciclo P2P en Binance
-  const simulation = useMemo(() => {
-    const validCapital = Math.max(0, capitalUsdt || 0);
-    const validBuy = Math.max(0.01, buyRate || 0.01);
-    const validSell = Math.max(0.01, sellRate || 0.01);
+  // Motor matemático exacto de ciclo P2P en Binance con niveles VIP de comerciante
+  const simulation = useMemo(
+    () =>
+      calculateP2PCycle({
+        capitalUsdt,
+        buyRate,
+        sellRate,
+        buyRole,
+        sellRole,
+        bankTransferType,
+        merchantTier,
+        baseMakerFeePct,
+        customMakerFeePct,
+        cyclesPerDay,
+        bcvUsd: bcv?.usd || 0,
+      }),
+    [
+      capitalUsdt,
+      buyRate,
+      sellRate,
+      buyRole,
+      sellRole,
+      bankTransferType,
+      merchantTier,
+      baseMakerFeePct,
+      customMakerFeePct,
+      cyclesPerDay,
+      bcv,
+    ]
+  );
 
-    const buyBinanceFeeRate = buyRole === "MAKER" ? 0.0005 : 0.0; // En Binance P2P Venezuela: Maker suele pagar fee fijo/0.05%-0.10% o Taker 0.00-0.10%; usamos estándar explícito seleccionado por usuario:
-    // Nota: permitimos control explícito Maker 0.00% vs Taker 0.10% como solicitó el operador
-    void buyBinanceFeeRate;
+  const tierComparison = useMemo(
+    () =>
+      compareMerchantTiers({
+        capitalUsdt,
+        buyRate,
+        sellRate,
+        buyRole,
+        sellRole,
+        bankTransferType,
+        baseMakerFeePct,
+        customMakerFeePct,
+        cyclesPerDay,
+        bcvUsd: bcv?.usd || 0,
+      }),
+    [
+      capitalUsdt,
+      buyRate,
+      sellRate,
+      buyRole,
+      sellRole,
+      bankTransferType,
+      baseMakerFeePct,
+      customMakerFeePct,
+      cyclesPerDay,
+      bcv,
+    ]
+  );
 
-    const leg1FeePct = buyRole === "MAKER" ? 0 : 0.001; // Maker 0.00% | Taker 0.10%
-    const leg2FeePct = sellRole === "MAKER" ? 0 : 0.001;
-    const bankFeePct = bankTransferType === "SAME_BANK" ? 0 : 0.003; // 0.30% Pago Móvil / Interbancario
-
-    // Paso 1: Desembolso VES para comprar `validCapital` USDT brutos
-    const baseVesIn = validCapital * validBuy;
-    const bankFeeVes = baseVesIn * bankFeePct;
-    const totalVesInvested = baseVesIn + bankFeeVes;
-
-    // USDT netos acreditados tras comisión de pierna 1
-    const usdtAfterBuyFee = validCapital * (1 - leg1FeePct);
-    const buyFeeUsdt = validCapital - usdtAfterBuyFee;
-
-    // Punto de equilibrio (Break-Even en Bs/USDT para no perder dinero en Pierna 2)
-    const breakEvenSellRate =
-      usdtAfterBuyFee * (1 - leg2FeePct) > 0
-        ? totalVesInvested / (usdtAfterBuyFee * (1 - leg2FeePct))
-        : 0;
-
-    // Paso 3: Liquidación de USDT netos a Bolívares en `sellBank`
-    const usdtSoldEffective = usdtAfterBuyFee * (1 - leg2FeePct);
-    const sellFeeUsdt = usdtAfterBuyFee - usdtSoldEffective;
-    const grossVesOut = usdtSoldEffective * validSell;
-
-    const netProfitVes = grossVesOut - totalVesInvested;
-    const netProfitUsdt = validSell > 0 ? netProfitVes / validSell : 0;
-    const bcvUsd = bcv?.usd || 0;
-    const netProfitBcvUsd = bcvUsd > 0 ? netProfitVes / bcvUsd : 0;
-    const netRoiPct =
-      totalVesInvested > 0 ? (netProfitVes / totalVesInvested) * 100 : 0;
-
-    // Proyecciones multiciclo (interés simple vs compuesto diario)
-    const dailyProfitUsdt = netProfitUsdt * cyclesPerDay;
-    const dailyProfitVes = netProfitVes * cyclesPerDay;
-    const weeklyProfitUsdt = dailyProfitUsdt * 6;
-    const monthlyProfitUsdt = dailyProfitUsdt * 26;
-
-    const compoundFactor =
-      netRoiPct > -99
-        ? Math.pow(1 + netRoiPct / 100, cyclesPerDay) - 1
-        : 0;
-    const compoundDailyUsdt = validCapital * compoundFactor;
-
-    return {
-      totalVesInvested,
-      bankFeeVes,
-      usdtAfterBuyFee,
-      buyFeeUsdt,
-      sellFeeUsdt,
-      breakEvenSellRate,
-      grossVesOut,
-      netProfitVes,
-      netProfitUsdt,
-      netProfitBcvUsd,
-      netRoiPct,
-      dailyProfitUsdt,
-      dailyProfitVes,
-      weeklyProfitUsdt,
-      monthlyProfitUsdt,
-      compoundDailyUsdt,
-    };
-  }, [capitalUsdt, buyRate, sellRate, buyRole, sellRole, bankTransferType, cyclesPerDay, bcv]);
-
+  const activeTierConfig = getMerchantTierConfig(merchantTier);
+  const formattedMakerFee = formatFeePct(simulation.effectiveMakerFeePct);
   const isProfitable = simulation.netProfitVes > 0;
 
   return (
@@ -361,34 +428,125 @@ function CalculatorContent() {
               </div>
             </div>
 
+            {/* Nivel de Comerciante Binance P2P (Descuentos VIP sobre Comisión Maker) */}
+            <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-2.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <label className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-semibold flex items-center gap-1.5">
+                  <span className="material-symbols-outlined text-[15px] text-primary">
+                    workspace_premium
+                  </span>
+                  Nivel Comerciante Binance
+                </label>
+                <span className="text-[10px] font-mono text-primary font-semibold">
+                  Maker: {formattedMakerFee} • Taker: 0%
+                </span>
+              </div>
+
+              <div className="grid grid-cols-5 gap-1.5">
+                {MERCHANT_TIERS.map((tier) => {
+                  const active = merchantTier === tier.id;
+                  return (
+                    <button
+                      key={tier.id}
+                      type="button"
+                      onClick={() => handleSelectTier(tier.id)}
+                      title={`${tier.label} — ${tier.requirementHint}`}
+                      aria-label={`${tier.label}: ${tier.requirementHint}`}
+                      aria-pressed={active}
+                      className={`py-2 px-1 rounded-lg border flex flex-col items-center justify-center gap-1 transition-all cursor-pointer ${getTierBadgeClasses(
+                        tier.id,
+                        active
+                      )}`}
+                    >
+                      <BinanceTierBadge tier={tier.id} size={24} />
+                      <span className="text-[9px] font-mono leading-none opacity-90">
+                        {tier.id === "CUSTOM"
+                          ? "%"
+                          : tier.discountPct > 0
+                          ? `-${tier.discountPct}%`
+                          : "0%"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {merchantTier === "CUSTOM" ? (
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <label
+                    htmlFor="calc-custom-maker-fee"
+                    className="text-[11px] text-slate-400"
+                  >
+                    Comisión Maker exacta (%):
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      id="calc-custom-maker-fee"
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.005}
+                      value={customMakerFeePct}
+                      onChange={(e) => handleChangeCustomFee(e.target.value)}
+                      className="w-24 px-2.5 py-1 rounded-md bg-surface-container-lowest border border-[#1e2430] focus:border-secondary focus:outline-hidden text-xs font-mono font-bold text-white text-right tabular-nums"
+                    />
+                    <span className="text-xs font-mono text-slate-400">%</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2 flex-wrap pt-0.5 text-[10px] font-mono text-slate-400">
+                  <span>{activeTierConfig.requirementHint}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-500">Base:</span>
+                    {[DEFAULT_VES_BASE_MAKER_FEE_PCT, LEGACY_BASE_MAKER_FEE_PCT].map(
+                      (baseOpt) => (
+                        <button
+                          key={baseOpt}
+                          type="button"
+                          onClick={() => handleSelectBaseFee(baseOpt)}
+                          className={`px-1.5 py-0.5 rounded border transition-colors cursor-pointer ${
+                            baseMakerFeePct === baseOpt
+                              ? "bg-surface-container-high border-primary-container/60 text-white font-semibold"
+                              : "border-[#1e2430] text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          {formatFeePct(baseOpt)}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Pierna 1: Compra de USDT */}
             <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-bold text-white">
                   1. Ruta de Entrada (Compra USDT)
                 </span>
-                <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono">
+                <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono shrink-0">
                   <button
                     type="button"
                     onClick={() => setBuyRole("MAKER")}
-                    className={`px-2 py-0.5 rounded ${
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
                       buyRole === "MAKER"
-                        ? "bg-tertiary text-on-tertiary font-bold"
-                        : "text-slate-400"
+                        ? "bg-primary-container text-on-primary font-bold"
+                        : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Anuncio 0%
+                    Anuncio {formattedMakerFee}
                   </button>
                   <button
                     type="button"
                     onClick={() => setBuyRole("TAKER")}
-                    className={`px-2 py-0.5 rounded ${
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
                       buyRole === "TAKER"
-                        ? "bg-primary-container text-on-primary font-bold"
-                        : "text-slate-400"
+                        ? "bg-tertiary text-on-tertiary font-bold"
+                        : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Directo 0,1%
+                    Directo 0%
                   </button>
                 </div>
               </div>
@@ -443,32 +601,32 @@ function CalculatorContent() {
 
             {/* Pierna 2: Venta de USDT */}
             <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-bold text-white">
                   2. Ruta de Salida (Venta USDT)
                 </span>
-                <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono">
+                <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono shrink-0">
                   <button
                     type="button"
                     onClick={() => setSellRole("MAKER")}
-                    className={`px-2 py-0.5 rounded ${
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
                       sellRole === "MAKER"
-                        ? "bg-tertiary text-on-tertiary font-bold"
-                        : "text-slate-400"
+                        ? "bg-primary-container text-on-primary font-bold"
+                        : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Anuncio 0%
+                    Anuncio {formattedMakerFee}
                   </button>
                   <button
                     type="button"
                     onClick={() => setSellRole("TAKER")}
-                    className={`px-2 py-0.5 rounded ${
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
                       sellRole === "TAKER"
-                        ? "bg-primary-container text-on-primary font-bold"
-                        : "text-slate-400"
+                        ? "bg-tertiary text-on-tertiary font-bold"
+                        : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Directo 0,1%
+                    Directo 0%
                   </button>
                 </div>
               </div>
@@ -635,6 +793,10 @@ function CalculatorContent() {
                       </span>
                     </div>
                     <div className="flex justify-between text-slate-400">
+                      <span>Comisión Binance:</span>
+                      <span>-{simulation.sellFeeUsdt.toFixed(3)} USDT</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
                       <span>Utilidad Neta:</span>
                       <span
                         className={`font-bold ${
@@ -647,6 +809,117 @@ function CalculatorContent() {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              {/* Resumen de Comisión Total Binance y Ahorro VIP */}
+              <div className="px-3.5 py-2.5 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                <div className="flex items-center gap-2 text-slate-300 flex-wrap">
+                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container-high border border-[#283140] text-[10px] text-white font-semibold">
+                    <BinanceTierBadge tier={merchantTier} size={15} />
+                    <span>{formattedMakerFee}</span>
+                  </span>
+                  <span>
+                    Comisión total Binance:{" "}
+                    <strong className="text-primary">
+                      {simulation.totalBinanceFeeUsdt.toFixed(3)} USDT
+                    </strong>{" "}
+                    <span className="text-slate-400">
+                      (≈ Bs. {simulation.totalBinanceFeeVes.toFixed(2)})
+                    </span>
+                  </span>
+                </div>
+                {simulation.vipSavingsUsdt > 0.0005 && (
+                  <span className="text-tertiary font-semibold">
+                    Ahorro VIP: +{simulation.vipSavingsUsdt.toFixed(3)} USDT/ciclo (+
+                    {simulation.monthlyVipSavingsUsdt.toFixed(2)} USDT/mes)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Comparativa en Vivo por Nivel VIP de Comerciante */}
+            <div className="p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[18px] text-primary">
+                      military_tech
+                    </span>
+                    Impacto por Nivel de Comerciante (Binance P2P)
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Haz clic en un nivel para aplicarlo (base Maker {formatFeePct(baseMakerFeePct)} • {cyclesPerDay}{" "}
+                    {cyclesPerDay === 1 ? "ciclo" : "ciclos"}/día).
+                  </p>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                  <thead>
+                    <tr className="border-b border-[#1e2430] text-[10px] uppercase tracking-wider text-slate-400">
+                      <th scope="col" className="py-2 pr-3">Nivel</th>
+                      <th scope="col" className="py-2 px-2 text-right">Fee Maker</th>
+                      <th scope="col" className="py-2 px-2 text-right">Equilibrio</th>
+                      <th scope="col" className="py-2 px-2 text-right">Ciclo (USDT)</th>
+                      <th scope="col" className="py-2 pl-2 text-right">Mes (26d)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#1e2430]/70">
+                    {tierComparison.map(({ tier, config, result }) => {
+                      const isSelected = merchantTier === tier;
+                      const rowProfit = result.netProfitUsdt > 0;
+                      return (
+                        <tr
+                          key={tier}
+                          onClick={() => handleSelectTier(tier)}
+                          className={`cursor-pointer transition-colors ${
+                            isSelected
+                              ? "bg-primary-container/10"
+                              : "hover:bg-surface-container/70"
+                          }`}
+                        >
+                          <td className="py-2.5 pr-3">
+                            <div className="flex items-center gap-2" title={config.label}>
+                              <BinanceTierBadge tier={tier} size={20} />
+                              {config.discountPct > 0 ? (
+                                <span className="px-1.5 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-bold">
+                                  -{config.discountPct}%
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400">0%</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-2 text-right text-slate-300">
+                            {formatFeePct(result.effectiveMakerFeePct)}
+                          </td>
+                          <td className="py-2.5 px-2 text-right text-primary">
+                            Bs. {result.breakEvenSellRate.toFixed(2)}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 text-right font-semibold ${
+                              rowProfit ? "text-tertiary" : "text-error"
+                            }`}
+                          >
+                            {result.netProfitUsdt >= 0 ? "+" : ""}
+                            {result.netProfitUsdt.toFixed(2)} U
+                          </td>
+                          <td
+                            className={`py-2.5 pl-2 text-right font-bold ${
+                              result.monthlyProfitUsdt >= 0
+                                ? "text-white"
+                                : "text-error"
+                            }`}
+                          >
+                            {result.monthlyProfitUsdt >= 0 ? "+" : ""}
+                            {result.monthlyProfitUsdt.toFixed(2)} U
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
 

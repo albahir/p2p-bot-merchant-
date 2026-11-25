@@ -99,6 +99,15 @@ class FilteredOrderbookResponse(BaseModel):
     recommended_mode: str
     net_profit_ves: float
     net_profit_usdt: float
+    total_buy_ads: int = 0
+    total_sell_ads: int = 0
+    buy_ads_share_pct: float = 50.0
+    sell_ads_share_pct: float = 50.0
+    buy_merchants_count: int = 0
+    sell_merchants_count: int = 0
+    buy_month_orders_sum: int = 0
+    sell_month_orders_sum: int = 0
+    market_pressure_label: str = ""
     buy_ads: list[OrderbookAdItem]
     sell_ads: list[OrderbookAdItem]
     source: str
