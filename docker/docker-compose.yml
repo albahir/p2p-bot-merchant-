@@ -1,8 +1,15 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: p2p-postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword}
@@ -21,6 +28,7 @@ services:
     image: redis:7-alpine
     container_name: p2p-redis
     restart: unless-stopped
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
@@ -38,6 +46,7 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: p2p-api
     restart: unless-stopped
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -69,6 +78,7 @@ services:
       dockerfile: docker/Dockerfile.engine
     container_name: p2p-engine
     restart: unless-stopped
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -102,6 +112,7 @@ services:
         NEXT_PUBLIC_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
     container_name: p2p-frontend
     restart: unless-stopped
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -120,6 +131,7 @@ services:
     image: caddy:2-alpine
     container_name: p2p-caddy
     restart: unless-stopped
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -151,6 +163,7 @@ services:
       dockerfile: docker/Dockerfile.dashboard
     container_name: p2p-dashboard
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "127.0.0.1:8501:8501"
     volumes:

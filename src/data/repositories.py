@@ -735,5 +735,18 @@ class MarketDataRepository:
         rows.reverse()
         return rows
 
+    def prune_old_snapshots(self, days_keep: int = 30, now_utc: datetime | None = None) -> int:
+        """Elimina snapshots minuciosos antiguos preservando los rollups horarios OHLC."""
+        from src.core.market_analytics import clear_stale_hourly_cutoff
+
+        cutoff = clear_stale_hourly_cutoff(now_utc=now_utc, days_keep=max(1, int(days_keep)))
+        deleted = (
+            self.db.query(MarketSnapshot)
+            .filter(MarketSnapshot.timestamp < cutoff)  # type: ignore[arg-type]
+            .delete(synchronize_session=False)
+        )
+        self.db.commit()
+        return int(deleted or 0)
+
 
 

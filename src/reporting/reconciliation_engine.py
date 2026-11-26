@@ -6,16 +6,19 @@ junto con una matriz de scoring de 0 a 100% para garantizar cero falsos positivo
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, cast
 
 from src.data.models import BankVoucher, Order
+from src.reporting.islr_calculator import is_third_party_counterparty_mismatch
 from src.reporting.normalizers import (
     normalize_bank_name,
     normalize_reference,
     normalize_text,
 )
+
+VET_TZ = timezone(timedelta(hours=-4))
 
 
 class ReconciliationDecision(str, Enum):
@@ -82,13 +85,15 @@ class P2PReconciliationEngine:
         o_created = _to_naive_utc(cast(datetime | None, order.created_at))
         o_completed = _to_naive_utc(cast(datetime | None, order.completed_at)) or o_created
 
+        diff_sec: float | None = None
         if v_dt is not None and o_created is not None and o_completed is not None:
             diff_sec = min(
                 abs((v_dt - o_created).total_seconds()),
                 abs((v_dt - o_completed).total_seconds()),
             )
             pay_method = (voucher.payment_method or "PAGO_MOVIL").upper()
-            if "TRANSF" in pay_method:
+            has_clock_time = not (v_dt.hour == 0 and v_dt.minute == 0 and v_dt.second == 0)
+            if "TRANSF" in pay_method or not has_clock_time:
                 if diff_sec > self.WINDOW_TRANSFER_SEC:
                     return 0.0
             else:
@@ -100,10 +105,10 @@ class P2PReconciliationEngine:
         # ---------------------------------------------------------
         score = 0.0
 
-        # Factor A: Monto exacto en VES (Tolerancia 0.05 Bs) - 30% + Bonus 5% por céntimos
+        # Factor A: Monto exacto en VES (Tolerancia 0.05 Bs) - 40% + Bonus 5% por céntimos
         diff_amount = abs(float(voucher.amount_ves) - float(order.fiat_amount))
         if diff_amount <= 0.05:
-            score += 30.0
+            score += 40.0
             # Montos con céntimos impares tienen una unicidad muy superior en P2P
             if float(order.fiat_amount) % 1.0 > 0.001:
                 score += 5.0
@@ -126,6 +131,9 @@ class P2PReconciliationEngine:
 
         if bank_matched:
             score += 30.0
+            if diff_sec is not None and diff_sec <= 900.0:
+                # Proximidad horaria <= 15 minutos con banco y monto exacto
+                score += 10.0
 
         # Factor C: Referencia Bancaria en Orden / Chat - 40%
         if voucher.reference_number:
@@ -136,12 +144,12 @@ class P2PReconciliationEngine:
                 if ref_in_order or ref_in_counterparty:
                     score += 40.0
 
-        # Factor D: Titular / Contraparte (Bonus 15%)
+        # Factor D: Titular / Contraparte - 25% (permite AUTO_MATCH >= 90% con monto + banco + titular)
         if voucher.sender_name and order.counterparty_name:
             v_words = {w for w in normalize_text(cast(str | None, voucher.sender_name)).split() if len(w) >= 3}
             o_words = {w for w in normalize_text(cast(str | None, order.counterparty_name)).split() if len(w) >= 3}
             if v_words & o_words:
-                score += 15.0
+                score += 25.0
 
         return min(100.0, score)
 
@@ -168,12 +176,25 @@ class P2PReconciliationEngine:
             decision = ReconciliationDecision.UNMATCHED
             best_order = None
 
+        tp_alert = False
+        tp_detail: str | None = None
+        if best_order is not None:
+            tp_alert, tp_detail = is_third_party_counterparty_mismatch(
+                cast(str | None, voucher.sender_name),
+                cast(str | None, best_order.counterparty_name),
+                bank_sender_id=cast(str | None, voucher.sender_id),
+            )
+
         return ReconciliationMatchResult(
             voucher_id=cast(int | None, voucher.id),
             matched_order=best_order,
             score=best_score,
             decision=decision,
-            details={"voucher_reference": voucher.reference_number},
+            details={
+                "voucher_reference": voucher.reference_number,
+                "third_party_alert": tp_alert,
+                "third_party_detail": tp_detail,
+            },
         )
 
     def reconcile_batch(

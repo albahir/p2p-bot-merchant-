@@ -1569,16 +1569,16 @@ class TelegramNotifier:
         try:
             quotes = monitor.fetch_live_quotes(use_public_bapi=True)
         except (SQLAlchemyError, httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
-            logger.debug(f"Fallback a cotizaciones simuladas tras error de red: {e}")
-            quotes = monitor.get_market_quotes(use_sandbox=True)
+            logger.debug(f"Error consultando cotizaciones en vivo: {e}")
+            quotes = monitor.get_market_quotes(use_sandbox=True) if self.use_sandbox else []
 
         if not quotes and self.use_sandbox:
             quotes = monitor.get_market_quotes(use_sandbox=True)
 
         if not quotes:
-            return "ℹ️ No hay cotizaciones disponibles en este momento."
+            return "ℹ️ No hay cotizaciones reales disponibles en Binance P2P en este momento."
 
-        bcv_rate = 820.0
+        bcv_rate = 0.0
         sf = self.session_factory or SessionLocal
         db = sf()
         try:

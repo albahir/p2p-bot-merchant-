@@ -484,19 +484,32 @@ export function StatementImportModal({
                     </td>
                     <td className="py-2 px-2.5">
                       {r.selectedAction === "P2P_MATCH" ? (
-                        <select
-                          aria-label={`Orden P2P fila ${r.row_index}`}
-                          value={r.selectedOrder}
-                          onChange={(e) => updateRowOrder(r.row_index, e.target.value)}
-                          className="px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-[11px] font-mono text-secondary max-w-[190px]"
-                        >
-                          <option value="">-- Elegir orden --</option>
-                          {preview.available_orders.map((ord) => (
-                            <option key={ord.order_number} value={ord.order_number}>
-                              {ord.order_number.slice(-8)} ({ord.trade_type} Bs.{ord.fiat_amount.toFixed(2)})
-                            </option>
-                          ))}
-                        </select>
+                        <div className="space-y-1">
+                          <select
+                            aria-label={`Orden P2P fila ${r.row_index}`}
+                            value={r.selectedOrder}
+                            onChange={(e) => updateRowOrder(r.row_index, e.target.value)}
+                            className="px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-[11px] font-mono text-secondary max-w-[190px]"
+                          >
+                            <option value="">-- Elegir orden --</option>
+                            {preview.available_orders.map((ord) => (
+                              <option key={ord.order_number} value={ord.order_number}>
+                                {ord.order_number.slice(-8)} ({ord.trade_type} Bs.{ord.fiat_amount.toFixed(2)})
+                              </option>
+                            ))}
+                          </select>
+                          {r.third_party_alert && (
+                            <span
+                              title={
+                                r.third_party_detail ||
+                                "Titular bancario distinto a contraparte Binance (LOCDOFT / UNIF)"
+                              }
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] font-mono text-amber-300"
+                            >
+                              ⚠ Posible tercero
+                            </span>
+                          )}
+                        </div>
                       ) : (
                         <span className="text-[10px] font-mono text-slate-500">
                           {r.notes || "-"}

@@ -60,6 +60,7 @@ class LiveBalanceSummary:
     bank_breakdown: list[BankBalanceItem]
     other_inflow_usdt: float = 0.0
     other_outflow_usdt: float = 0.0
+    p2p_fee_usdt: float = 0.0
 
 
 
@@ -697,9 +698,12 @@ class AccountingEngine:
 
         inflow_usdt = 0.0
         outflow_usdt = 0.0
+        p2p_crypto_fees = 0.0
         for o in orders:
             t_type = getattr(o, "trade_type", getattr(o, "order_type", ""))
             c_amount = float(getattr(o, "crypto_amount", getattr(o, "amount_crypto", 0.0)))
+            f_crypto = float(getattr(o, "fee_crypto", 0.0) or 0.0)
+            p2p_crypto_fees += f_crypto
             if t_type == "BUY":
                 inflow_usdt += c_amount
             elif t_type == "SELL":
@@ -726,7 +730,7 @@ class AccountingEngine:
                 other_outflow_usdt += amt + fee_amt
 
         theoretical_usdt = round(
-            init_usdt + inflow_usdt + other_inflow_usdt - outflow_usdt - other_outflow_usdt,
+            init_usdt + inflow_usdt + other_inflow_usdt - outflow_usdt - other_outflow_usdt - p2p_crypto_fees,
             2,
         )
 
@@ -822,5 +826,6 @@ class AccountingEngine:
             bank_breakdown=bank_items,
             other_inflow_usdt=round(other_inflow_usdt, 2),
             other_outflow_usdt=round(other_outflow_usdt, 2),
+            p2p_fee_usdt=round(p2p_crypto_fees, 4),
         )
 

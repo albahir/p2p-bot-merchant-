@@ -278,9 +278,13 @@ class SpreadMonitor:
             "venezuela": ["BancoDeVenezuela", "SpecificBank"],
             "specificbank": ["SpecificBank"],
             "mercantil": ["Mercantil"],
+            "bbva": ["Provincial", "BBVABank", "BBVABancoProvincial"],
             "bbva provincial": ["Provincial", "BBVABank", "BBVABancoProvincial"],
+            "bbva banco provincial": ["Provincial", "BBVABank", "BBVABancoProvincial"],
             "provincial": ["Provincial", "BBVABank", "BBVABancoProvincial"],
             "bnc": ["BNCBancoNacional", "BancoNacionaldeCredito"],
+            "banco nacional de credito": ["BNCBancoNacional", "BancoNacionaldeCredito"],
+            "banco nacional de crédito": ["BNCBancoNacional", "BancoNacionaldeCredito"],
             "bnc banco nacional de crédito": ["BNCBancoNacional", "BancoNacionaldeCredito"],
             "bancamiga": ["Bancamiga"],
             "transferencia bancaria": ["BANK"],
@@ -901,24 +905,24 @@ class SpreadMonitor:
             if fast_cached and (now_ts - fast_cached[0]) < CACHE_TTL_SECONDS:
                 return fast_cached[1]
 
-        # Determinar tasa de referencia para convertir amount_usdt -> transAmount en Bs (VES)
-        ref_rate = 1005.0
+        # Determinar tasa de referencia real para convertir amount_usdt -> transAmount en Bs (sin inventar tasa fija)
+        ref_rate = 0.0
         base_quotes = _VOLUME_QUOTES_CACHE.get(("binance", 0.0, False))
         ref_cached = _REF_RATE_CACHE.get("VES")
         if base_quotes and base_quotes[1]:
-            ref_rate = base_quotes[1][0].buy_rate or 1005.0
+            ref_rate = float(base_quotes[1][0].buy_rate or 0.0)
         elif ref_cached and (now_ts - ref_cached[0]) < REF_RATE_TTL_SECONDS:
-            ref_rate = ref_cached[1]
-        elif client is None:
+            ref_rate = float(ref_cached[1] or 0.0)
+        elif client is None and (amount_ves is None or amount_ves <= 0):
             yadio = self.fetch_yadio_rate()
             if yadio and yadio > 0:
-                ref_rate = yadio
-                _REF_RATE_CACHE["VES"] = (now_ts, yadio)
+                ref_rate = float(yadio)
+                _REF_RATE_CACHE["VES"] = (now_ts, ref_rate)
 
         trans_amount_ves = (
             round(float(amount_ves), 2)
             if (amount_ves is not None and amount_ves > 0)
-            else round(safe_usdt * ref_rate, 2)
+            else (round(safe_usdt * ref_rate, 2) if ref_rate > 0 else 0.0)
         )
 
         cache_key = (
@@ -945,6 +949,8 @@ class SpreadMonitor:
         raw_sell_total = 0
         source_label = "binance_bapi"
 
+        trans_arg: float | None = trans_amount_ves if trans_amount_ves > 0 else None
+
         try:
             if isinstance(active_client, BinanceP2PClient):
                 with ThreadPoolExecutor(max_workers=2) as pool:
@@ -955,7 +961,7 @@ class SpreadMonitor:
                         trade_type="BUY",
                         rows=safe_rows,
                         pay_types=pay_types,
-                        trans_amount=trans_amount_ves,
+                        trans_amount=trans_arg,
                         merchant_check=merchant_only,
                         use_public_bapi=True,
                     )
@@ -966,7 +972,7 @@ class SpreadMonitor:
                         trade_type="SELL",
                         rows=safe_rows,
                         pay_types=pay_types,
-                        trans_amount=trans_amount_ves,
+                        trans_amount=trans_arg,
                         merchant_check=merchant_only,
                         use_public_bapi=True,
                     )
@@ -979,7 +985,7 @@ class SpreadMonitor:
                     trade_type="BUY",
                     rows=safe_rows,
                     pay_types=pay_types,
-                    trans_amount=trans_amount_ves,
+                    trans_amount=trans_arg,
                     merchant_check=merchant_only,
                     use_public_bapi=True,
                 )
@@ -989,7 +995,7 @@ class SpreadMonitor:
                     trade_type="SELL",
                     rows=safe_rows,
                     pay_types=pay_types,
-                    trans_amount=trans_amount_ves,
+                    trans_amount=trans_arg,
                     merchant_check=merchant_only,
                     use_public_bapi=True,
                 )
@@ -1064,6 +1070,8 @@ class SpreadMonitor:
 
         best_buy_price = buy_ads[0]["price"] if buy_ads else 0.0
         best_sell_price = sell_ads[0]["price"] if sell_ads else 0.0
+        if trans_amount_ves <= 0 and best_buy_price > 0:
+            trans_amount_ves = round(safe_usdt * best_buy_price, 2)
 
         # En Binance P2P:
         # - Taker Spread: Compras tomando un anuncio en BUY (best_buy_price) y vendes tomando en SELL (best_sell_price)

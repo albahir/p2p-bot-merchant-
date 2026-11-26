@@ -6,14 +6,14 @@ Calcula ISLR mediante FIFOCostMethod con inventario inicial valorado a tasa BCV.
 
 import calendar
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from src.data.models import BankVoucher, FiscalPeriodSnapshot
+from src.data.models import BankVoucher, FiscalPeriodSnapshot, User
 from src.data.repositories import (
     BankVoucherRepository,
     FiscalSnapshotRepository,
@@ -21,7 +21,9 @@ from src.data.repositories import (
     WalletMovementRepository,
     _apply_user_scope,
 )
+from src.reporting.bcv_history_service import BCVHistoryService
 from src.reporting.bcv_service import BCVService
+from src.reporting.islr_calculator import compute_islr_estimation
 from src.reporting.tax_engine import FIFOCostMethod, TaxLot, WeightedAverageCostMethod
 
 logger = logging.getLogger("fiscal_reconciler")
@@ -55,6 +57,14 @@ class FiscalReconciliationResult:
     volume_operated_ves: float = 0.0
     total_fees_ves: float = 0.0
     cost_method: str = "FIFO"
+    bank_fees_ves: float = 0.0
+    exchange_fees_ves: float = 0.0
+    unique_counterparties: int = 0
+    inventory_warnings: list[str] = field(default_factory=list)
+    taxpayer_type: str = "NATURAL"
+    form_code: str = "DPN-99025"
+    estimated_islr_ves: float = 0.0
+    tcmv_rate_ves: float = 0.0
 
 
 class FiscalReconciler:
@@ -138,9 +148,28 @@ class FiscalReconciler:
         if initial_bcv_rate is None or initial_bcv_rate <= 0:
             try:
                 rate_val = self.bcv_service.fetch_current_rate()
-                initial_bcv_rate = float(rate_val) if rate_val else 1.0
+                initial_bcv_rate = float(rate_val) if rate_val and float(rate_val) > 0 else 0.0
             except (RuntimeError, ValueError, OSError, KeyError, AttributeError):
-                initial_bcv_rate = 1.0
+                initial_bcv_rate = 0.0
+        if initial_bcv_rate <= 0:
+            hist_svc = BCVHistoryService(self.db, bcv_live_service=self.bcv_service)
+            hist_rate = hist_svc.get_rate_for_date(start_dt.date())
+            if hist_rate and hist_rate > 0:
+                initial_bcv_rate = float(hist_rate)
+
+        tcmv_rate = 0.0
+        try:
+            hist_svc_eur = BCVHistoryService(self.db, bcv_live_service=self.bcv_service)
+            rates_meta = hist_svc_eur.get_or_fetch_current_rates(force_refresh=False)
+            eur_val = float(rates_meta.get("eur") or 0.0)
+            if eur_val > 0:
+                tcmv_rate = eur_val
+            elif float(rates_meta.get("usd") or 0.0) > 0:
+                tcmv_rate = float(rates_meta["usd"])
+        except (RuntimeError, ValueError, OSError, KeyError, AttributeError):
+            tcmv_rate = 0.0
+        if tcmv_rate <= 0 and initial_bcv_rate > 0:
+            tcmv_rate = float(initial_bcv_rate)
 
         # Obtener órdenes del período
         all_orders = self.order_repo.list_completed(start_date=start_dt, end_date=end_dt)
@@ -155,6 +184,13 @@ class FiscalReconciler:
         volume_operated_ves = sum(float(o.fiat_amount or 0.0) for o in asset_orders)
         p2p_crypto_fees = sum(float(o.fee_crypto or 0.0) for o in asset_orders)
         p2p_fiat_fees = sum(float(o.fee_fiat or 0.0) for o in asset_orders)
+        unique_counterparties = len(
+            {
+                str(o.counterparty_name).strip()
+                for o in asset_orders
+                if getattr(o, "counterparty_name", None) and str(o.counterparty_name).strip()
+            }
+        )
 
         # Obtener movimientos de billetera (Depósitos y Retiros)
         all_movements = self.wallet_repo.list_completed(start_date=start_dt, end_date=end_dt)
@@ -220,17 +256,41 @@ class FiscalReconciler:
             )
 
         normalized_method = "AVG" if cost_method.strip().upper() in ("AVG", "PROMEDIO", "WEIGHTED_AVG") else "FIFO"
+        fallback_bcv = initial_bcv_rate if initial_bcv_rate > 0 else None
         calculator = (
-            WeightedAverageCostMethod(initial_inventory=initial_lots)
+            WeightedAverageCostMethod(initial_inventory=initial_lots, fallback_bcv_rate=fallback_bcv)
             if normalized_method == "AVG"
-            else FIFOCostMethod(initial_inventory=initial_lots)
+            else FIFOCostMethod(initial_inventory=initial_lots, fallback_bcv_rate=fallback_bcv)
         )
         trade_results = calculator.process_orders(asset_orders)
 
         gross_revenue_ves = sum(r.total_revenue_fiat for r in trade_results)
         acquisition_cost_ves = sum(r.acquisition_cost_fiat for r in trade_results)
-        net_profit_ves = sum(r.net_profit_fiat for r in trade_results)
-        net_profit_usd = sum(r.net_profit_usd for r in trade_results)
+        sell_exchange_fees_ves = sum(r.fee_fiat for r in trade_results)
+        # Unificación con ExcelReporter y PDFReporter: deducir también comisiones bancarias verificadas (5.2.01)
+        net_profit_ves = sum(r.net_profit_fiat for r in trade_results) - bank_vouchers_fees
+
+        valid_bcv_rates = [float(r.bcv_rate) for r in trade_results if float(r.bcv_rate or 0.0) > 0]
+        eff_bcv_for_bank_fee = valid_bcv_rates[-1] if valid_bcv_rates else initial_bcv_rate
+        raw_net_usd = sum(r.net_profit_usd for r in trade_results)
+        if bank_vouchers_fees > 0 and eff_bcv_for_bank_fee > 0:
+            net_profit_usd = raw_net_usd - (bank_vouchers_fees / eff_bcv_for_bank_fee)
+        else:
+            net_profit_usd = raw_net_usd
+
+        tax_id = None
+        if self.user_id is not None:
+            usr = self.db.query(User).filter(User.id == self.user_id).first()
+            if usr is not None and usr.tax_id:
+                tax_id = str(usr.tax_id)
+
+        islr_est = compute_islr_estimation(
+            gross_revenue_ves=gross_revenue_ves,
+            cost_of_sales_ves=acquisition_cost_ves,
+            deductible_expenses_ves=sell_exchange_fees_ves + bank_vouchers_fees,
+            tax_id=tax_id,
+        )
+        inv_warnings = list(calculator.inventory_warnings) + list(calculator.bcv_warnings)
 
         return FiscalReconciliationResult(
             period=period,
@@ -259,6 +319,14 @@ class FiscalReconciler:
             volume_operated_ves=round(volume_operated_ves, 2),
             total_fees_ves=round(total_fees_ves, 2),
             cost_method=normalized_method,
+            bank_fees_ves=round(bank_vouchers_fees, 2),
+            exchange_fees_ves=round(sell_exchange_fees_ves, 2),
+            unique_counterparties=unique_counterparties,
+            inventory_warnings=inv_warnings,
+            taxpayer_type=islr_est.taxpayer_type,
+            form_code=islr_est.form_code,
+            estimated_islr_ves=islr_est.determined_tax_ves,
+            tcmv_rate_ves=round(tcmv_rate, 4),
         )
 
     def save_snapshot(self, result: FiscalReconciliationResult) -> FiscalPeriodSnapshot:

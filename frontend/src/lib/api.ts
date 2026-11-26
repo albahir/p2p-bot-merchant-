@@ -276,6 +276,16 @@ const DEFAULT_GET_CACHE_TTL_MS = 15_000;
 const _inFlightGets = new Map<string, Promise<unknown>>();
 const _responseCache = new Map<string, { data: unknown; expiresAt: number }>();
 
+export function clearClientSessionStorage(): void {
+  _responseCache.clear();
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("p2p_token");
+    localStorage.removeItem("p2p_user");
+    localStorage.removeItem("p2p_sheets_config");
+    localStorage.removeItem("p2p_user_banks_config");
+  }
+}
+
 export function clearApiCache(endpointPrefix?: string): void {
   if (!endpointPrefix) {
     _responseCache.clear();
@@ -288,16 +298,22 @@ export function clearApiCache(endpointPrefix?: string): void {
   }
 }
 
-function resolveCacheKey(endpoint: string): string {
-  const isPublicEndpoint =
+function isPublicApiEndpoint(endpoint: string): boolean {
+  return (
     endpoint.startsWith("/api/spreads/") ||
-    endpoint.startsWith("/api/market/") ||
+    endpoint.startsWith("/api/market/candles") ||
+    endpoint.startsWith("/api/market/analytics") ||
     endpoint.startsWith("/api/auth/login") ||
     endpoint.startsWith("/api/auth/register") ||
     endpoint.startsWith("/api/auth/email/") ||
     endpoint.startsWith("/api/auth/telegram-bot-info") ||
     endpoint.startsWith("/api/auth/recover-") ||
-    endpoint.startsWith("/api/auth/reset-password");
+    endpoint.startsWith("/api/auth/reset-password")
+  );
+}
+
+function resolveCacheKey(endpoint: string): string {
+  const isPublicEndpoint = isPublicApiEndpoint(endpoint);
   const token = getToken();
   const tokenScope = isPublicEndpoint ? "public" : token ? token.slice(-12) : "anon";
   return `GET:${tokenScope}:${endpoint}`;
@@ -345,15 +361,7 @@ export async function apiRequest<T>(
   ) {
     headers.set("Content-Type", "application/json");
   }
-  const isPublicEndpoint =
-    endpoint.startsWith("/api/spreads/") ||
-    endpoint.startsWith("/api/market/") ||
-    endpoint.startsWith("/api/auth/login") ||
-    endpoint.startsWith("/api/auth/register") ||
-    endpoint.startsWith("/api/auth/email/") ||
-    endpoint.startsWith("/api/auth/telegram-bot-info") ||
-    endpoint.startsWith("/api/auth/recover-") ||
-    endpoint.startsWith("/api/auth/reset-password");
+  const isPublicEndpoint = isPublicApiEndpoint(endpoint);
 
   if (token && !isPublicEndpoint && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -401,9 +409,7 @@ export async function apiRequest<T>(
         typeof window !== "undefined" &&
         !endpoint.startsWith("/api/auth/")
       ) {
-        localStorage.removeItem("p2p_token");
-        localStorage.removeItem("p2p_user");
-        _responseCache.clear();
+        clearClientSessionStorage();
       }
       let errorDetail = `Error en la petición (HTTP ${response.status})`;
       if (response.status === 413) {
@@ -496,16 +502,22 @@ export async function downloadAuthenticatedFile(
 }
 
 // Métodos de autenticación
+function persistAuthenticatedSession(res: AuthResponse, warm = true): void {
+  if (typeof window === "undefined") return;
+  clearClientSessionStorage();
+  localStorage.setItem("p2p_token", res.access_token);
+  localStorage.setItem("p2p_user", JSON.stringify(res.user));
+  if (warm) {
+    warmAuthenticatedSession();
+  }
+}
+
 export async function login(username: string, password: string): Promise<AuthResponse> {
   const res = await apiRequest<AuthResponse>("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
-  if (typeof window !== "undefined") {
-    localStorage.setItem("p2p_token", res.access_token);
-    localStorage.setItem("p2p_user", JSON.stringify(res.user));
-    warmAuthenticatedSession();
-  }
+  persistAuthenticatedSession(res, true);
   return res;
 }
 
@@ -514,11 +526,7 @@ export async function loginTelegram(data: Record<string, any>): Promise<AuthResp
     method: "POST",
     body: JSON.stringify(data),
   });
-  if (typeof window !== "undefined") {
-    localStorage.setItem("p2p_token", res.access_token);
-    localStorage.setItem("p2p_user", JSON.stringify(res.user));
-    warmAuthenticatedSession();
-  }
+  persistAuthenticatedSession(res, true);
   return res;
 }
 
@@ -527,11 +535,7 @@ export async function loginTelegramWebApp(initData: string): Promise<AuthRespons
     method: "POST",
     body: JSON.stringify({ init_data: initData }),
   });
-  if (typeof window !== "undefined") {
-    localStorage.setItem("p2p_token", res.access_token);
-    localStorage.setItem("p2p_user", JSON.stringify(res.user));
-    warmAuthenticatedSession();
-  }
+  persistAuthenticatedSession(res, true);
   return res;
 }
 
@@ -549,10 +553,7 @@ export function getCurrentUser(): User | null {
 
 export function logout(): void {
   if (typeof window !== "undefined") {
-    clearApiCache();
-    localStorage.removeItem("p2p_token");
-    localStorage.removeItem("p2p_user");
-    localStorage.removeItem("p2p_sheets_config");
+    clearClientSessionStorage();
     window.location.href = "/login";
   }
 }
@@ -806,11 +807,38 @@ export async function uploadOrdersFile(file: File): Promise<any> {
 }
 
 export async function downloadOrdersExport(
-  format: "xlsx" | "csv_semicolon" | "csv_comma"
+  format: "xlsx" | "csv_semicolon" | "csv_comma",
+  filters?: {
+    trade_type?: string;
+    order_status?: string;
+    payment_method?: string;
+    date_from?: string;
+    date_to?: string;
+    search?: string;
+  }
 ): Promise<void> {
   const ext = format === "xlsx" ? "xlsx" : "csv";
+  const query = new URLSearchParams({ format });
+  if (filters?.trade_type && filters.trade_type !== "ALL") {
+    query.set("trade_type", filters.trade_type);
+  }
+  if (filters?.order_status && filters.order_status !== "ALL") {
+    query.set("order_status", filters.order_status);
+  }
+  if (filters?.payment_method) {
+    query.set("payment_method", filters.payment_method);
+  }
+  if (filters?.date_from) {
+    query.set("date_from", filters.date_from);
+  }
+  if (filters?.date_to) {
+    query.set("date_to", filters.date_to);
+  }
+  if (filters?.search?.trim()) {
+    query.set("search", filters.search.trim());
+  }
   return downloadAuthenticatedFile(
-    `/api/orders/export?format=${format}`,
+    `/api/orders/export?${query.toString()}`,
     `ordenes_p2p.${ext}`
   );
 }
@@ -914,10 +942,7 @@ export async function registerUser(data: RegisterData): Promise<AuthResponse> {
     method: "POST",
     body: JSON.stringify(data),
   });
-  if (typeof window !== "undefined") {
-    localStorage.setItem("p2p_token", res.access_token);
-    localStorage.setItem("p2p_user", JSON.stringify(res.user));
-  }
+  persistAuthenticatedSession(res, false);
   return res;
 }
 
@@ -1386,6 +1411,14 @@ export interface FiscalSummary {
   message: string;
   bcv_rate: number;
   cost_method?: string;
+  bank_fees_ves?: number;
+  exchange_fees_ves?: number;
+  unique_counterparties?: number;
+  inventory_warnings?: string[];
+  taxpayer_type?: string;
+  form_code?: string;
+  estimated_islr_ves?: number;
+  tcmv_rate_ves?: number;
 }
 
 export async function getFiscalSummary(
@@ -1495,18 +1528,26 @@ export async function getLedgerSummaries(
   return apiRequest<LedgerSummaryItem[]>(`/api/accounting/ledger?${query.toString()}`);
 }
 
-export async function downloadAccountingExcel(year: number, month: number): Promise<void> {
+export async function downloadAccountingExcel(
+  year: number,
+  month: number,
+  costMethod: "FIFO" | "AVG" = "FIFO"
+): Promise<void> {
   const padded = String(month).padStart(2, "0");
   return downloadAuthenticatedFile(
-    `/api/accounting/export/excel?year=${year}&month=${month}`,
+    `/api/accounting/export/excel?year=${year}&month=${month}&cost_method=${costMethod}`,
     `reporte_contable_p2p_${year}_${padded}.xlsx`
   );
 }
 
-export async function downloadAccountingPdf(year: number, month: number): Promise<void> {
+export async function downloadAccountingPdf(
+  year: number,
+  month: number,
+  costMethod: "FIFO" | "AVG" = "FIFO"
+): Promise<void> {
   const padded = String(month).padStart(2, "0");
   return downloadAuthenticatedFile(
-    `/api/accounting/export/pdf?year=${year}&month=${month}`,
+    `/api/accounting/export/pdf?year=${year}&month=${month}&cost_method=${costMethod}`,
     `reporte_contable_${year}_${padded}.pdf`
   );
 }
@@ -1595,6 +1636,10 @@ export interface SyncBinancePayResponse {
   inserted: number;
   existing: number;
   message: string;
+  pay_count?: number;
+  deposits_count?: number;
+  withdrawals_count?: number;
+  warnings?: string[];
 }
 
 export async function listWalletMovements(
@@ -1628,11 +1673,12 @@ export async function deleteWalletMovement(
 
 export async function syncBinancePayMovements(
   year: number,
-  month: number
+  month: number,
+  includeSpotTransfers = true
 ): Promise<SyncBinancePayResponse> {
   return apiRequest<SyncBinancePayResponse>("/api/accounting/wallet-movements/sync-binance-pay", {
     method: "POST",
-    body: JSON.stringify({ year, month }),
+    body: JSON.stringify({ year, month, include_spot_transfers: includeSpotTransfers }),
   });
 }
 
@@ -1736,6 +1782,8 @@ export interface StatementPreviewRow {
   matched_order_fiat?: number | null;
   match_confidence: number;
   notes: string;
+  third_party_alert?: boolean;
+  third_party_detail?: string | null;
 }
 
 export interface StatementAvailableOrder {
@@ -1860,14 +1908,18 @@ export async function previewBankStatement(
         err instanceof TypeError ||
         /failed to fetch|networkerror|load failed|HTTP 502|HTTP 503|HTTP 504|HTTP 524/i.test(msg);
       consecutiveNetworkErrors += 1;
-      if (!isTransient || consecutiveNetworkErrors >= 6) {
-        throw err;
+      if (!isTransient || consecutiveNetworkErrors >= 30) {
+        throw new Error(
+          isTransient
+            ? "Se perdió la conexión con el servidor. Verifique su conexión a internet e intente de nuevo."
+            : (err?.message || "No se pudo consultar el estado del análisis.")
+        );
       }
       if (options?.onProgress) {
         options.onProgress({
           pagesDone: 0,
           pagesTotal: 0,
-          stage: `Reconectando (${consecutiveNetworkErrors}/5)`,
+          stage: `Reconectando (${consecutiveNetworkErrors}/30)`,
         });
       }
       await new Promise((resolve) => setTimeout(resolve, 2000));

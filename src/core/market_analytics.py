@@ -29,6 +29,27 @@ TIMEFRAME_SECONDS: dict[str, int] = {
 
 MIN_PREDICTION_DAYS = 20
 _HAMPEL_SCALE = 1.4826
+TRACKED_TICKET_BUCKETS_VES: tuple[int, ...] = (250_000, 1_000_000, 5_000_000)
+_CORE_VEN_BANKS: tuple[str, ...] = (
+    "Banesco",
+    "Banco de Venezuela",
+    "Pago Móvil",
+    "Mercantil",
+    "BBVA Provincial",
+    "Bancamiga",
+    "BNC",
+)
+
+
+def match_tracked_ticket_bucket(ticket_ves: float | None) -> int | None:
+    """Asocia un monto en VES a uno de los 3 tramos reales monitoreados (250K, 1M, 5M)."""
+    if ticket_ves is None or ticket_ves <= 0:
+        return None
+    val = float(ticket_ves)
+    for bucket in TRACKED_TICKET_BUCKETS_VES:
+        if abs(val - float(bucket)) / float(bucket) <= 0.01:
+            return bucket
+    return None
 
 
 def to_utc_epoch(dt: datetime) -> int:
@@ -599,6 +620,7 @@ class MarketCollectorService:
         bank_filter: str = "*",
         now_utc: datetime | None = None,
         ticket_ves: float | None = None,
+        collect_missing_banks: bool = False,
     ) -> MarketSnapshot:
         """Consulta el libro vivo + tasa BCV y registra snapshot + rollup horario."""
         ts_aware = (now_utc or datetime.now(UTC)).astimezone(UTC)
@@ -642,6 +664,71 @@ class MarketCollectorService:
         vol_sell_usdt = float(depth_summary["top20"]["sell_usdt"])
         bank_prices = aggregate_bank_snapshot(buy_ads, sell_ads)
 
+        # Normalizar y completar lecturas reales de bancos clave si faltaron en Top 20 global
+        if collect_missing_banks and mapped_bank == "Todos":
+            present_canon = {SpreadMonitor.canonical_user_bank_name(k) for k in bank_prices}
+            for core_bank in _CORE_VEN_BANKS:
+                if core_bank in present_canon:
+                    continue
+                try:
+                    b_book = monitor.fetch_filtered_orderbook(
+                        amount_usdt=100.0,
+                        amount_ves=1_000_000.0,
+                        bank=core_bank,
+                        rows=10,
+                    )
+                    b_buy = [
+                        ad for ad in (b_book.get("buy_ads") or [])
+                        if any(SpreadMonitor.bank_matches_user_bank(str(x), core_bank) for x in (ad.get("banks") or []))
+                    ]
+                    b_sell = [
+                        ad for ad in (b_book.get("sell_ads") or [])
+                        if any(SpreadMonitor.bank_matches_user_bank(str(x), core_bank) for x in (ad.get("banks") or []))
+                    ]
+                    if b_buy or b_sell:
+                        b_stats = aggregate_bank_snapshot(b_buy, b_sell)
+                        for b_k, b_v in b_stats.items():
+                            if SpreadMonitor.bank_matches_user_bank(b_k, core_bank) and b_k not in bank_prices:
+                                bank_prices[b_k] = b_v
+                except (RuntimeError, ValueError, OSError, TimeoutError):
+                    continue
+
+        # Recolectar los 3 tramos reales de ticket (250K, 1M, 5M Bs) cuando es captura global
+        ticket_buckets_data: dict[str, dict[str, Any]] = {}
+        if mapped_bank == "Todos" and ticket_ves is None:
+            for bucket_ves in TRACKED_TICKET_BUCKETS_VES:
+                try:
+                    t_book = monitor.fetch_filtered_orderbook(
+                        amount_usdt=100.0,
+                        amount_ves=float(bucket_ves),
+                        bank="Todos",
+                        rows=20,
+                    )
+                    t_buy = list(t_book.get("buy_ads") or [])
+                    t_sell = list(t_book.get("sell_ads") or [])
+                    if not t_buy and not t_sell:
+                        continue
+                    t_buy_best = float(t_book.get("best_buy_price") or (t_buy[0]["price"] if t_buy else 0.0))
+                    t_sell_best = float(t_book.get("best_sell_price") or (t_sell[0]["price"] if t_sell else 0.0))
+                    t_buy_avg = _top_trimmed_avg(t_buy, 20) or t_buy_best
+                    t_sell_avg = _top_trimmed_avg(t_sell, 20) or t_sell_best
+                    t_depth = compute_depth_summary(t_buy, t_sell)
+                    ticket_buckets_data[str(bucket_ves)] = {
+                        "buy_best": round(t_buy_best, 4),
+                        "buy_avg20": round(t_buy_avg, 4),
+                        "sell_best": round(t_sell_best, 4),
+                        "sell_avg20": round(t_sell_avg, 4),
+                        "vol_buy": round(float(t_depth["top20"]["buy_usdt"]), 2),
+                        "vol_sell": round(float(t_depth["top20"]["sell_usdt"]), 2),
+                        "banks": aggregate_bank_snapshot(t_buy, t_sell),
+                    }
+                except (RuntimeError, ValueError, OSError, TimeoutError):
+                    continue
+
+        depth_payload: dict[str, Any] = {"depth": depth_summary, "banks": bank_prices}
+        if ticket_buckets_data:
+            depth_payload["tickets"] = ticket_buckets_data
+
         snapshot = MarketSnapshot(
             timestamp=ts_naive,
             bcv_rate=round(bcv_rate, 4),
@@ -654,7 +741,7 @@ class MarketCollectorService:
             spread_ves=spread_ves,
             vol_buy_usdt=round(vol_buy_usdt, 2),
             vol_sell_usdt=round(vol_sell_usdt, 2),
-            depth_json=json.dumps({"depth": depth_summary, "banks": bank_prices}),
+            depth_json=json.dumps(depth_payload),
         )
         saved_snap = self.repo.add_snapshot(snapshot)
         self._update_hourly_rollup(
@@ -666,6 +753,7 @@ class MarketCollectorService:
             vol_buy_usdt=vol_buy_usdt,
             vol_sell_usdt=vol_sell_usdt,
             bank_prices=bank_prices,
+            ticket_buckets=ticket_buckets_data,
         )
         return saved_snap
 
@@ -680,6 +768,7 @@ class MarketCollectorService:
         vol_buy_usdt: float,
         vol_sell_usdt: float,
         bank_prices: dict[str, dict[str, float]],
+        ticket_buckets: dict[str, dict[str, Any]] | None = None,
     ) -> MarketHourlyRollup:
         existing = self.repo.get_rollup_by_hour(hora_utc)
         matrix: dict[str, Any] = {}
@@ -713,6 +802,26 @@ class MarketCollectorService:
                     stats.get("vol_buy") or 0.0,
                 ),
             }
+
+        if ticket_buckets:
+            tickets_raw = matrix.get("tickets")
+            tickets_map: dict[str, Any] = dict(tickets_raw) if isinstance(tickets_raw, dict) else {}
+            for t_key, t_val in ticket_buckets.items():
+                prev_t_raw = tickets_map.get(t_key)
+                prev_t: dict[str, Any] = prev_t_raw if isinstance(prev_t_raw, dict) else {}
+                tickets_map[t_key] = {
+                    "sell": _update_cell(
+                        prev_t.get("sell"),
+                        float(t_val.get("sell_avg20") or t_val.get("sell_best") or 0.0),
+                        float(t_val.get("vol_sell") or 0.0),
+                    ),
+                    "buy": _update_cell(
+                        prev_t.get("buy"),
+                        float(t_val.get("buy_avg20") or t_val.get("buy_best") or 0.0),
+                        float(t_val.get("vol_buy") or 0.0),
+                    ),
+                }
+            matrix["tickets"] = tickets_map
 
         prev_vol_buy = float(cast(float, existing.vol_buy_sum)) if existing is not None else 0.0
         prev_vol_sell = float(cast(float, existing.vol_sell_sum)) if existing is not None else 0.0

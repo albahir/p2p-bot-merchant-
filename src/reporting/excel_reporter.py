@@ -14,6 +14,13 @@ import pandas as pd
 
 from src.data.models import BankVoucher, JournalEntry, Order, WalletMovement
 from src.reporting.accounting_engine import LedgerSummary
+from src.reporting.islr_calculator import (
+    SENIAT_WORKPAPER_DISCLAIMER,
+    build_seniat_casillas,
+    compute_islr_estimation,
+    evaluate_seniat_thresholds,
+    is_third_party_counterparty_mismatch,
+)
 from src.reporting.tax_engine import TradeResult
 
 if TYPE_CHECKING:
@@ -32,6 +39,7 @@ class ExcelReporter:
             detail_data = [
                 {
                     "Fecha y Hora (UTC)": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else "-",
+                    "Fecha y Hora (VET)": ExcelReporter._to_vet_str(r.created_at),
                     "Número de Orden": r.order_number,
                     "Tipo": r.trade_type,
                     "Cripto (USDT)": r.crypto_amount,
@@ -105,9 +113,10 @@ class ExcelReporter:
 
         p2p_data = [
             {
-                "Fecha (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "-",
+                "Fecha y Hora (VET)": ExcelReporter._to_vet_str(cast(datetime | None, o.created_at)),
                 "Número de Pedido": o.order_number,
                 "Tipo": o.trade_type,
+                "Banco / Método de Pago": o.payment_method or "-",
                 "Activo": o.asset,
                 "Cripto": o.crypto_amount,
                 "Precio Unitario": o.unit_price,
@@ -123,7 +132,7 @@ class ExcelReporter:
 
         movs_data = [
             {
-                "Fecha (UTC)": m.timestamp.strftime("%Y-%m-%d %H:%M:%S") if m.timestamp else "-",
+                "Fecha y Hora (VET)": ExcelReporter._to_vet_str(cast(datetime | None, m.timestamp)),
                 "Tipo Movimiento": m.movement_type,
                 "Activo": m.asset,
                 "Monto": m.amount,
@@ -139,7 +148,7 @@ class ExcelReporter:
 
         vouchers_data = [
             {
-                "Fecha": v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "-",
+                "Fecha (VET)": ExcelReporter._to_vet_str(cast(datetime | None, v.voucher_date or v.created_at)),
                 "Banco": v.bank_name,
                 "Referencia": v.reference_number,
                 "Monto (VES)": v.amount_ves,
@@ -211,9 +220,14 @@ class ExcelReporter:
         ventas_data = []
         for o in sell_orders:
             v = voucher_map.get(o.order_number)
+            tp_flag, _ = is_third_party_counterparty_mismatch(
+                getattr(v, "sender_name", None) if v else None,
+                cast(str | None, o.counterparty_name),
+                bank_sender_id=getattr(v, "sender_id", None) if v else None,
+            )
             ventas_data.append(
                 {
-                    "Fecha y Hora (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "-",
+                    "Fecha y Hora (VET)": ExcelReporter._to_vet_str(cast(datetime | None, o.created_at)),
                     "Número de Orden": o.order_number,
                     "Contraparte Binance": o.counterparty_name or "-",
                     "Activo Cripto": f"{o.crypto_amount:,.2f} {o.asset}",
@@ -225,6 +239,7 @@ class ExcelReporter:
                     "Referencia Bancaria": v.reference_number if v else "-",
                     "Nombre Pagador Bancario": v.sender_name if v else "-",
                     "Cédula/RIF Pagador": v.sender_id if v else "-",
+                    "Validación Titularidad": "⚠ Posible tercero" if tp_flag else "OK",
                 }
             )
         df_ventas = pd.DataFrame(ventas_data)
@@ -232,9 +247,14 @@ class ExcelReporter:
         compras_data = []
         for o in buy_orders:
             v = voucher_map.get(o.order_number)
+            tp_flag, _ = is_third_party_counterparty_mismatch(
+                getattr(v, "sender_name", None) if v else None,
+                cast(str | None, o.counterparty_name),
+                bank_sender_id=getattr(v, "sender_id", None) if v else None,
+            )
             compras_data.append(
                 {
-                    "Fecha y Hora (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "-",
+                    "Fecha y Hora (VET)": ExcelReporter._to_vet_str(cast(datetime | None, o.created_at)),
                     "Número de Orden": o.order_number,
                     "Contraparte Binance": o.counterparty_name or "-",
                     "Activo Cripto Recibido": f"{o.crypto_amount:,.2f} {o.asset}",
@@ -246,13 +266,14 @@ class ExcelReporter:
                     "Referencia Bancaria": v.reference_number if v else "-",
                     "Beneficiario Bancario": v.sender_name if v else "-",
                     "Cédula/RIF Beneficiario": v.sender_id if v else "-",
+                    "Validación Titularidad": "⚠ Posible tercero" if tp_flag else "OK",
                 }
             )
         df_compras = pd.DataFrame(compras_data)
 
         traza_data = [
             {
-                "Fecha": v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "-",
+                "Fecha (VET)": ExcelReporter._to_vet_str(cast(datetime | None, v.voucher_date or v.created_at)),
                 "Banco": v.bank_name,
                 "Referencia Bancaria": v.reference_number,
                 "Monto (VES)": v.amount_ves,
@@ -301,18 +322,23 @@ class ExcelReporter:
         initial_ves: float = 0.0,
         actual_final_usdt: float | None = None,
         actual_final_ves: float | None = None,
+        cost_method: str = "FIFO",
+        tcmv_rate: float | None = None,
     ) -> str:
-        """Crea el informe contable venezolano de 7 pestañas conformes con LISLR / BA VEN-NIF N° 12:
-        1. 'Libro Diario': Partida doble cronológica en VET con fila de SUMAS IGUALES.
-        2. 'Libro Mayor': Consolidación mensual con Saldo Inicial, Debe, Haber y Saldo Final.
-        3. 'Estado de Resultados': Base imponible real (Ventas - Costo PEPS - Comisiones).
-        4. 'Balance General (VEN-NIF 12)': Estado de Situación Financiera (Efectivo VES vs Criptoactivos USDT).
-        5. 'Kardex Inventario USDT': Control de existencias cripto (Art. 177 Rgto. LISLR) y Arqueo.
-        6. 'Conciliación Bancaria': Comprobantes procesados y trazabilidad bancaria.
-        7. 'Liquidación Fiscal SENIAT': Resumen tributario ISLR / IGTF y datos del contribuyente.
+        """Crea el informe contable venezolano de 8 pestañas conformes con LISLR / BA VEN-NIF N° 12 / SENIAT:
+        1. 'Resumen Ejecutivo SENIAT': Papel de trabajo con casillas DPN-99025 / DPJ-99026 y semáforo SPE.
+        2. 'Libro Diario': Partida doble cronológica en VET con fila de SUMAS IGUALES.
+        3. 'Libro Mayor': Consolidación mensual con Saldo Inicial, Debe, Haber y Saldo Final.
+        4. 'Estado de Resultados': Base imponible real (Ventas - Costo PEPS/Promedio - Comisiones).
+        5. 'Balance General (VEN-NIF 12)': Estado de Situación Financiera (Efectivo VES vs Criptoactivos USDT).
+        6. 'Kardex Inventario USDT': Control de existencias cripto (Art. 177 Rgto. LISLR) y Arqueo.
+        7. 'Conciliación Bancaria': Comprobantes procesados, titularidad y trazabilidad bancaria.
+        8. 'Liquidación Fiscal SENIAT': Resumen tributario ISLR / IGTF y datos del contribuyente.
         """
         results = tax_results or []
         order_list = orders or []
+        norm_method = "AVG" if str(cost_method or "").strip().upper() in ("AVG", "AVERAGE", "PROMEDIO", "WEIGHTED_AVG") else "FIFO"
+        cost_method_label = "Costo Promedio Ponderado" if norm_method == "AVG" else "PEPS (FIFO)"
 
         # 1. Libro Diario (VET + Sumas Iguales)
         diario_rows: list[dict[str, object]] = [
@@ -400,7 +426,7 @@ class ExcelReporter:
             {"Partida Contable (VEN-NIF / LISLR)": "Contribuyente / Titular", "Monto (VES)": account_holder or "No especificado", "Equivalente USD (BCV)": rif or "C.I. / RIF no registrado"},
             {"Partida Contable (VEN-NIF / LISLR)": "Período Fiscal", "Monto (VES)": period or "-", "Equivalente USD (BCV)": f"BCV Ref: {ref_bcv:.4f}" if ref_bcv > 0 else "-"},
             {"Partida Contable (VEN-NIF / LISLR)": "Ingresos Brutos por Enajenación P2P", "Monto (VES)": ingresos_ventas, "Equivalente USD (BCV)": round(ingresos_ventas / ref_bcv, 2) if ref_bcv > 0 else 0.0},
-            {"Partida Contable (VEN-NIF / LISLR)": "(-) Costo de Adquisición PEPS (FIFO)", "Monto (VES)": costo_ventas_peps, "Equivalente USD (BCV)": round(costo_ventas_peps / ref_bcv, 2) if ref_bcv > 0 else 0.0},
+            {"Partida Contable (VEN-NIF / LISLR)": f"(-) Costo de Adquisición ({cost_method_label})", "Monto (VES)": costo_ventas_peps, "Equivalente USD (BCV)": round(costo_ventas_peps / ref_bcv, 2) if ref_bcv > 0 else 0.0},
             {"Partida Contable (VEN-NIF / LISLR)": "(=) Utilidad Bruta Realizada", "Monto (VES)": utilidad_bruta, "Equivalente USD (BCV)": round(utilidad_bruta / ref_bcv, 2) if ref_bcv > 0 else 0.0},
             {"Partida Contable (VEN-NIF / LISLR)": "(-) Comisiones Plataforma Exchange", "Monto (VES)": comisiones_binance, "Equivalente USD (BCV)": round(comisiones_binance / ref_bcv, 2) if ref_bcv > 0 else 0.0},
             {"Partida Contable (VEN-NIF / LISLR)": "(-) Comisiones Bancarias Deducibles", "Monto (VES)": comisiones_banco, "Equivalente USD (BCV)": round(comisiones_banco / ref_bcv, 2) if ref_bcv > 0 else 0.0},
@@ -581,33 +607,117 @@ class ExcelReporter:
         ]
         df_balance_general = pd.DataFrame(balance_general_rows)
 
-        # 5. Conciliación Bancaria
-        vouchers_rows = [
-            {
-                "Fecha (VET)": ExcelReporter._to_vet_str(cast(datetime | None, v.voucher_date)),
-                "Banco Origen": v.bank_name,
-                "Banco Destino": v.destination_bank or "-",
-                "Referencia": str(v.reference_number or "-"),
-                "Monto Neto (VES)": float(v.amount_ves),
-                "Comisión Bancaria (VES)": float(v.bank_fee_ves or 0.0),
-                "Total Debitado (VES)": float(v.total_debited_ves or v.amount_ves),
-                "Cédula/RIF Emisor": str(v.sender_id or "S/C"),
-                "Teléfono": str(v.sender_phone or "N/A"),
-                "Concepto / Motivo": v.concept or "-",
-                "Método": v.payment_method,
-                "Tipo Flujo": v.movement_type,
-                "Orden Asociada": str(v.associated_order_number or "-"),
-                "Estado Conciliación": v.verification_status,
-            }
-            for v in vouchers
-        ]
+        # 5. Conciliación Bancaria (con verificación de titularidad ante riesgo de pagos de terceros)
+        order_lookup = {str(o.order_number): o for o in completed_orders}
+        vouchers_rows = []
+        for v in vouchers:
+            linked_ord = order_lookup.get(str(v.associated_order_number or ""))
+            tp_flag, _ = (
+                is_third_party_counterparty_mismatch(
+                    cast(str | None, v.sender_name),
+                    cast(str | None, linked_ord.counterparty_name),
+                    bank_sender_id=cast(str | None, v.sender_id),
+                )
+                if linked_ord is not None
+                else (False, None)
+            )
+            vouchers_rows.append(
+                {
+                    "Fecha (VET)": ExcelReporter._to_vet_str(cast(datetime | None, v.voucher_date)),
+                    "Banco Origen": v.bank_name,
+                    "Banco Destino": v.destination_bank or "-",
+                    "Referencia": str(v.reference_number or "-"),
+                    "Monto Neto (VES)": float(v.amount_ves),
+                    "Comisión Bancaria (VES)": float(v.bank_fee_ves or 0.0),
+                    "Total Debitado (VES)": float(v.total_debited_ves or v.amount_ves),
+                    "Cédula/RIF Emisor": str(v.sender_id or "S/C"),
+                    "Teléfono": str(v.sender_phone or "N/A"),
+                    "Concepto / Motivo": v.concept or "-",
+                    "Método": v.payment_method,
+                    "Tipo Flujo": v.movement_type,
+                    "Orden Asociada": str(v.associated_order_number or "-"),
+                    "Estado Conciliación": v.verification_status,
+                    "Titularidad": "⚠ Verificar posible tercero" if tp_flag else "OK",
+                }
+            )
         df_vouchers = pd.DataFrame(vouchers_rows)
 
-        # 6. Liquidación Fiscal SENIAT (LISLR + IGTF + Providencia SNAT/2026/00099)
+        # 6. Liquidación Fiscal SENIAT y Resumen Ejecutivo DPN-99025 / DPJ-99026
+        islr_est = compute_islr_estimation(
+            gross_revenue_ves=ingresos_ventas,
+            cost_of_sales_ves=costo_ventas_peps,
+            deductible_expenses_ves=total_gastos_deducibles,
+            tax_id=rif,
+        )
+        casillas_seniat = build_seniat_casillas(
+            islr=islr_est,
+            initial_inventory_ves=init_usdt_cost,
+            purchases_ves=compras_ves,
+            final_inventory_ves=inventario_final_ves,
+            exchange_fees_ves=comisiones_binance,
+            bank_fees_ves=comisiones_banco,
+        )
+        bank_rotated_ves = round(
+            sum(float(e.debit) + float(e.credit) for e in journal_entries if str(e.account_code) == "1.1.01"),
+            2,
+        )
+        eff_tcmv = float(tcmv_rate or 0.0) if (tcmv_rate and float(tcmv_rate) > 0) else ref_bcv
+        spe_status = evaluate_seniat_thresholds(
+            gross_revenue_ves=ingresos_ventas,
+            net_income_ves=enriquecimiento_neto,
+            bank_rotated_volume_ves=bank_rotated_ves,
+            tcmv_rate_ves=eff_tcmv,
+            tax_id=rif,
+        )
+        contrapartes_unicas = len(
+            {
+                str(o.counterparty_name).strip()
+                for o in completed_orders
+                if getattr(o, "counterparty_name", None) and str(o.counterparty_name).strip()
+            }
+        )
+        dias_operados = len(
+            {
+                ExcelReporter._to_vet_str(cast(datetime | None, o.created_at))[:10]
+                for o in completed_orders
+                if o.created_at is not None
+            }
+        )
+
+        exec_rows: list[dict[str, object]] = [
+            {"Sección": "AVISO LEGAL", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Papel de Trabajo Contable", "Monto / Valor": SENIAT_WORKPAPER_DISCLAIMER, "Nota Técnica": "Respaldo documental tributario"},
+            {"Sección": "Identificación", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Contribuyente / Titular", "Monto / Valor": account_holder or "No especificado", "Nota Técnica": ""},
+            {"Sección": "Identificación", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Cédula / R.I.F.", "Monto / Valor": rif or "No registrado", "Nota Técnica": f"Régimen: {islr_est.taxpayer_type}"},
+            {"Sección": "Identificación", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Formulario Aplicable SENIAT", "Monto / Valor": f"Forma {islr_est.form_code}", "Nota Técnica": "www.seniat.gob.ve (Declaración electrónica)"},
+            {"Sección": "KPIs Período", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Período Fiscal (Hora VET UTC-4)", "Monto / Valor": period or "-", "Nota Técnica": f"Método: {cost_method_label}"},
+            {"Sección": "KPIs Período", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Órdenes Completadas Computadas", "Monto / Valor": len(completed_orders), "Nota Técnica": f"Días con actividad: {dias_operados}"},
+            {"Sección": "KPIs Período", "Casilla": "-", "Ítem": "-", "Concepto / Campo SENIAT": "Contrapartes Únicas Operadas", "Monto / Valor": contrapartes_unicas, "Nota Técnica": f"Tasa BCV ref: Bs. {ref_bcv:,.4f}" if ref_bcv > 0 else "-"},
+        ]
+        for c_row in casillas_seniat:
+            exec_rows.append(
+                {
+                    "Sección": c_row.section,
+                    "Casilla": c_row.box,
+                    "Ítem": c_row.item,
+                    "Concepto / Campo SENIAT": c_row.concept,
+                    "Monto / Valor": c_row.amount_ves,
+                    "Nota Técnica": c_row.note,
+                }
+            )
+        exec_rows.extend([
+            {"Sección": "Semáforo SENIAT", "Casilla": "-", "Ítem": "LISLR", "Concepto / Campo SENIAT": "Umbral Declaración PN (>1.000 UT Neto o >1.500 UT Bruto)", "Monto / Valor": "OBLIGATORIA EN EL PERÍODO" if spe_status.islr_pn_mandatory else "Por debajo de umbral anual", "Nota Técnica": f"Límites: Bs. {spe_status.islr_pn_net_limit_ves:,.2f} neto / Bs. {spe_status.islr_pn_gross_limit_ves:,.2f} bruto"},
+            {"Sección": "Semáforo SENIAT", "Casilla": "-", "Ítem": "SPE-INT", "Concepto / Campo SENIAT": "Umbral SPE Interior (50.000 TCMV mes / 600.000 TCMV año)", "Monto / Valor": spe_status.spe_interior_monthly_limit_ves, "Nota Técnica": f"Uso mensual real: {spe_status.spe_interior_monthly_pct:.2f}% ({'SUPERADO' if spe_status.spe_interior_exceeded else 'En rango'})"},
+            {"Sección": "Semáforo SENIAT", "Casilla": "-", "Ítem": "SPE-CAP", "Concepto / Campo SENIAT": "Umbral SPE Región Capital (250.000 TCMV mes / 3.000.000 TCMV año)", "Monto / Valor": spe_status.spe_capital_monthly_limit_ves, "Nota Técnica": f"Uso mensual real: {spe_status.spe_capital_monthly_pct:.2f}% ({'SUPERADO' if spe_status.spe_capital_exceeded else 'En rango'})"},
+            {"Sección": "Defensa SUDEBAN", "Casilla": "-", "Ítem": "1.1.01", "Concepto / Campo SENIAT": "Volumen Bancario Rotado (Capital de Trabajo)", "Monto / Valor": bank_rotated_ves, "Nota Técnica": spe_status.bank_volume_distinction_note},
+        ])
+        df_exec = pd.DataFrame(exec_rows)
+
         seniat_rows = [
             {"Concepto Fiscal": "Contribuyente / Titular", "Monto (VES)": account_holder or "No especificado"},
             {"Concepto Fiscal": "Cédula / RIF", "Monto (VES)": rif or "No registrado"},
             {"Concepto Fiscal": "Período Fiscal (Hora VET UTC-4)", "Monto (VES)": period or "-"},
+            {"Concepto Fiscal": "Formulario Aplicable SENIAT", "Monto (VES)": f"{islr_est.form_code} ({islr_est.taxpayer_type})"},
+            {"Concepto Fiscal": "Método de Costeo Inventario", "Monto (VES)": cost_method_label},
             {"Concepto Fiscal": "Ingresos Brutos por Ventas (VES)", "Monto (VES)": ingresos_ventas},
             {"Concepto Fiscal": "Costo de Ventas PEPS (VES)", "Monto (VES)": costo_ventas_peps},
             {"Concepto Fiscal": "Utilidad Bruta Realizada (VES)", "Monto (VES)": utilidad_bruta},
@@ -615,12 +725,16 @@ class ExcelReporter:
             {"Concepto Fiscal": "Gastos Financieros Deducibles - Comisiones Bancarias (VES)", "Monto (VES)": comisiones_banco},
             {"Concepto Fiscal": "Enriquecimiento Neto Gravable ISLR (VES)", "Monto (VES)": enriquecimiento_neto},
             {"Concepto Fiscal": "Equivalente ISLR Referencial BCV (USD)", "Monto (VES)": enriquecimiento_usd_bcv},
-            {"Concepto Fiscal": "IGTF Liquidación Banca Nacional VES", "Monto (VES)": "0% (No aplica 3% cuando se liquida en Bs por banca nacional)"},
-            {"Concepto Fiscal": "Normativa Aplicable", "Monto (VES)": "LISLR Art. 1/4/27 y Art. 177 Rgto / BA VEN-NIF 12 / Prov. SNAT/2026/00099"},
+            {"Concepto Fiscal": "ISLR Estimado Referencial (UT Bs. 43,00)", "Monto (VES)": islr_est.determined_tax_ves},
+            {"Concepto Fiscal": "IGTF Liquidación Banca Nacional VES", "Monto (VES)": "Alícuota 0% en Bolívares (Decreto N° 4.972, G.O. Ext. 6.821)"},
+            {"Concepto Fiscal": "Estatus Umbral SPE (SNAT/2026/00099)", "Monto (VES)": "ALERTA UMBRAL SPE" if spe_status.spe_interior_exceeded else "Dentro de parámetros ordinarios"},
+            {"Concepto Fiscal": "Papel de Trabajo Contable", "Monto (VES)": SENIAT_WORKPAPER_DISCLAIMER},
+            {"Concepto Fiscal": "Normativa Aplicable", "Monto (VES)": "LISLR Art. 1/4/27/50/52 y Art. 177 Rgto / BA VEN-NIF 12 / Prov. SNAT/2026/00099 / Res. SUDEBAN 377.07"},
         ]
         df_seniat = pd.DataFrame(seniat_rows)
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            df_exec.to_excel(writer, sheet_name="Resumen Ejecutivo SENIAT", index=False)
             df_diario.to_excel(writer, sheet_name="Libro Diario", index=False)
             df_mayor.to_excel(writer, sheet_name="Libro Mayor", index=False)
             df_resultados.to_excel(writer, sheet_name="Estado de Resultados", index=False)
@@ -629,16 +743,30 @@ class ExcelReporter:
             df_vouchers.to_excel(writer, sheet_name="Conciliación Bancaria", index=False)
             df_seniat.to_excel(writer, sheet_name="Liquidación Fiscal SENIAT", index=False)
 
-            text_cols = {"Referencia", "Orden P2P", "Orden Asociada", "Cédula/RIF Emisor", "Teléfono"}
+            text_cols = {"Referencia", "Orden P2P", "Orden Asociada", "Cédula/RIF Emisor", "Teléfono", "Ítem", "Casilla"}
+            crypto_cols = {"Cantidad (USDT)"}
+            money_cols = {
+                "Debe (VES)", "Haber (VES)", "Saldo Inicial (VES)", "Total Debe (VES)",
+                "Total Haber (VES)", "Saldo Final (VES)", "Monto (VES)", "Equivalente USD (BCV)",
+                "Valor Referencial (VES)", "Monto Neto (VES)", "Comisión Bancaria (VES)", "Total Debitado (VES)",
+            }
             for sheet_name in writer.sheets:
                 ws = writer.sheets[sheet_name]
                 for col in ws.columns:
                     header_val = str(col[0].value or "")
                     max_len = max(len(str(c.value or "")) for c in col)
-                    ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 3, 14), 48)
+                    ws.column_dimensions[col[0].column_letter].width = min(max(max_len + 3, 14), 56)
                     if header_val in text_cols:
                         for cell in col[1:]:
                             cell.number_format = "@"
+                    elif header_val in crypto_cols:
+                        for cell in col[1:]:
+                            if isinstance(cell.value, (int, float)):
+                                cell.number_format = "#,##0.0000"
+                    elif header_val in money_cols or header_val == "Monto / Valor":
+                        for cell in col[1:]:
+                            if isinstance(cell.value, (int, float)):
+                                cell.number_format = "#,##0.00"
 
         return output_path
 

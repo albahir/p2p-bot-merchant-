@@ -20,5 +20,9 @@ Garantizar la impenetrabilidad del bot, la protección de fondos, la estricta cu
     - **`jwt-decode`**: Decodificar encabezados, payloads y tokens anidados (`cty: "JWT"`), auditar tiempos (`exp`, `nbf`, `iat`) y detectar vulnerabilidades críticas como `alg: none` (CVE-2015-9235), exposición de secretos/PII en claims, ausencia de `exp` e inyección de encabezados `jku`, `jwk` o `x5u`.
     - **`jwt-encode`**: Generar tokens firmados de prueba para vectores de auditoría en `HS256` (HMAC), `RS256` (RSA) y `ES256` (ECDSA) inyectando secretos únicamente por variables de entorno.
     - **`jwt-validate`**: Verificar estructura RFC 7519, vigencia de claims con tolerancia de *clock skew* (60s), validación de firmas contra claves simétricas, llaves PEM o endpoints JWKS, y bloqueo estricto de ataques de confusión de algoritmo (`RS256` → `HS256`).
+- **Auditoría Web Live con Browser DevTools (`Chrome DevTools` / `Playwright MCP`)**:
+  - Seguir `.agents/skills/security-review/references/browser-devtools-security.md` en pruebas de frontend/API: inspeccionar tráfico de red (`static: false`) para descartar tokens en URL, peticiones no autorizadas en vistas públicas, errores de consola/CSP y aislamiento completo de `localStorage`/`sessionStorage`/cookies al cerrar sesión o recibir `401`.
+- **Auditoría Edge, WAF y Workers en Cloudflare (`cloudflare_cloudflare` MCP / `cf-cli`)**:
+  - Seguir `.agents/skills/security-review/references/cloudflare-edge-security.md`: auditar `ssl: strict`, `always_use_https`, `min_tls_version >= 1.2`, HSTS seguro para correo, Cache Rules (`bypass` en `/api/*`, `/ws/*`, `/health`), Rate Limiting en `/api/auth/*`, DNS `proxied` y listas blancas de rutas en Cloudflare Workers (`p2p-telegram-proxy`).
 
 

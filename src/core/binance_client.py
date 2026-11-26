@@ -407,3 +407,75 @@ class BinanceP2PClient:
             if isinstance(items, list):
                 return [item for item in items if isinstance(item, dict)]
             return []
+
+    def get_deposit_history(
+        self,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
+        coin: str | None = "USDT",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Consulta el historial de depósitos cripto on-chain / internos en Binance (GET /sapi/v1/capital/deposit/hisrec)."""
+        url = f"{self.base_url}/sapi/v1/capital/deposit/hisrec"
+        params: dict[str, Any] = {
+            "status": 1,  # Solo depósitos acreditados / completados
+            "limit": max(1, min(int(limit), 1000)),
+            "recvWindow": self.recv_window,
+            "timestamp": self.get_synced_timestamp(),
+        }
+        if coin:
+            params["coin"] = coin.strip().upper()
+        if start_timestamp is not None:
+            params["startTime"] = int(start_timestamp)
+        if end_timestamp is not None:
+            params["endTime"] = int(end_timestamp)
+
+        signed_params = self.sign_params(params)
+        headers = {"X-MBX-APIKEY": self.api_key}
+        with httpx.Client(timeout=12.0) as client:
+            response = client.get(url, params=signed_params, headers=headers)
+            self.check_weight(response.headers)
+            if response.status_code != 200:
+                self._handle_response_errors(response)
+            raw = response.json()
+            if isinstance(raw, dict) and raw.get("code") not in (None, 0, "000000"):
+                self._handle_response_errors(response)
+            if isinstance(raw, list):
+                return [item for item in raw if isinstance(item, dict)]
+            return []
+
+    def get_withdraw_history(
+        self,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
+        coin: str | None = "USDT",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Consulta el historial de retiros/salidas cripto en Binance (GET /sapi/v1/capital/withdraw/history)."""
+        url = f"{self.base_url}/sapi/v1/capital/withdraw/history"
+        params: dict[str, Any] = {
+            "status": 6,  # Solo retiros completados
+            "limit": max(1, min(int(limit), 1000)),
+            "recvWindow": self.recv_window,
+            "timestamp": self.get_synced_timestamp(),
+        }
+        if coin:
+            params["coin"] = coin.strip().upper()
+        if start_timestamp is not None:
+            params["startTime"] = int(start_timestamp)
+        if end_timestamp is not None:
+            params["endTime"] = int(end_timestamp)
+
+        signed_params = self.sign_params(params)
+        headers = {"X-MBX-APIKEY": self.api_key}
+        with httpx.Client(timeout=12.0) as client:
+            response = client.get(url, params=signed_params, headers=headers)
+            self.check_weight(response.headers)
+            if response.status_code != 200:
+                self._handle_response_errors(response)
+            raw = response.json()
+            if isinstance(raw, dict) and raw.get("code") not in (None, 0, "000000"):
+                self._handle_response_errors(response)
+            if isinstance(raw, list):
+                return [item for item in raw if isinstance(item, dict)]
+            return []

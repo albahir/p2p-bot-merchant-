@@ -63,6 +63,7 @@ interface LiveBalanceState {
   outflow_usdt: number;
   other_inflow_usdt?: number;
   other_outflow_usdt?: number;
+  p2p_fee_usdt?: number;
   theoretical_usdt: number;
   total_initial_ves: number;
   total_inflows_ves: number;
@@ -169,6 +170,8 @@ export default function AccountingPage() {
   const [journalEntries, setJournalEntries] = useState<JournalEntryItem[]>(initialJournal || []);
   const [ledgerSummaries, setLedgerSummaries] = useState<LedgerSummaryItem[]>([]);
   const [fiscalSummary, setFiscalSummary] = useState<FiscalSummary | null>(null);
+  const [costMethod, setCostMethod] = useState<"FIFO" | "AVG">("FIFO");
+  const [showAlertsDetail, setShowAlertsDetail] = useState<boolean>(false);
 
   const [lastVoucher, setLastVoucher] = useState<UploadVoucherResponse | null>(null);
   const [manualOrderNumber, setManualOrderNumber] = useState<string>("");
@@ -531,7 +534,7 @@ export default function AccountingPage() {
             ),
             getJournalEntries(startDate, endDate).catch(() => []),
             getLedgerSummaries(year, month, undefined, committedVes).catch(() => []),
-            getFiscalSummary(periodStr, committedUsdt).catch(() => null),
+            getFiscalSummary(periodStr, committedUsdt, undefined, costMethod).catch(() => null),
             getFiscalSnapshot(periodStr).catch(() => null),
             listWalletMovements(year, month).catch(() => []),
           ]);
@@ -557,7 +560,7 @@ export default function AccountingPage() {
         }
       }
     },
-    [year, month, committedUsdt, committedVes, committedBankMap, cutoffStartDate]
+    [year, month, committedUsdt, committedVes, committedBankMap, cutoffStartDate, costMethod]
   );
 
   useEffect(() => {
@@ -791,12 +794,32 @@ export default function AccountingPage() {
 
   const otherInflowUsdt = liveBalance?.other_inflow_usdt ?? 0;
   const otherOutflowUsdt = liveBalance?.other_outflow_usdt ?? 0;
+  const p2pFeeUsdt = liveBalance?.p2p_fee_usdt ?? 0;
   const netFlowUsdt =
     (liveBalance?.inflow_usdt ?? 0) +
     otherInflowUsdt -
     (liveBalance?.outflow_usdt ?? 0) -
-    otherOutflowUsdt;
+    otherOutflowUsdt -
+    p2pFeeUsdt;
   const displayedTheoreticalUsdt = initialUsdt + netFlowUsdt;
+
+  const detectedFormCode =
+    fiscalSummary?.form_code ||
+    (user?.tax_id?.trim().toUpperCase().startsWith("J") ? "DPJ-99026" : "DPN-99025");
+  const speInteriorLim =
+    (fiscalSummary?.tcmv_rate_ves ?? 0) > 0 ? 50000 * (fiscalSummary?.tcmv_rate_ves ?? 0) : 0;
+  const speInteriorPct =
+    speInteriorLim > 0
+      ? ((fiscalSummary?.gross_revenue_ves ?? 0) / speInteriorLim) * 100
+      : 0;
+  const discreetAlerts: string[] = [
+    ...(fiscalSummary?.inventory_warnings || []),
+    ...(speInteriorPct >= 75
+      ? [
+          `Ingreso real en ${speInteriorPct.toFixed(1)}% del límite mensual SPE Interior (SNAT/2026/00099). Recuerda distinguir el capital rotado en bancos.`,
+        ]
+      : []),
+  ];
 
   const periodPrefix = `${year}-${String(month).padStart(2, "0")}`;
   const periodLastDay = new Date(year, month, 0).getDate();
@@ -864,7 +887,7 @@ export default function AccountingPage() {
               type="button"
               onClick={async () => {
                 try {
-                  await downloadAccountingExcel(year, month);
+                  await downloadAccountingExcel(year, month, costMethod);
                 } catch (err: any) {
                   setFeedback({
                     type: "error",
@@ -882,7 +905,7 @@ export default function AccountingPage() {
               type="button"
               onClick={async () => {
                 try {
-                  await downloadAccountingPdf(year, month);
+                  await downloadAccountingPdf(year, month, costMethod);
                 } catch (err: any) {
                   setFeedback({
                     type: "error",
@@ -981,6 +1004,27 @@ export default function AccountingPage() {
                   {periodConfig.bcv_day1_rate.toFixed(4)}
                 </span>
               )}
+              <span
+                className="text-[10px] font-mono text-slate-400 bg-surface-container border border-[#1e2430] px-2 py-0.5 rounded-md"
+                title={
+                  detectedFormCode === "DPJ-99026"
+                    ? "Persona Jurídica (Tarifa N° 2 LISLR · Art. 52)"
+                    : "Persona Natural Residente (Tarifa N° 1 LISLR · Art. 50)"
+                }
+              >
+                {detectedFormCode}
+              </span>
+              {discreetAlerts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAlertsDetail((prev) => !prev)}
+                  className="text-[10px] font-mono text-amber-300/90 bg-amber-500/10 border border-amber-500/25 hover:border-amber-400/50 px-2 py-0.5 rounded-md flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Ver aviso fiscal discreto"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  <span>{discreetAlerts.length} aviso</span>
+                </button>
+              )}
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
@@ -1062,6 +1106,17 @@ export default function AccountingPage() {
               </div>
             ))}
           </div>
+
+          {showAlertsDetail && discreetAlerts.length > 0 && (
+            <div className="px-2.5 py-2 rounded-lg bg-surface-container/90 border border-amber-500/25 text-[11px] font-mono text-slate-300 space-y-1">
+              {discreetAlerts.map((msg, i) => (
+                <div key={i} className="flex items-start gap-1.5">
+                  <span className="text-amber-400 shrink-0">•</span>
+                  <span>{msg}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* 3 Tarjetas Bento de Saldos y Conciliación OCR */}
@@ -1225,35 +1280,77 @@ export default function AccountingPage() {
                     -{(liveBalance?.outflow_usdt ?? 0).toFixed(2)}
                   </div>
                 </div>
+                <div
+                  className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0"
+                  title="Entradas por Binance Pay, Binance ID o depósitos de red"
+                >
+                  <div className="text-[9px] text-slate-400 uppercase flex items-center justify-between gap-1">
+                    <span className="truncate">Pay / Dep.</span>
+                    <span className="text-[8px] text-tertiary/80">IN</span>
+                  </div>
+                  <div className="text-tertiary font-semibold mt-0.5 truncate">
+                    +{otherInflowUsdt.toFixed(2)}
+                  </div>
+                </div>
+                <div
+                  className="p-2 rounded-lg bg-surface-container border border-[#1e2430] min-w-0"
+                  title="Salidas en Binance (Pay enviados, retiros de red y comisiones)"
+                >
+                  <div className="text-[9px] text-slate-400 uppercase flex items-center justify-between gap-1">
+                    <span className="truncate">Salidas Binance</span>
+                    <span className="text-[8px] text-amber-300/80">OUT</span>
+                  </div>
+                  <div
+                    className={`font-semibold mt-0.5 truncate ${
+                      otherOutflowUsdt > 0 ? "text-amber-300" : "text-slate-200"
+                    }`}
+                  >
+                    -{otherOutflowUsdt.toFixed(2)}
+                  </div>
+                </div>
               </div>
 
-              <div className="px-2 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center justify-between gap-2 text-[10px] font-mono">
-                <div className="min-w-0 truncate text-slate-400">
-                  Pay / Otros:{" "}
-                  <span className="text-slate-200 tabular-nums">
-                    +{otherInflowUsdt.toFixed(2)} / -{otherOutflowUsdt.toFixed(2)}
+              {p2pFeeUsdt > 0 && (
+                <div className="px-2 py-1 rounded-md bg-surface-container/60 border border-[#1e2430]/80 flex items-center justify-between text-[10px] font-mono text-slate-400 tabular-nums">
+                  <span>Comisiones P2P Binance</span>
+                  <span className="text-slate-300">-{p2pFeeUsdt.toFixed(4)}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono">
+                <button
+                  type="button"
+                  disabled={periodClosed}
+                  onClick={() => {
+                    setWmType("WITHDRAWAL");
+                    setShowWalletModal(true);
+                  }}
+                  className="px-2 py-1.5 rounded-lg bg-surface-container-high border border-[#283140] hover:border-slate-500 text-slate-200 font-medium flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
+                  title="Registrar entrada o salida USDT (Binance Pay, Binance ID, TRC20, BSC)"
+                >
+                  <span className="material-symbols-outlined text-[13px] text-slate-400">
+                    add_circle
                   </span>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    disabled={periodClosed}
-                    onClick={() => setShowWalletModal(true)}
-                    className="px-1.5 py-0.5 rounded bg-surface-container-high border border-[#283140] hover:border-slate-500 text-slate-200 text-[10px] cursor-pointer disabled:opacity-50"
-                    title="Registrar entrada o salida USDT (Binance ID, correo, depósito o retiro)"
+                  <span>+ Pay / Salida</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={syncingBinancePay || periodClosed}
+                  onClick={handleSyncBinancePay}
+                  className="px-2 py-1.5 rounded-lg bg-surface-container-high border border-[#283140] hover:border-slate-500 text-slate-200 font-medium flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
+                  title="Sincronizar Binance Pay, depósitos y retiros de Binance (solo lectura)"
+                >
+                  <span
+                    className={`material-symbols-outlined text-[13px] text-slate-400 ${
+                      syncingBinancePay ? "animate-spin" : ""
+                    }`}
                   >
-                    + Mov.
-                  </button>
-                  <button
-                    type="button"
-                    disabled={syncingBinancePay || periodClosed}
-                    onClick={handleSyncBinancePay}
-                    className="px-1.5 py-0.5 rounded bg-surface-container-high border border-[#283140] hover:border-slate-500 text-slate-300 text-[10px] cursor-pointer disabled:opacity-50"
-                    title="Sincronizar transferencias Binance Pay / Binance ID (solo lectura)"
-                  >
-                    {syncingBinancePay ? "..." : "Pay"}
-                  </button>
-                </div>
+                    sync
+                  </span>
+                  <span className="truncate">
+                    {syncingBinancePay ? "Sincronizando..." : "Pay / Retiros"}
+                  </span>
+                </button>
               </div>
             </div>
           </div>
@@ -1453,7 +1550,7 @@ export default function AccountingPage() {
                   onClick={handleSyncBinancePay}
                   className="px-2.5 py-1 rounded-lg bg-surface-container border border-[#283140] hover:border-slate-500 text-xs font-mono text-slate-200 cursor-pointer disabled:opacity-50"
                 >
-                  {syncingBinancePay ? "Sincronizando Pay..." : "Sincronizar Binance Pay"}
+                  {syncingBinancePay ? "Sincronizando..." : "Sincronizar Pay / Retiros"}
                 </button>
                 <button
                   type="button"
@@ -1461,7 +1558,7 @@ export default function AccountingPage() {
                   onClick={() => setShowWalletModal(true)}
                   className="px-2.5 py-1 rounded-lg bg-primary-container text-on-primary text-xs font-bold hover:brightness-110 cursor-pointer disabled:opacity-50"
                 >
-                  + Registrar movimiento
+                  + Registrar Pay / Salida
                 </button>
               </div>
             )}
@@ -1603,6 +1700,40 @@ export default function AccountingPage() {
             aria-hidden={activeTab !== "FISCAL_6"}
             className={`spa-tab-panel ${activeTab === "FISCAL_6" ? "" : "inactive"}`}
           >
+            <div className="px-4 pt-3.5 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+              <div className="flex items-center gap-1.5">
+                <span className="text-slate-400">Método fiscal:</span>
+                <div className="inline-flex rounded-lg bg-surface-container border border-[#1e2430] p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setCostMethod("FIFO")}
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
+                      costMethod === "FIFO"
+                        ? "bg-surface-container-high text-white font-semibold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    PEPS (FIFO)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCostMethod("AVG")}
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
+                      costMethod === "AVG"
+                        ? "bg-surface-container-high text-white font-semibold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Promedio
+                  </button>
+                </div>
+              </div>
+              <span className="text-slate-400">
+                Papel de trabajo: <strong className="text-slate-200">{detectedFormCode}</strong> ·
+                UT Bs. 43,00
+              </span>
+            </div>
+
             <div className="p-3.5 sm:p-5 grid grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-3.5">
               {[
                 {
@@ -1612,19 +1743,19 @@ export default function AccountingPage() {
                   tone: "text-white",
                 },
                 {
-                  title: "2. Entradas Operativas (P2P + Pay/Depósitos)",
+                  title: "2. Entradas (P2P + Pay/Depósitos)",
                   val: fiscalSummary?.total_inflows ?? 0,
                   unit: "USDT",
-                  tone: "text-white",
+                  tone: "text-tertiary",
                 },
                 {
-                  title: "3. Salidas Operativas (P2P + Pay/Retiros)",
+                  title: "3. Salidas (P2P + Pay/Retiros)",
                   val: fiscalSummary?.total_outflows ?? 0,
                   unit: "USDT",
-                  tone: "text-slate-200",
+                  tone: "text-amber-300",
                 },
                 {
-                  title: "4. Comisiones Cripto Deducibles (USDT)",
+                  title: "4. Comisiones Cripto (USDT)",
                   val: fiscalSummary?.total_fees ?? 0,
                   unit: "USDT",
                   tone: "text-slate-300",
@@ -1636,7 +1767,7 @@ export default function AccountingPage() {
                   tone: "text-white",
                 },
                 {
-                  title: "6. Utilidad Neta Fiscal PEPS (VES)",
+                  title: `6. Utilidad Neta Real ${costMethod === "AVG" ? "Promedio" : "PEPS"} (VES)`,
                   val: fiscalSummary?.net_profit_ves ?? 0,
                   unit: "VES",
                   tone: (fiscalSummary?.net_profit_ves ?? 0) >= 0 ? "text-tertiary" : "text-error",
@@ -1665,6 +1796,41 @@ export default function AccountingPage() {
                 </div>
               ))}
             </div>
+
+            {fiscalSummary && (
+              <div className="mx-3.5 sm:mx-5 mb-4 p-3 rounded-xl bg-surface-container/70 border border-[#1e2430] grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-[11px] font-mono tabular-nums">
+                <div>
+                  <div className="text-[9px] text-slate-400 uppercase">Ingresos Ventas (711)</div>
+                  <div className="text-white font-semibold mt-0.5">
+                    Bs. {(fiscalSummary.gross_revenue_ves ?? 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] text-slate-400 uppercase">Costo Ventas (734)</div>
+                  <div className="text-slate-200 font-semibold mt-0.5">
+                    Bs. {(fiscalSummary.acquisition_cost_ves ?? 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] text-slate-400 uppercase">Gastos Deduc. (743)</div>
+                  <div className="text-slate-200 font-semibold mt-0.5">
+                    Bs. {((fiscalSummary.exchange_fees_ves ?? 0) + (fiscalSummary.bank_fees_ves ?? 0)).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] text-slate-400 uppercase">ISLR Est. Ref ({detectedFormCode})</div>
+                  <div className="text-primary font-semibold mt-0.5">
+                    Bs. {(fiscalSummary.estimated_islr_ves ?? 0).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] text-slate-400 uppercase">SPE (SNAT/2026/00099)</div>
+                  <div className={`font-semibold mt-0.5 ${speInteriorPct >= 100 ? "text-amber-300" : "text-slate-300"}`}>
+                    {speInteriorLim > 0 ? `${speInteriorPct.toFixed(1)}% límite mes` : "Ordinario"}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <div
@@ -1672,15 +1838,50 @@ export default function AccountingPage() {
             aria-hidden={activeTab !== "WALLET"}
             className={`spa-tab-panel ${activeTab === "WALLET" ? "" : "inactive"}`}
           >
+            {walletMovements.length > 0 && (
+              <div className="px-4 py-2.5 border-b border-[#1e2430] bg-surface-container/50 flex flex-wrap items-center gap-3 text-[11px] font-mono tabular-nums">
+                <span className="text-tertiary">
+                  Entradas Pay / Depósitos:{" "}
+                  <strong>
+                    +
+                    {walletMovements
+                      .filter((m) => m.movement_type === "DEPOSIT")
+                      .reduce((acc, m) => acc + Number(m.amount || 0), 0)
+                      .toFixed(2)}{" "}
+                    USDT
+                  </strong>
+                </span>
+                <span className="text-amber-300">
+                  Salidas en Binance:{" "}
+                  <strong>
+                    -
+                    {walletMovements
+                      .filter((m) => m.movement_type === "WITHDRAWAL")
+                      .reduce((acc, m) => acc + Number(m.amount || 0) + Number(m.fee || 0), 0)
+                      .toFixed(2)}{" "}
+                    USDT
+                  </strong>
+                </span>
+                <span className="text-slate-400">
+                  Comisiones red:{" "}
+                  {walletMovements
+                    .filter((m) => m.movement_type === "WITHDRAWAL")
+                    .reduce((acc, m) => acc + Number(m.fee || 0), 0)
+                    .toFixed(4)}{" "}
+                  USDT
+                </span>
+              </div>
+            )}
+
             <div className="overflow-x-auto overscroll-x-contain">
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-0 z-10 bg-surface-container">
                   <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
                     <th scope="col" className="py-3 px-4">Fecha (VET)</th>
-                    <th scope="col" className="py-3 px-4">Canal</th>
+                    <th scope="col" className="py-3 px-4">Sentido / Canal</th>
                     <th scope="col" className="py-3 px-4">Contraparte / Detalle</th>
                     <th scope="col" className="py-3 px-4 text-right">Monto</th>
-                    <th scope="col" className="py-3 px-4 text-right">Comisión</th>
+                    <th scope="col" className="py-3 px-4 text-right">Comisión Red</th>
                     <th scope="col" className="py-3 px-4 text-right">Acción</th>
                   </tr>
                 </thead>
@@ -1688,51 +1889,77 @@ export default function AccountingPage() {
                   {walletMovements.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="py-10 text-center text-slate-400 font-mono">
-                        Sin transferencias Binance Pay, Binance ID ni depósitos/retiros en este período.
+                        Sin transferencias Binance Pay, depósitos ni salidas en Binance en este período.
                       </td>
                     </tr>
                   ) : (
-                    walletMovements.map((wm) => (
-                      <tr key={wm.id} className="hover:bg-surface-container/70 transition-colors">
-                        <td className="py-3 px-4 font-mono tabular-nums text-slate-300">
-                          {wm.date_vet}
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-[10px] font-mono text-slate-300">
-                            {wm.channel}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-slate-300 max-w-xs truncate">
-                          <div className="text-white font-medium truncate">
-                            {wm.counterparty || (wm.movement_type === "DEPOSIT" ? "Entrada de fondos" : "Salida de fondos")}
-                          </div>
-                          {wm.note && (
-                            <div className="text-[10px] text-slate-500 truncate">{wm.note}</div>
-                          )}
-                        </td>
-                        <td
-                          className={`py-3 px-4 text-right font-mono tabular-nums font-semibold ${
-                            wm.movement_type === "DEPOSIT" ? "text-tertiary" : "text-slate-200"
-                          }`}
-                        >
-                          {wm.movement_type === "DEPOSIT" ? "+" : "-"}
-                          {wm.amount.toFixed(4)} {wm.asset}
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
-                          {wm.fee > 0 ? `${wm.fee.toFixed(4)} ${wm.asset}` : "-"}
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            type="button"
-                            disabled={periodClosed}
-                            onClick={() => void handleDeleteWalletMovement(wm.id)}
-                            className="text-[11px] font-mono text-slate-400 hover:text-error disabled:opacity-40 cursor-pointer"
+                    walletMovements.map((wm) => {
+                      const isDeposit = wm.movement_type === "DEPOSIT";
+                      const channelLabel =
+                        wm.channel === "BINANCE_PAY"
+                          ? "Binance Pay"
+                          : wm.channel === "BINANCE_ID"
+                          ? "Binance ID"
+                          : wm.channel === "TRC20"
+                          ? "Red TRC20"
+                          : wm.channel === "BSC"
+                          ? "Red BSC"
+                          : wm.channel === "INTERNAL"
+                          ? "Interno"
+                          : wm.channel;
+                      return (
+                        <tr key={wm.id} className="hover:bg-surface-container/70 transition-colors">
+                          <td className="py-3 px-4 font-mono tabular-nums text-slate-300">
+                            {wm.date_vet}
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold border ${
+                                  isDeposit
+                                    ? "bg-tertiary/10 border-tertiary/30 text-tertiary"
+                                    : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                                }`}
+                              >
+                                {isDeposit ? "↓ Entrada" : "↑ Salida"}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-surface-container border border-[#283140] text-[10px] font-mono text-slate-300">
+                                {channelLabel}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-slate-300 max-w-xs truncate">
+                            <div className="text-white font-medium truncate">
+                              {wm.counterparty || (isDeposit ? "Entrada a billetera Binance" : "Salida desde Binance")}
+                            </div>
+                            {wm.note && (
+                              <div className="text-[10px] text-slate-500 truncate">{wm.note}</div>
+                            )}
+                          </td>
+                          <td
+                            className={`py-3 px-4 text-right font-mono tabular-nums font-semibold ${
+                              isDeposit ? "text-tertiary" : "text-amber-300"
+                            }`}
                           >
-                            Eliminar
-                          </button>
-                        </td>
-                      </tr>
-                    ))
+                            {isDeposit ? "+" : "-"}
+                            {wm.amount.toFixed(4)} {wm.asset}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-400">
+                            {wm.fee > 0 ? `${wm.fee.toFixed(4)} ${wm.asset}` : "-"}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <button
+                              type="button"
+                              disabled={periodClosed}
+                              onClick={() => void handleDeleteWalletMovement(wm.id)}
+                              className="text-[11px] font-mono text-slate-400 hover:text-error disabled:opacity-40 cursor-pointer"
+                            >
+                              Eliminar
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1766,51 +1993,71 @@ export default function AccountingPage() {
                 </button>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Registra entradas o salidas por Binance ID, correo, Binance Pay o red externa. Ajusta tu inventario USDT y Kardex sin alterar la ganancia P2P gravable ISLR.
+                Registra entradas por Binance Pay / Depósitos o salidas en Binance (Pay enviado, retiro TRC20/BSC). Ajusta el Kardex sin alterar la ganancia P2P gravable.
               </p>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-3">
                 <div>
-                  <label htmlFor="wm-type" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
-                    Tipo *
-                  </label>
-                  <select
-                    id="wm-type"
-                    value={wmType}
-                    onChange={(e) => setWmType(e.target.value as "DEPOSIT" | "WITHDRAWAL")}
-                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
-                  >
-                    <option value="DEPOSIT">Entrada (+ USDT)</option>
-                    <option value="WITHDRAWAL">Salida (- USDT)</option>
-                  </select>
+                  <span className="block text-[10px] font-mono uppercase text-slate-400 mb-1.5">
+                    Tipo de movimiento *
+                  </span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setWmType("DEPOSIT")}
+                      className={`px-3 py-2 rounded-xl border text-xs font-mono font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                        wmType === "DEPOSIT"
+                          ? "bg-tertiary/15 border-tertiary/50 text-tertiary"
+                          : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-[15px]">south_west</span>
+                      <span>Entrada (+ USDT)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWmType("WITHDRAWAL")}
+                      className={`px-3 py-2 rounded-xl border text-xs font-mono font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+                        wmType === "WITHDRAWAL"
+                          ? "bg-amber-500/15 border-amber-500/50 text-amber-300"
+                          : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-[15px]">north_east</span>
+                      <span>Salida Binance (- USDT)</span>
+                    </button>
+                  </div>
                 </div>
+
                 <div>
-                  <label htmlFor="wm-channel" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                  <span className="block text-[10px] font-mono uppercase text-slate-400 mb-1.5">
                     Canal *
-                  </label>
-                  <select
-                    id="wm-channel"
-                    value={wmChannel}
-                    onChange={(e) =>
-                      setWmChannel(
-                        e.target.value as
-                          | "BINANCE_PAY"
-                          | "BINANCE_ID"
-                          | "TRC20"
-                          | "BSC"
-                          | "INTERNAL"
-                          | "MANUAL"
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white"
-                  >
-                    <option value="BINANCE_PAY">Binance Pay</option>
-                    <option value="BINANCE_ID">Binance ID / Correo</option>
-                    <option value="TRC20">Red TRC20</option>
-                    <option value="BSC">Red BSC (BEP20)</option>
-                    <option value="INTERNAL">Transferencia interna</option>
-                    <option value="MANUAL">Ajuste manual</option>
-                  </select>
+                  </span>
+                  <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
+                    {(
+                      [
+                        { id: "BINANCE_PAY", label: "Binance Pay" },
+                        { id: "BINANCE_ID", label: "Binance ID" },
+                        { id: "TRC20", label: "Red TRC20" },
+                        { id: "BSC", label: "Red BSC" },
+                        { id: "INTERNAL", label: "Interno" },
+                        { id: "MANUAL", label: "Ajuste manual" },
+                      ] as const
+                    ).map((ch) => (
+                      <button
+                        key={ch.id}
+                        type="button"
+                        onClick={() => setWmChannel(ch.id)}
+                        className={`px-2 py-1.5 rounded-lg border text-center cursor-pointer transition-colors ${
+                          wmChannel === ch.id
+                            ? "bg-surface-container-high border-primary-container/60 text-white font-semibold"
+                            : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {ch.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -1845,8 +2092,8 @@ export default function AccountingPage() {
               </div>
 
               {wmType === "WITHDRAWAL" && (
-                <div>
-                  <label htmlFor="wm-fee" className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                <div className="space-y-1.5">
+                  <label htmlFor="wm-fee" className="block text-[10px] font-mono uppercase text-slate-400">
                     Comisión de red (USDT)
                   </label>
                   <BankAmountInput
@@ -1856,6 +2103,11 @@ export default function AccountingPage() {
                     ariaLabel="Comisión de red en USDT"
                     className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono text-white text-right tabular-nums"
                   />
+                  {wmAmount > 0 && (
+                    <div className="text-[10px] font-mono text-amber-300/90 text-right tabular-nums">
+                      Total descontado de billetera Binance: -{(wmAmount + wmFee).toFixed(4)} USDT
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2205,6 +2457,11 @@ export default function AccountingPage() {
                       className="w-36 px-2.5 py-1.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-right text-xs font-mono text-tertiary font-bold tabular-nums"
                     />
                   </div>
+                  {!isUsdtOk && (
+                    <div className="text-[10px] font-mono text-amber-300/85">
+                      Sugerencia: verifica si falta registrar una salida Binance Pay o retiro en «+ Pay / Salida».
+                    </div>
+                  )}
                 </div>
 
                 {/* Arqueo Bancos VES */}
@@ -2286,6 +2543,7 @@ export default function AccountingPage() {
                           period: periodStr,
                           initial_balance: initialUsdt,
                           actual_final_balance: closeActualUsdt,
+                          cost_method: costMethod,
                         });
                         setFiscalSummary(closedRes);
                         setPeriodClosed(true);

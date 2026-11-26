@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { ChartVisualMode, TradingCandlesChart } from "@/components/trading-candles-chart";
+import { useTelemetry } from "@/lib/telemetry-context";
 import {
   MarketAnalyticsResponse,
   MarketCandlesResponse,
@@ -41,6 +42,7 @@ function fmtNum(val: number | null | undefined, digits = 2): string {
 }
 
 export default function MarketPage() {
+  const { user } = useTelemetry();
   const [side, setSide] = useState<MarketSideMode>("sell");
   const [timeframe, setTimeframe] = useState<MarketTimeframe>("5m");
   const [bank, setBank] = useState<string>("*");
@@ -48,8 +50,7 @@ export default function MarketPage() {
   const [ticketInput, setTicketInput] = useState<string>("1000000");
 
   const [chartMode, setChartMode] = useState<ChartVisualMode>("candles");
-  const [showEma, setShowEma] = useState<boolean>(true);
-  const [showRsi, setShowRsi] = useState<boolean>(true);
+  const [showTechMode, setShowTechMode] = useState<boolean>(false);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
 
   const initialCandlesCache = useMemo(
@@ -177,12 +178,11 @@ export default function MarketPage() {
     "Banco de Venezuela",
     "Mercantil",
     "Bancamiga",
+    "BBVA Provincial",
+    "BNC",
   ];
 
   const imbalancePct = analytics ? Math.round(analytics.depth_summary.imbalance * 100) : 0;
-  const maturityPct = analytics
-    ? Math.min(100, Math.round((analytics.days_count / Math.max(1, analytics.min_prediction_days)) * 100))
-    : 0;
 
   return (
     <AppShell>
@@ -217,17 +217,19 @@ export default function MarketPage() {
               <span>Auto 60s</span>
             </label>
 
-            <button
-              type="button"
-              onClick={() => void handleManualCollect()}
-              disabled={collecting}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-slate-950 transition-colors"
-            >
-              <span className="material-symbols-outlined text-[16px]">
-                {collecting ? "sync" : "add_chart"}
-              </span>
-              {collecting ? "Capturando..." : "Capturar ahora"}
-            </button>
+            {user && (
+              <button
+                type="button"
+                onClick={() => void handleManualCollect()}
+                disabled={collecting}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-slate-950 transition-colors"
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  {collecting ? "sync" : "add_chart"}
+                </span>
+                {collecting ? "Capturando..." : "Capturar ahora"}
+              </button>
+            )}
           </div>
         </header>
 
@@ -292,73 +294,50 @@ export default function MarketPage() {
 
           <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5">
             <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-slate-400">
-              <span>Temperatura del Mercado</span>
+              <span>Presión Compra / Venta</span>
               <span className="font-mono text-[10px] text-amber-400">
-                {SIDE_MODES.find((m) => m.id === side)?.label ?? side}
+                {bank === "*" ? "Todos" : bank}
               </span>
             </div>
             <div className="mt-1 flex items-baseline gap-2.5 font-mono tabular-nums">
-              <span
-                className={`text-base font-bold ${
-                  analytics?.rsi14_current === null || analytics?.rsi14_current === undefined
-                    ? "text-violet-400"
-                    : analytics.rsi14_current >= 70
-                    ? "text-rose-400"
-                    : analytics.rsi14_current <= 30
-                    ? "text-emerald-400"
-                    : "text-amber-300"
-                }`}
-              >
-                {analytics?.rsi14_current !== null && analytics?.rsi14_current !== undefined
-                  ? analytics.rsi14_current >= 70
-                    ? `Sobrecalentado (${fmtNum(analytics.rsi14_current, 0)} pts)`
-                    : analytics.rsi14_current <= 30
-                    ? `Oportunidad baja (${fmtNum(analytics.rsi14_current, 0)} pts)`
-                    : `Neutral (${fmtNum(analytics.rsi14_current, 0)} pts)`
-                  : "Reuniendo datos"}
+              <span className="text-base font-bold text-slate-100">
+                {analytics?.order_flow
+                  ? `${analytics.order_flow.buy_ads_share_pct.toFixed(0)}% C / ${analytics.order_flow.sell_ads_share_pct.toFixed(0)}% V`
+                  : "—"}
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {analytics?.order_flow
+                  ? `${analytics.order_flow.total_buy_ads + analytics.order_flow.total_sell_ads} anuncios`
+                  : ""}
               </span>
             </div>
             <div className="mt-1 text-[11px] text-slate-400 leading-snug">
-              {analytics?.verdict_label ?? "Calculando fuerza compra/venta..."}
+              {analytics?.order_flow?.pressure_label ?? "Calculando presión del libro..."}
             </div>
           </div>
 
           <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5">
             <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
-              <span title="Cálculo estadístico por percentiles históricos (separado del Predictor IA macroeconómico)">
-                Rango Histórico Esperado
-              </span>
+              <span>Liquidez Top 20 y Banco Líder</span>
               <span className="font-mono text-slate-500">
-                {analytics ? `${analytics.samples_total} lecturas` : "—"}
+                {analytics ? `${analytics.samples_total} lect.` : "—"}
               </span>
             </div>
-            {analytics?.band ? (
-              <>
-                <div className="mt-1 text-base font-mono font-bold text-slate-100 tabular-nums">
-                  {fmtNum(analytics.band.floor)} – {fmtNum(analytics.band.ceiling)} Bs
-                </div>
-                <div className="mt-1 text-[11px] font-mono text-emerald-400 tabular-nums">
-                  {analytics.band_backtest
-                    ? `Precisión comprobada: ${fmtNum(analytics.band_backtest.hit_rate_pct, 0)}% (${analytics.band_backtest.hits}/${analytics.band_backtest.evaluated})`
-                    : "Rango estadístico 90% activo"}
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="mt-1.5 flex items-center justify-between text-xs font-mono text-amber-400 tabular-nums">
-                  <span>Piso/Techo histórico</span>
-                  <span>
-                    {analytics?.days_count ?? 0}/{analytics?.min_prediction_days ?? 20} días
-                  </span>
-                </div>
-                <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
-                  <div
-                    className="h-full bg-amber-500 transition-all"
-                    style={{ width: `${maturityPct}%` }}
-                  />
-                </div>
-              </>
-            )}
+            <div className="mt-1 flex items-baseline gap-2 font-mono tabular-nums">
+              <span className="text-base font-bold text-emerald-400">
+                {analytics
+                  ? `${fmtNum(analytics.depth_summary.top20.buy_usdt + analytics.depth_summary.top20.sell_usdt, 0)} USDT`
+                  : "—"}
+              </span>
+              {analytics?.liquidity_alert.detected && (
+                <span className="text-[10px] text-rose-400 font-semibold">Liquidez baja</span>
+              )}
+            </div>
+            <div className="mt-1 text-[11px] font-mono text-slate-400 truncate tabular-nums">
+              {analytics?.banks_snapshot?.[0]
+                ? `Líder: ${analytics.banks_snapshot[0].bank} (${fmtNum(analytics.banks_snapshot[0].sell_best)} / ${fmtNum(analytics.banks_snapshot[0].buy_best)} Bs)`
+                : "Sin desglose bancario activo"}
+            </div>
           </div>
         </section>
 
@@ -433,32 +412,19 @@ export default function MarketPage() {
                 ))}
               </div>
 
-              <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto">
+              <div className="grid grid-cols-1 sm:flex items-center gap-2 w-full sm:w-auto">
                 <button
                   type="button"
-                  title="Líneas promedio de tendencia corta y media (EMA 9 y 21)"
-                  onClick={() => setShowEma((v) => !v)}
+                  title="Activa medias móviles EMA 9/21 y fuerza RSI 14 (herramientas de análisis técnico avanzado)"
+                  onClick={() => setShowTechMode((v) => !v)}
                   disabled={side === "evolucion"}
-                  className={`px-2.5 py-1.5 sm:py-1 rounded-lg border text-xs font-medium text-center whitespace-nowrap transition-colors disabled:opacity-40 ${
-                    showEma
+                  className={`px-3 py-1.5 sm:py-1 rounded-lg border text-xs font-medium text-center whitespace-nowrap transition-colors disabled:opacity-40 ${
+                    showTechMode
                       ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                      : "border-slate-800 bg-[#0a0e13] text-slate-400"
+                      : "border-slate-800 bg-[#0a0e13] text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Medias móviles
-                </button>
-                <button
-                  type="button"
-                  title="Indicador de fuerza entre compradores y vendedores (RSI 14)"
-                  onClick={() => setShowRsi((v) => !v)}
-                  disabled={side === "evolucion"}
-                  className={`px-2.5 py-1.5 sm:py-1 rounded-lg border text-xs font-medium text-center whitespace-nowrap transition-colors disabled:opacity-40 ${
-                    showRsi
-                      ? "border-violet-500/40 bg-violet-500/10 text-violet-300"
-                      : "border-slate-800 bg-[#0a0e13] text-slate-400"
-                  }`}
-                >
-                  Fuerza (RSI)
+                  Modo técnico (EMA / RSI)
                 </button>
               </div>
             </div>
@@ -479,23 +445,32 @@ export default function MarketPage() {
               </select>
 
               <div className="grid grid-cols-5 sm:flex items-center gap-1 w-full sm:w-auto">
-                {TICKET_PRESETS.map((p) => (
-                  <button
-                    key={p.ves}
-                    type="button"
-                    onClick={() => {
-                      setTicketVes(p.ves);
-                      setTicketInput(String(p.ves));
-                    }}
-                    className={`px-1 sm:px-2 py-1 rounded text-[10px] sm:text-[11px] font-mono text-center whitespace-nowrap tabular-nums transition-colors ${
-                      ticketVes === p.ves
-                        ? "bg-amber-500/20 border border-amber-500/50 text-amber-300"
-                        : "bg-[#0a0e13] border border-slate-800 text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    {p.label}
-                  </button>
-                ))}
+                {TICKET_PRESETS.map((p) => {
+                  const isTracked = p.ves === 250_000 || p.ves === 1_000_000 || p.ves === 5_000_000;
+                  return (
+                    <button
+                      key={p.ves}
+                      type="button"
+                      title={
+                        isTracked
+                          ? `${p.label}: actualiza historial de velas + Tasa Real (VWAP)`
+                          : `${p.label}: calcula Tasa Real (VWAP) en vivo`
+                      }
+                      onClick={() => {
+                        setTicketVes(p.ves);
+                        setTicketInput(String(p.ves));
+                      }}
+                      className={`px-1 sm:px-2 py-1 rounded text-[10px] sm:text-[11px] font-mono text-center whitespace-nowrap tabular-nums transition-colors ${
+                        ticketVes === p.ves
+                          ? "bg-amber-500/20 border border-amber-500/50 text-amber-300"
+                          : "bg-[#0a0e13] border border-slate-800 text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      {p.label}
+                      {isTracked ? " •" : ""}
+                    </button>
+                  );
+                })}
               </div>
 
               <form onSubmit={handleApplyTicket} className="flex items-center gap-1.5 w-full sm:w-auto">
@@ -532,11 +507,11 @@ export default function MarketPage() {
                 ema21={candlesData?.ema21 ?? []}
                 rsi14={candlesData?.rsi14 ?? []}
                 bcvSeries={candlesData?.bcv_series ?? []}
-                band={candlesData?.band ?? null}
+                band={null}
                 side={side}
                 chartMode={chartMode}
-                showEma={showEma}
-                showRsi={showRsi}
+                showEma={showTechMode}
+                showRsi={showTechMode}
                 unitSuffix={unitSuffix}
               />
             )}
@@ -750,13 +725,13 @@ export default function MarketPage() {
                   <thead>
                     <tr className="text-slate-500 border-b border-slate-800">
                       <th className="py-1.5 text-left font-medium">Tramo</th>
-                      <th className="py-1.5 text-right font-medium">Ofertas (Compra)</th>
-                      <th className="py-1.5 text-right font-medium">Demanda (Venta)</th>
+                      <th className="py-1.5 text-right font-medium">Vendiendo (Compra)</th>
+                      <th className="py-1.5 text-right font-medium">Comprando (Venta)</th>
                       <th
-                        title="Porcentaje que acapara el anuncio #1 dentro de ese tramo"
+                        title="Porcentaje que concentra el anuncio #1 dentro de ese tramo"
                         className="py-1.5 text-right font-medium"
                       >
-                        Peso #1
+                        Líder #1
                       </th>
                     </tr>
                   </thead>

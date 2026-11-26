@@ -423,7 +423,14 @@ export default function OrdersPage() {
             type="button"
             onClick={async () => {
               try {
-                await downloadOrdersExport("csv_semicolon");
+                await downloadOrdersExport("csv_semicolon", {
+                  trade_type: tradeFilter,
+                  order_status: statusFilter,
+                  payment_method: bankFilter,
+                  date_from: dateFrom,
+                  date_to: dateTo,
+                  search: searchQuery,
+                });
               } catch (err: any) {
                 setFeedback({
                   type: "error",
@@ -442,7 +449,14 @@ export default function OrdersPage() {
             type="button"
             onClick={async () => {
               try {
-                await downloadOrdersExport("xlsx");
+                await downloadOrdersExport("xlsx", {
+                  trade_type: tradeFilter,
+                  order_status: statusFilter,
+                  payment_method: bankFilter,
+                  date_from: dateFrom,
+                  date_to: dateTo,
+                  search: searchQuery,
+                });
               } catch (err: any) {
                 setFeedback({
                   type: "error",

@@ -969,3 +969,154 @@ def test_mercantil_repeated_annex_tail_is_trimmed_cleanly():
     assert res.opening_balance == pytest.approx(2020338.46, abs=0.02)
     assert res.closing_balance == pytest.approx(11684.04, abs=0.02)
     assert any("anexo repetido" in w.lower() for w in res.warnings)
+
+
+def test_cover_summary_dates_personal_expenses_and_banesco_cce_commissions() -> None:
+    """Verifica captura de saldo inicial con fechas, gastos personales TDD/SMS a IGNORE y comisiones Banesco MOVIL CCE con saldos negativos."""
+    from src.integrations.statement_importer import (
+        BankStatementImporter,
+        ParsedStatementRow,
+        StatementPreviewResult,
+        _extract_cover_summary,
+        _is_personal_or_non_p2p_expense,
+        _parse_signed_balance,
+    )
+
+    # 1. Resumen de portada con fechas intermedias estilo Mercantil / Banesco
+    meta_sample = (
+        "MERCANTIL BANCO UNIVERSAL\n"
+        "ESTADO DE CUENTA CORRIENTE\n"
+        "SALDO AL INICIO DEL PERIODO: 01/10/2026 Bs. 2.020.338,46\n"
+        "327 OTROS CREDITOS A SU CUENTA 230,379,425,24\n"
+        "6387 OTROS DEBITOS A SU CUENTA 232.388,079,66\n"
+        "SALDO AL FINAL DEL PERIODO: 31/10/2026 Bs. 11.684,04\n"
+    )
+    cs = _extract_cover_summary(meta_sample)
+    assert cs["opening_balance"] == pytest.approx(2020338.46, abs=0.01)
+    assert cs["closing_balance"] == pytest.approx(11684.04, abs=0.01)
+    assert cs["declared_credits_count"] == 327
+    assert cs["declared_credits_total"] == pytest.approx(230379425.24, abs=0.01)
+    assert cs["declared_debits_count"] == 6387
+    assert cs["declared_debits_total"] == pytest.approx(232388079.66, abs=0.01)
+
+    # 2. Saldos negativos en diversas representaciones bancarias
+    assert _parse_signed_balance("-24484.48") == pytest.approx(-24484.48, abs=0.01)
+    assert _parse_signed_balance("- 24484.48") == pytest.approx(-24484.48, abs=0.01)
+    assert _parse_signed_balance("24484.48-") == pytest.approx(-24484.48, abs=0.01)
+    assert _parse_signed_balance("(24484.48)") == pytest.approx(-24484.48, abs=0.01)
+    assert _parse_signed_balance("-24.484,48") == pytest.approx(-24484.48, abs=0.01)
+    assert _parse_signed_balance("3991.52") == pytest.approx(3991.52, abs=0.01)
+
+    # 3. Detección de gastos personales
+    assert _is_personal_or_non_p2p_expense("CONSUMO TARJETA DE DEBITO") is True
+    assert _is_personal_or_non_p2p_expense("USO DEL CANAL SMS") is True
+    assert _is_personal_or_non_p2p_expense("CONSUMO POS FARMACIA") is True
+    assert _is_personal_or_non_p2p_expense("TRANSFERENCIA DESDE LA CUENTA") is False
+
+    # 4. Clasificación y transición con saldo negativo y comisión MOVIL CCE Banesco
+    dt = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    test_rows = [
+        ParsedStatementRow(
+            row_index=0,
+            date_vet="2026-10-01",
+            voucher_datetime_utc=dt,
+            reference_number="62743609608",
+            concept="MOVIL CCE",
+            movement_type="DEBIT",
+            amount_ves=10000.00,
+            balance_ves=3991.52,
+        ),
+        ParsedStatementRow(
+            row_index=1,
+            date_vet="2026-10-01",
+            voucher_datetime_utc=dt,
+            reference_number="62743609608",
+            concept="PAGO MOVIL CCE",
+            movement_type="DEBIT",
+            amount_ves=30.00,
+            balance_ves=3961.52,
+        ),
+        ParsedStatementRow(
+            row_index=2,
+            date_vet="2026-10-01",
+            voucher_datetime_utc=dt,
+            reference_number="62744217294",
+            concept="MOVIL CCE",
+            movement_type="DEBIT",
+            amount_ves=28446.00,
+            balance_ves=-24484.48,
+        ),
+        ParsedStatementRow(
+            row_index=3,
+            date_vet="2026-10-01",
+            voucher_datetime_utc=dt,
+            reference_number="62744217294",
+            concept="PAGO MOVIL CCE",
+            movement_type="DEBIT",
+            amount_ves=85.33,
+            balance_ves=-24569.81,
+        ),
+        ParsedStatementRow(
+            row_index=4,
+            date_vet="2026-10-07",
+            voucher_datetime_utc=dt,
+            reference_number="00008982",
+            concept="CONSUMO TARJETA DE DEBITO",
+            movement_type="DEBIT",
+            amount_ves=1200.00,
+            balance_ves=-25769.81,
+        ),
+        ParsedStatementRow(
+            row_index=5,
+            date_vet="2026-10-30",
+            voucher_datetime_utc=dt,
+            reference_number="20261030",
+            concept="USO DEL CANAL SMS",
+            movement_type="DEBIT",
+            amount_ves=54.00,
+            balance_ves=-25823.81,
+        ),
+    ]
+
+    res = StatementPreviewResult(
+        bank_name="BANESCO",
+        file_type="PDF",
+        extraction_method="PDF_PDFIUM_GEOMETRIC",
+        detected_columns=[],
+        needs_column_mapping=False,
+        detected_order="UNKNOWN",
+        opening_balance=None,
+        closing_balance=None,
+        balance_verified=False,
+        balance_mismatch_count=0,
+        total_rows=len(test_rows),
+        p2p_matched_count=0,
+        bank_fee_count=0,
+        duplicate_count=0,
+        unmatched_count=len(test_rows),
+        rows=test_rows,
+        warnings=[],
+        cover_summary={"opening_balance": 13991.52, "closing_balance": -25823.81},
+    )
+
+    BankStatementImporter()._verify_and_classify_rows(res)
+    assert res.opening_balance == pytest.approx(13991.52, abs=0.01)
+    assert res.closing_balance == pytest.approx(-25823.81, abs=0.01)
+    assert res.balance_verified is True
+    assert res.balance_mismatch_count == 0
+    assert all(r.balance_ok is True for r in res.rows)
+
+    # Comisiones Pago Móvil Banesco detectadas automáticamente
+    assert res.rows[0].suggested_action == "P2P_UNMATCHED"
+    assert res.rows[1].suggested_action == "BANK_FEE"
+    assert res.rows[1].bank_fee_ves == pytest.approx(30.00, abs=0.01)
+    assert res.rows[2].suggested_action == "P2P_UNMATCHED"
+    assert res.rows[3].suggested_action == "BANK_FEE"
+    assert res.rows[3].bank_fee_ves == pytest.approx(85.33, abs=0.01)
+
+    # Gastos personales marcados como IGNORE
+    assert res.rows[4].suggested_action == "IGNORE"
+    assert "consumo" in res.rows[4].notes.lower()
+    assert res.rows[5].suggested_action == "IGNORE"
+    assert "sms" in res.rows[5].notes.lower()
+

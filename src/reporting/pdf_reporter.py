@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from src.data.models import BankVoucher, JournalEntry, Order
 from src.reporting.accounting_engine import LedgerSummary
+from src.reporting.islr_calculator import build_seniat_casillas, compute_islr_estimation
 from src.reporting.tax_engine import TradeResult
 
 VET_TZ = timezone(timedelta(hours=-4))
@@ -81,12 +82,15 @@ class PDFReporter:
         initial_ves: float = 0.0,
         actual_final_usdt: float | None = None,
         actual_final_ves: float | None = None,
+        cost_method: str = "FIFO",
     ) -> str:
         """Construye un informe contable PDF 1.4 multipágina estructurado sin truncar asientos."""
         now_vet = datetime.now(VET_TZ).strftime("%Y-%m-%d %H:%M:%S VET")
         results = tax_results or []
         order_list = orders or []
         period_label = period or (metadata.get("period") if metadata else None) or "Mes en curso"
+        norm_method = "AVG" if str(cost_method or "").strip().upper() in ("AVG", "AVERAGE", "PROMEDIO", "WEIGHTED_AVG") else "FIFO"
+        cost_label = "PROMEDIO PONDERADO" if norm_method == "AVG" else "PEPS (FIFO)"
 
         ref_bcv = float(bcv_rate or 0.0)
         if ref_bcv <= 0 and results:
@@ -243,7 +247,7 @@ class PDFReporter:
         comisiones_bco = round(sum(float(e.debit) for e in journal_entries if e.account_code == "5.2.01"), 2)
         neto_islr = round(utilidad_bruta - comisiones_bin - comisiones_bco, 2)
 
-        draw_section_title("1. ESTADO DE RESULTADOS FISCAL (LISLR ART. 1, 4 Y 27 - METODO PEPS)")
+        draw_section_title(f"1. ESTADO DE RESULTADOS FISCAL (LISLR ART. 1, 4 Y 27 - METODO {cost_label})")
         er_headers = [
             ("PARTIDA CONTABLE (VEN-NIF / LISLR)", left_x + 6, "left"),
             ("MONTO (VES)", 445.0, "right"),
@@ -252,7 +256,7 @@ class PDFReporter:
         draw_table_header(er_headers)
         er_rows = [
             ("Ingresos Brutos por Enajenacion P2P", f"Bs. {ingresos:,.2f}", _usd(ingresos), False, False),
-            ("(-) Costo de Adquisicion PEPS (FIFO)", f"Bs. {costo_peps:,.2f}", _usd(costo_peps), False, False),
+            (f"(-) Costo de Adquisicion ({cost_label})", f"Bs. {costo_peps:,.2f}", _usd(costo_peps), False, False),
             ("(=) Utilidad Bruta Realizada", f"Bs. {utilidad_bruta:,.2f}", _usd(utilidad_bruta), True, False),
             ("(-) Comisiones Plataforma Exchange (Deducible)", f"Bs. {comisiones_bin:,.2f}", _usd(comisiones_bin), False, False),
             ("(-) Comisiones Bancarias Nacionales (Deducible)", f"Bs. {comisiones_bco:,.2f}", _usd(comisiones_bco), False, False),
@@ -265,6 +269,60 @@ class PDFReporter:
                 shaded=(idx % 2 == 1),
                 bold=is_bold,
                 highlight=is_hi,
+            )
+
+        # Sub-bloque SENIAT DPN-99025 / DPJ-99026
+        islr_est = compute_islr_estimation(
+            gross_revenue_ves=ingresos,
+            cost_of_sales_ves=costo_peps,
+            deductible_expenses_ves=comisiones_bin + comisiones_bco,
+            tax_id=self.rif,
+        )
+        y -= 6.0
+        ensure_space(80.0)
+        draw_section_title(f"1B. PAPEL DE TRABAJO E INSUMO SENIAT (FORMA {islr_est.form_code})")
+        draw_text(
+            left_x + 4,
+            y + 2,
+            f"Papel de trabajo contable e insumo para Declaracion ISLR ({islr_est.form_code}). No sustituye declaracion oficial SENIAT ni dictamen CPC.",
+            "F1",
+            6.8,
+            "0.35 0.40 0.48",
+        )
+        y -= 10.0
+        comp_orders = [o for o in order_list if str(getattr(o, "order_status", "COMPLETED")) == "COMPLETED"]
+        compras_bs_tmp = round(sum(float(o.fiat_amount) for o in comp_orders if o.trade_type == "BUY"), 2)
+        init_usdt_tmp = round(float(initial_usdt or 0.0), 4)
+        init_cost_tmp = round(float(initial_usdt_cost_ves or 0.0), 2)
+        if init_cost_tmp <= 0.0 and init_usdt_tmp > 0.0 and ref_bcv > 0.0:
+            init_cost_tmp = round(init_usdt_tmp * ref_bcv, 2)
+        fin_inv_tmp = round(max(0.0, init_cost_tmp + compras_bs_tmp - costo_peps), 2)
+        casillas = build_seniat_casillas(
+            islr=islr_est,
+            initial_inventory_ves=init_cost_tmp,
+            purchases_ves=compras_bs_tmp,
+            final_inventory_ves=fin_inv_tmp,
+            exchange_fees_ves=comisiones_bin,
+            bank_fees_ves=comisiones_bco,
+        )
+        draw_table_header([
+            ("ITEM", left_x + 6, "left"),
+            (f"CASILLAS FORMA {islr_est.form_code} (UT Bs. 43,00)", left_x + 56, "left"),
+            ("MONTO (VES)", right_x - 6, "right"),
+        ])
+        for idx, c_row in enumerate(casillas):
+            ensure_space(15.0)
+            draw_table_row(
+                [
+                    (c_row.item, left_x + 6, "left"),
+                    (c_row.concept[:58], left_x + 56, "left"),
+                    (f"Bs. {c_row.amount_ves:,.2f}", right_x - 6, "right"),
+                ],
+                shaded=(idx % 2 == 1),
+                bold=("185" in c_row.item or "763" in c_row.item),
+                highlight=("185" in c_row.item),
+                font_size=7.2,
+                row_h=13.5,
             )
 
         # =====================================================================
@@ -571,7 +629,7 @@ class PDFReporter:
         draw_text(
             left_x + 10,
             y - 20,
-            "Regimen IGTF (Decreto 4.972): Operaciones liquidadas 100% en Bolivares via banca nacional estan exentas del 3% IGTF.",
+            "Regimen IGTF (Decreto 4.972): Operaciones liquidadas en Bolivares via banca nacional aplican alicuota del 0% (no 3%).",
             "F1",
             7.3,
             "0.25 0.30 0.38",

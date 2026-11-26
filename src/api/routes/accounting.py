@@ -40,9 +40,10 @@ from src.integrations.statement_importer import (
     StatementCommitRow,
 )
 from src.reporting.accounting_engine import AccountingEngine
+from src.reporting.bcv_history_service import BCVHistoryService
 from src.reporting.excel_reporter import ExcelReporter
 from src.reporting.pdf_reporter import PDFReporter
-from src.reporting.tax_engine import FIFOCostMethod
+from src.reporting.tax_engine import FIFOCostMethod, TaxLot, WeightedAverageCostMethod
 from src.security.file_guards import (
     MAX_VOUCHER_UPLOAD_BYTES,
     image_to_clean_png_bytes,
@@ -410,6 +411,7 @@ class LiveBalanceResponse(BaseModel):
     outflow_usdt: float
     other_inflow_usdt: float = 0.0
     other_outflow_usdt: float = 0.0
+    p2p_fee_usdt: float = 0.0
     theoretical_usdt: float
     total_initial_ves: float
     total_inflows_ves: float
@@ -437,6 +439,8 @@ class StatementPreviewRowResponse(BaseModel):
     matched_order_fiat: float | None = None
     match_confidence: float = 0.0
     notes: str = ""
+    third_party_alert: bool = False
+    third_party_detail: str | None = None
 
 
 class StatementAvailableOrderResponse(BaseModel):
@@ -571,6 +575,7 @@ def get_live_balance(
         outflow_usdt=summary.outflow_usdt,
         other_inflow_usdt=summary.other_inflow_usdt,
         other_outflow_usdt=summary.other_outflow_usdt,
+        p2p_fee_usdt=summary.p2p_fee_usdt,
         theoretical_usdt=summary.theoretical_usdt,
         total_initial_ves=summary.total_initial_ves,
         total_inflows_ves=summary.total_inflows_ves,
@@ -589,6 +594,30 @@ def get_live_balance(
     )
 
 
+def _parse_vet_bound_to_utc(raw: str, is_end: bool = False) -> datetime:
+    """Interpreta fechas YYYY-MM-DD o timestamps sin zona en hora VET (UTC-4) y convierte a UTC naive."""
+    vet_tz = timezone(timedelta(hours=-4))
+    cleaned = raw.strip()
+    if len(cleaned) == 10:
+        d_obj = date.fromisoformat(cleaned)
+        dt_vet = datetime(
+            d_obj.year,
+            d_obj.month,
+            d_obj.day,
+            23 if is_end else 0,
+            59 if is_end else 0,
+            59 if is_end else 0,
+            999999 if is_end else 0,
+            tzinfo=vet_tz,
+        )
+        return dt_vet.astimezone(UTC).replace(tzinfo=None)
+
+    parsed = datetime.fromisoformat(cleaned)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=vet_tz)
+    return parsed.astimezone(UTC).replace(tzinfo=None)
+
+
 @router.get("/journal", response_model=list[JournalEntryResponse])
 
 def get_journal_entries(
@@ -598,30 +627,37 @@ def get_journal_entries(
     end_date: Annotated[str | None, Query()] = None,
     account_code: Annotated[str | None, Query()] = None,
 ) -> list[JournalEntryResponse]:
-    """Consulta cronológica de asientos del Libro Diario del operador con partida doble inmutable."""
+    """Consulta cronológica de asientos del Libro Diario del operador en hora VET (UTC-4)."""
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     repo = JournalEntryRepository(db, user_id=uid)
+    vet_tz = timezone(timedelta(hours=-4))
     dt_start = None
     dt_end = None
     if start_date and isinstance(start_date, str):
         try:
-            dt_start = datetime.fromisoformat(start_date)
+            dt_start = _parse_vet_bound_to_utc(start_date, is_end=False)
         except ValueError:
             pass
     if end_date and isinstance(end_date, str):
         try:
-            dt_end = datetime.fromisoformat(end_date)
+            dt_end = _parse_vet_bound_to_utc(end_date, is_end=True)
         except ValueError:
             pass
 
     clean_code = account_code if isinstance(account_code, str) else None
     entries = repo.list_entries(start_date=dt_start, end_date=dt_end, account_code=clean_code, user_id=uid)
 
+    def _fmt_vet(dt_val: datetime | None) -> str:
+        if not dt_val:
+            return "-"
+        aware = dt_val.replace(tzinfo=UTC) if dt_val.tzinfo is None else dt_val
+        return aware.astimezone(vet_tz).strftime("%Y-%m-%d %H:%M:%S")
+
     return [
         JournalEntryResponse(
             id=cast(int | None, e.id),
             entry_number=int(cast(int, e.entry_number)),
-            date_time=e.date_time.strftime("%Y-%m-%d %H:%M:%S") if e.date_time else "-",
+            date_time=_fmt_vet(cast(datetime | None, e.date_time)),
             account_code=str(e.account_code),
             account_name=str(e.account_name),
             debit=float(e.debit),
@@ -698,8 +734,9 @@ def _build_accounting_export_context(
     current_user: User,
     year: int,
     month: int,
+    cost_method: str = "FIFO",
 ) -> dict[str, Any]:
-    """Recopila asientos, mayor, comprobantes y resultados fiscales PEPS del período en hora VET (UTC-4)."""
+    """Recopila asientos, mayor, comprobantes y resultados fiscales PEPS/Promedio en hora VET (UTC-4)."""
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     journal_repo = JournalEntryRepository(db, user_id=uid)
     voucher_repo = BankVoucherRepository(db, user_id=uid)
@@ -742,13 +779,54 @@ def _build_accounting_export_context(
     vouchers = voucher_repo.list_by_date_range(start_dt, end_dt, user_id=uid)
 
     all_orders = order_repo.list_completed(user_id=uid)
-    all_tax_results = FIFOCostMethod().process_orders(all_orders)
     period_orders = [o for o in all_orders if _in_period_bounds(cast(datetime | None, o.created_at))]
-    period_tax_results = [r for r in all_tax_results if _in_period_bounds(r.created_at)]
     wallet_movements = wallet_repo.list_by_period(start_date=start_dt, end_date=end_dt, user_id=uid)
 
     bcv_vals = [float(o.bcv_rate) for o in period_orders if float(o.bcv_rate or 0.0) > 0]
-    bcv_rate = bcv_vals[-1] if bcv_vals else None
+    bcv_rate = bcv_vals[-1] if bcv_vals else (period_cfg.bcv_day1_rate if period_cfg.bcv_day1_rate > 0 else None)
+
+    bcv_hist = BCVHistoryService(db)
+    if not bcv_rate or bcv_rate <= 0:
+        resolved_bcv = bcv_hist.get_rate_for_date(start_dt.date())
+        if resolved_bcv > 0:
+            bcv_rate = resolved_bcv
+
+    tcmv_rate: float | None = None
+    try:
+        rates_meta = bcv_hist.get_or_fetch_current_rates(force_refresh=False)
+        eur_val = float(rates_meta.get("eur") or 0.0)
+        tcmv_rate = eur_val if eur_val > 0 else bcv_rate
+    except (RuntimeError, ValueError, OSError, KeyError, AttributeError):
+        tcmv_rate = bcv_rate
+
+    eff_init_cost = initial_usdt_cost_ves
+    if eff_init_cost <= 0.0 and initial_usdt > 0.0 and bcv_rate and bcv_rate > 0.0:
+        eff_init_cost = round(initial_usdt * float(bcv_rate), 2)
+
+    initial_lots: list[TaxLot] = []
+    if initial_usdt > 0.0:
+        initial_lots.append(
+            TaxLot(
+                crypto_amount=initial_usdt,
+                total_cost_fiat=eff_init_cost,
+                unit_cost_fiat=(eff_init_cost / initial_usdt) if initial_usdt > 0 else 0.0,
+            )
+        )
+
+    normalized_method = "AVG" if cost_method.strip().upper() in ("AVG", "AVERAGE", "PROMEDIO", "WEIGHTED_AVG") else "FIFO"
+    fallback_bcv = float(bcv_rate) if (bcv_rate and bcv_rate > 0) else None
+    calc = (
+        WeightedAverageCostMethod(initial_inventory=initial_lots, fallback_bcv_rate=fallback_bcv)
+        if normalized_method == "AVG"
+        else FIFOCostMethod(initial_inventory=initial_lots, fallback_bcv_rate=fallback_bcv)
+    )
+
+    if initial_usdt > 0.0 or cutoff_date is not None or period_cfg.source == "saved":
+        period_tax_results = calc.process_orders(period_orders)
+    else:
+        all_tax_results = calc.process_orders(all_orders)
+        period_tax_results = [r for r in all_tax_results if _in_period_bounds(r.created_at)]
+
     holder = str(getattr(current_user, "full_name", None) or current_user.username)
     tax_id = str(getattr(current_user, "tax_id", None) or "").strip() or None
 
@@ -759,12 +837,14 @@ def _build_accounting_export_context(
         "orders": period_orders,
         "wallet_movements": wallet_movements,
         "tax_results": period_tax_results,
-        "bcv_rate": bcv_rate or (period_cfg.bcv_day1_rate if period_cfg.bcv_day1_rate > 0 else None),
+        "bcv_rate": bcv_rate,
+        "tcmv_rate": tcmv_rate,
+        "cost_method": normalized_method,
         "account_holder": holder,
         "tax_id": tax_id,
         "period": f"{year}-{month:02d}",
         "initial_usdt": initial_usdt,
-        "initial_usdt_cost_ves": initial_usdt_cost_ves,
+        "initial_usdt_cost_ves": eff_init_cost,
         "initial_ves": initial_ves,
         "actual_final_usdt": actual_final_usdt,
         "actual_final_ves": actual_final_ves,
@@ -777,9 +857,10 @@ def export_accounting_excel(
     current_user: Annotated[User, Depends(require_trader)],
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
+    cost_method: Annotated[str, Query()] = "FIFO",
 ) -> FileResponse:
-    """Exporta el reporte contable integral del operador en 7 pestañas conformes con SENIAT / VEN-NIF 12 (.xlsx)."""
-    ctx = _build_accounting_export_context(db, current_user, year, month)
+    """Exporta el reporte contable integral del operador con hoja SENIAT DPN-99025/DPJ-99026 (.xlsx)."""
+    ctx = _build_accounting_export_context(db, current_user, year, month, cost_method=cost_method)
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_p2p_{year}_{month:02d}.xlsx")
 
@@ -800,6 +881,8 @@ def export_accounting_excel(
         initial_ves=ctx["initial_ves"],
         actual_final_usdt=ctx["actual_final_usdt"],
         actual_final_ves=ctx["actual_final_ves"],
+        cost_method=ctx["cost_method"],
+        tcmv_rate=ctx["tcmv_rate"],
     )
 
     return FileResponse(
@@ -815,9 +898,10 @@ def export_accounting_pdf(
     current_user: Annotated[User, Depends(require_trader)],
     year: Annotated[int, Query()] = 2026,
     month: Annotated[int, Query()] = 11,
+    cost_method: Annotated[str, Query()] = "FIFO",
 ) -> FileResponse:
     """Exporta el informe contable legal multipágina del operador en horario VET (.pdf)."""
-    ctx = _build_accounting_export_context(db, current_user, year, month)
+    ctx = _build_accounting_export_context(db, current_user, year, month, cost_method=cost_method)
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, f"reporte_contable_{year}_{month:02d}.pdf")
 
@@ -840,6 +924,7 @@ def export_accounting_pdf(
         initial_ves=ctx["initial_ves"],
         actual_final_usdt=ctx["actual_final_usdt"],
         actual_final_ves=ctx["actual_final_ves"],
+        cost_method=ctx["cost_method"],
     )
 
     return FileResponse(
@@ -1252,6 +1337,8 @@ def _build_statement_preview_response(res: Any) -> StatementPreviewResponse:
                 matched_order_fiat=r.matched_order_fiat,
                 match_confidence=r.match_confidence,
                 notes=r.notes,
+                third_party_alert=r.third_party_alert,
+                third_party_detail=r.third_party_detail,
             )
             for r in res.rows
         ],
@@ -1509,6 +1596,7 @@ class CreateWalletMovementRequest(BaseModel):
 class SyncBinancePayRequest(BaseModel):
     year: int = Field(..., ge=2020, le=2100)
     month: int = Field(..., ge=1, le=12)
+    include_spot_transfers: bool = Field(default=True, description="Incluir depósitos y retiros/salidas on-chain USDT")
 
 
 class SyncBinancePayResponse(BaseModel):
@@ -1517,6 +1605,10 @@ class SyncBinancePayResponse(BaseModel):
     inserted: int
     existing: int
     message: str
+    pay_count: int = 0
+    deposits_count: int = 0
+    withdrawals_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 def _serialize_wallet_movement(m: WalletMovement) -> WalletMovementItemResponse:
@@ -1629,10 +1721,13 @@ def sync_binance_pay_movements(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SyncBinancePayResponse:
     """Sincroniza transferencias Binance Pay / Binance ID (solo lectura, con cooldown de 60s por usuario)."""
+    import httpx
+
     from src.api.routes.settings import _user_binance_key_names
     from src.core.binance_client import (
         BinanceAuthError,
         BinanceP2PClient,
+        BinanceTransientError,
         BinanceWeightExceededError,
     )
     from src.security.api_key_manager import ApiKeyManager
@@ -1673,30 +1768,68 @@ def sync_binance_pay_movements(
 
     _BINANCE_PAY_SYNC_COOLDOWN[uid] = now_mono
     client = BinanceP2PClient(api_key=api_key, private_key_pem=private_key)
+    sync_warnings: list[str] = []
+
+    raw_items: list[dict[str, Any]] = []
     try:
         raw_items = client.get_pay_transactions(start_timestamp=start_ms, end_timestamp=end_ms, limit=100)
     except BinanceAuthError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Binance rechazó la autenticación para Binance Pay. Verifica tu API Key e IP autorizada.",
-        ) from exc
+        if not payload.include_spot_transfers:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Binance rechazó la autenticación para Binance Pay. Verifica tu API Key e IP autorizada.",
+            ) from exc
+        sync_warnings.append("Binance Pay no habilitado en tu API Key.")
     except BinanceWeightExceededError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Cuota de Binance API temporalmente agotada. Intenta nuevamente en 60 segundos.",
         ) from exc
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (BinanceTransientError, httpx.HTTPError, RuntimeError, ValueError, OSError) as exc:
         import logging
 
         logging.getLogger("accounting_route").warning("Error consultando Binance Pay: %s", type(exc).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="No se pudo consultar Binance Pay en este momento. Verifica permisos de lectura e intenta de nuevo.",
-        ) from exc
+        if not payload.include_spot_transfers:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No se pudo consultar Binance Pay en este momento. Verifica permisos de lectura e intenta de nuevo.",
+            ) from exc
+        sync_warnings.append("No se pudo consultar Binance Pay en este intento.")
+
+    raw_deposits: list[dict[str, Any]] = []
+    raw_withdrawals: list[dict[str, Any]] = []
+    if payload.include_spot_transfers:
+        if hasattr(client, "get_deposit_history"):
+            try:
+                raw_deposits = client.get_deposit_history(
+                    start_timestamp=start_ms, end_timestamp=end_ms, coin="USDT", limit=200
+                )
+            except BinanceWeightExceededError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Cuota de Binance API temporalmente agotada. Intenta nuevamente en 60 segundos.",
+                ) from exc
+            except (BinanceAuthError, BinanceTransientError, httpx.HTTPError, RuntimeError, ValueError, OSError):
+                sync_warnings.append("Depósitos Spot no disponibles o sin permiso de lectura en la API Key.")
+        if hasattr(client, "get_withdraw_history"):
+            try:
+                raw_withdrawals = client.get_withdraw_history(
+                    start_timestamp=start_ms, end_timestamp=end_ms, coin="USDT", limit=200
+                )
+            except BinanceWeightExceededError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Cuota de Binance API temporalmente agotada. Intenta nuevamente en 60 segundos.",
+                ) from exc
+            except (BinanceAuthError, BinanceTransientError, httpx.HTTPError, RuntimeError, ValueError, OSError):
+                sync_warnings.append("Retiros/Salidas Binance no disponibles o sin permiso de lectura en la API Key.")
 
     repo = WalletMovementRepository(db, user_id=uid or None)
     inserted = 0
     existing = 0
+    pay_count = 0
+    deposits_count = 0
+    withdrawals_count = 0
 
     for item in raw_items:
         currency = str(item.get("currency") or "").strip().upper()
@@ -1754,15 +1887,122 @@ def sync_binance_pay_movements(
         )
         repo.create(mov)
         inserted += 1
+        pay_count += 1
+
+    # Depósitos Cripto (Entradas Red Binance)
+    for dep in raw_deposits:
+        coin = str(dep.get("coin") or "").strip().upper()
+        if not coin:
+            continue
+        try:
+            amt = float(dep.get("amount") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if amt <= 0.0:
+            continue
+        raw_id = str(dep.get("id") or dep.get("txId") or "").strip()
+        if not raw_id:
+            continue
+        scoped_txid = f"u{uid}:DEP:{raw_id}"[:128]
+        if repo.get_by_txid(scoped_txid, user_id=uid or None) is not None:
+            existing += 1
+            continue
+        ins_ms = dep.get("insertTime")
+        try:
+            ts_utc = (
+                datetime.fromtimestamp(float(ins_ms) / 1000.0, tz=UTC).replace(tzinfo=None)
+                if ins_ms
+                else datetime.now(UTC).replace(tzinfo=None)
+            )
+        except (ValueError, TypeError, OverflowError):
+            ts_utc = datetime.now(UTC).replace(tzinfo=None)
+
+        net_name = str(dep.get("network") or "TRC20").strip().upper()[:30]
+        addr = str(dep.get("address") or "").strip()[:128] or None
+        mov = WalletMovement(
+            user_id=uid or None,
+            movement_type="DEPOSIT",
+            asset=coin[:20],
+            amount=round(amt, 4),
+            fee=0.0,
+            network=net_name,
+            txid=scoped_txid,
+            address=addr,
+            note=f"Depósito Binance ({net_name})"[:255],
+            status="COMPLETED",
+            timestamp=ts_utc,
+        )
+        repo.create(mov)
+        inserted += 1
+        deposits_count += 1
+
+    # Retiros / Salidas Cripto en Binance
+    for wdr in raw_withdrawals:
+        coin = str(wdr.get("coin") or "").strip().upper()
+        if not coin:
+            continue
+        try:
+            amt = float(wdr.get("amount") or 0.0)
+            fee_amt = float(wdr.get("transactionFee") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if amt <= 0.0:
+            continue
+        raw_id = str(wdr.get("id") or wdr.get("txId") or "").strip()
+        if not raw_id:
+            continue
+        scoped_txid = f"u{uid}:WDR:{raw_id}"[:128]
+        if repo.get_by_txid(scoped_txid, user_id=uid or None) is not None:
+            existing += 1
+            continue
+
+        apply_raw = str(wdr.get("applyTime") or "").strip()
+        ts_utc = datetime.now(UTC).replace(tzinfo=None)
+        if apply_raw:
+            try:
+                ts_utc = datetime.strptime(apply_raw[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+
+        net_name = str(wdr.get("network") or "TRC20").strip().upper()[:30]
+        addr = str(wdr.get("address") or "").strip()[:128] or None
+        mov = WalletMovement(
+            user_id=uid or None,
+            movement_type="WITHDRAWAL",
+            asset=coin[:20],
+            amount=round(amt, 4),
+            fee=round(max(0.0, fee_amt), 4),
+            network=net_name,
+            txid=scoped_txid,
+            address=addr,
+            note=f"Salida / Retiro Binance ({net_name})"[:255],
+            status="COMPLETED",
+            timestamp=ts_utc,
+        )
+        repo.create(mov)
+        inserted += 1
+        withdrawals_count += 1
+
+    total_fetched = len(raw_items) + len(raw_deposits) + len(raw_withdrawals)
+    if total_fetched > 0:
+        msg_str = (
+            f"Binance sincronizado: {inserted} nuevo(s) "
+            f"(Pay: {pay_count}, Depósitos: {deposits_count}, Salidas/Retiros: {withdrawals_count}), "
+            f"{existing} ya registrado(s)."
+        )
+    elif sync_warnings:
+        msg_str = " · ".join(sync_warnings)
+    else:
+        msg_str = "No se encontraron transferencias Binance Pay, depósitos ni salidas en este período."
 
     return SyncBinancePayResponse(
         success=True,
-        fetched=len(raw_items),
+        fetched=total_fetched,
         inserted=inserted,
         existing=existing,
-        message=(
-            f"Binance Pay sincronizado: {inserted} movimiento(s) nuevo(s), {existing} ya registrado(s)."
-            if raw_items
-            else "No se encontraron transferencias Binance Pay en este período."
-        ),
+        message=msg_str,
+        pay_count=pay_count,
+        deposits_count=deposits_count,
+        withdrawals_count=withdrawals_count,
+        warnings=sync_warnings,
     )
