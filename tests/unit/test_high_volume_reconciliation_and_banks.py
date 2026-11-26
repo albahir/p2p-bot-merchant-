@@ -808,17 +808,33 @@ def test_pdfplumber_flushes_page_cache_and_reports_progress():
         return doc
 
     importer = BankStatementImporter()
+    # 1. Validar que parse_bytes usa PDFium nativo (motor estilo PDFgear) y reporta progreso
+    preview_pdfium = importer.parse_bytes(
+        file_bytes=pdf_bytes,
+        filename="bdv_4pags.pdf",
+        progress_callback=lambda d, t, s: progress_events.append((d, t, s)),
+    )
+    assert preview_pdfium.extraction_method == "PDF_PDFIUM_GEOMETRIC"
+    assert preview_pdfium.total_rows == 4
+    assert preview_pdfium.balance_verified is True
+    assert any(ev[2] == "Leyendo PDF" for ev in progress_events)
+    assert progress_events[-1] == (4, 4, "Estructurando filas")
+
+    # 2. Validar que el respaldo pdfplumber purga la caché de cada página (anti-OOM)
+    plumber_progress: list[tuple[int, int, str]] = []
     with patch("src.integrations.statement_importer.pdfplumber.open", side_effect=_wrapped_open):
-        preview = importer.parse_bytes(
+        rows_pl, _bank, _yr, has_txt, _warns, _cs = importer._extract_pdf_with_pdfplumber(
             file_bytes=pdf_bytes,
             filename="bdv_4pags.pdf",
-            progress_callback=lambda d, t, s: progress_events.append((d, t, s)),
+            bank_name_override=None,
+            default_year=2026,
+            progress_callback=lambda d, t, s: plumber_progress.append((d, t, s)),
         )
 
-    assert preview.total_rows == 4
-    assert preview.balance_verified is True
+    assert has_txt is True
+    assert len(rows_pl) == 4
     assert flushed_pages["count"] == 4
-    assert progress_events == [
+    assert plumber_progress == [
         (1, 4, "Leyendo PDF"),
         (2, 4, "Leyendo PDF"),
         (3, 4, "Leyendo PDF"),
