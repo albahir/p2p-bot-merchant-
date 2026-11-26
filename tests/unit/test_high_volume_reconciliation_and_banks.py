@@ -900,3 +900,72 @@ def test_async_statement_preview_job_completes_and_enforces_user_isolation():
         assert final_status.result.bank_fee_count == 1
     finally:
         db.close()
+
+
+def test_mercantil_repeated_annex_tail_is_trimmed_cleanly():
+    """Debe recortar el anexo repetido al final de Mercantil (reinicio día 01 con S/R) conservando los movimientos oficiales."""
+    from src.integrations.statement_importer import ParsedStatementRow, StatementPreviewResult
+
+    vet_tz = timezone(timedelta(hours=-4))
+    rows: list[ParsedStatementRow] = []
+    # 60 movimientos reales del 01/10 al 30/10 con referencias reales de 8 dígitos
+    for i in range(60):
+        day = 1 + (i * 29) // 59
+        dt = datetime(2026, 10, day, 12, 0, 0, tzinfo=vet_tz).astimezone(UTC)
+        rows.append(
+            ParsedStatementRow(
+                row_index=i,
+                date_vet=f"2026-10-{day:02d}",
+                voucher_datetime_utc=dt,
+                reference_number=f"{67000000 + i}",
+                concept="TRANSFERENCIA DESDE LA CUENTA ***0088 A LA CUENTA DE CLIENTE",
+                movement_type="DEBIT",
+                amount_ves=1000.0 + i,
+                balance_ves=None,
+            )
+        )
+    # 50 filas repetidas del anexo final reiniciando en 01/10 con REF S/R e INGRESO falso
+    for j in range(50):
+        day = 1 + (j * 29) // 49
+        dt = datetime(2026, 10, day, 12, 0, 0, tzinfo=vet_tz).astimezone(UTC)
+        rows.append(
+            ParsedStatementRow(
+                row_index=60 + j,
+                date_vet=f"2026-10-{day:02d}",
+                voucher_datetime_utc=dt,
+                reference_number="S/R",
+                concept=f"{day:02d}/10 EL {day:02d}-10-26 A LAS 10:28:39 HORAS",
+                movement_type="CREDIT",
+                amount_ves=1000.0 + j,
+                balance_ves=None,
+            )
+        )
+
+    res = StatementPreviewResult(
+        bank_name="MERCANTIL",
+        file_type="PDF",
+        extraction_method="PDF_PDFIUM_GEOMETRIC",
+        detected_columns=[],
+        needs_column_mapping=False,
+        detected_order="UNKNOWN",
+        opening_balance=None,
+        closing_balance=None,
+        balance_verified=False,
+        balance_mismatch_count=0,
+        total_rows=len(rows),
+        p2p_matched_count=0,
+        bank_fee_count=0,
+        duplicate_count=0,
+        unmatched_count=len(rows),
+        rows=rows,
+        warnings=[],
+        cover_summary={"opening_balance": 2020338.46, "closing_balance": 11684.04},
+    )
+
+    BankStatementImporter()._verify_and_classify_rows(res)
+    assert res.total_rows == 60
+    assert len(res.rows) == 60
+    assert all(r.reference_number != "S/R" for r in res.rows)
+    assert res.opening_balance == pytest.approx(2020338.46, abs=0.02)
+    assert res.closing_balance == pytest.approx(11684.04, abs=0.02)
+    assert any("anexo repetido" in w.lower() for w in res.warnings)

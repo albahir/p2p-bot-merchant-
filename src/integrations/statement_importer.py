@@ -529,7 +529,7 @@ def _extract_cover_summary(meta_text: str) -> dict[str, float | int | None]:
     summary: dict[str, float | int | None] = {}
 
     m_open = re.search(
-        r"(?:SALDO\s+(?:AL\s+)?INICIO(?:\s+DEL\s+PERIODO)?|SALDO\s+INICIAL|SALDO\s+MES\s+ANTERIOR|\bINICIAL\b)\s*:?\s*([+-]?\d[\d.,]*[.,]\d{2})",
+        r"(?:SALDO\s+(?:AL\s+)?INICIO(?:\s+DEL\s+PERIODO)?|SALDO\s+INICIAL|SALDO\s+MES\s+ANTERIOR|\bINICIAL\b)\s*:?[^\d+-]{0,60}([+-]?\d[\d.,]*[.,]\d{2})",
         upper,
     )
     if m_open:
@@ -3765,6 +3765,41 @@ class BankStatementImporter:
             for r in with_bal:
                 r.balance_ves = None
             with_bal = []
+
+        # 1a. Cortar anexo final repetido en PDFs largos (ej. Mercantil incluye al final comprobantes/notas del mismo mes
+        # que reinician en día 01-05 con referencia S/R tras concluir el cierre del día 25-31 de MOVIMIENTOS DE CUENTA).
+        if len(rows) >= 80 and not with_bal:
+            annex_cut: int | None = None
+            for k in range(50, len(rows) - 10):
+                prev_d = rows[k - 1].date_vet
+                curr_d = rows[k].date_vet
+                if prev_d[:7] != curr_d[:7]:
+                    continue
+                try:
+                    prev_day = int(prev_d[8:10])
+                    curr_day = int(curr_d[8:10])
+                except ValueError:
+                    continue
+                if prev_day >= 22 and curr_day <= 5 and (prev_day - curr_day) >= 18:
+                    head_slice = rows[:k]
+                    tail_probe = rows[k : min(len(rows), k + 30)]
+                    head_ref_ratio = sum(1 for r in head_slice if r.reference_number != "S/R") / len(head_slice)
+                    tail_sr_ratio = sum(1 for r in tail_probe if r.reference_number == "S/R") / len(tail_probe)
+                    if head_ref_ratio >= 0.60 and tail_sr_ratio >= 0.75:
+                        annex_cut = k
+                        break
+            if annex_cut is not None:
+                dropped_cnt = len(rows) - annex_cut
+                rows = rows[:annex_cut]
+                for idx, r in enumerate(rows):
+                    r.row_index = idx
+                result.rows = rows
+                result.total_rows = len(rows)
+                result.warnings.append(
+                    f"Se omitió el anexo repetido al final del PDF ({dropped_cnt} filas duplicadas sin referencia); "
+                    f"se conservaron los {len(rows)} movimientos oficiales."
+                )
+
         order = "ASC"
         if len(rows) >= 2 and len(with_bal) >= 2:
             asc_hits = 0
