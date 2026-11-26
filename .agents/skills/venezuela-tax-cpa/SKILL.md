@@ -63,6 +63,7 @@ Ejecutar **siempre** tras modificar `src/reporting/*`, `src/core/binance_history
 - Confirmar que ninguna cifra de ISLR derive ingresos o ganancia desde flujo bancario (`1.1.01`).
 - Confirmar coherencia entre saldo teórico USDT (considerando `fee_crypto`), costo de ventas (`PEPS` o `Promedio` con inventario inicial) y deducción completa de comisiones (`Binance` + `Bancarias 5.2.01`) sin doble conteo ni omisiones.
 - Confirmar exclusión estricta de órdenes `CANCELLED` / `EXPIRED` y verificación de sentido bancario (`DEBIT → BUY`, `CREDIT → SELL`).
+- Confirmar que la conciliación marque como **"Posible pago de tercero"** todo movimiento bancario cuyo titular/cédula no coincida con la contraparte de la orden (LOCDOFT / UNIF / SUDEBAN; ver sección 10 de la referencia).
 
 ### Paso 2 — Auditar Huso Horario VET y Tasas Oficiales BCV
 - Confirmar que toda fecha de consulta, corte mensual, visualización y exportación (Excel, PDF, CSV, Sheets) use `VET (UTC-4)` y nunca `UTC` sin convertir.

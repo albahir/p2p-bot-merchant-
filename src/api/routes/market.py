@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from src.api.deps import get_db
+from src.api.deps import get_db, require_authenticated
 from src.core.market_analytics import (
     MIN_PREDICTION_DAYS,
     TIMEFRAME_SECONDS,
@@ -33,10 +33,11 @@ from src.core.market_analytics import (
     count_history_maturity,
     extract_daily_closes,
     hampel_filter,
+    match_tracked_ticket_bucket,
     to_utc_epoch,
 )
 from src.core.spread_monitor import SpreadMonitor
-from src.data.models import MarketHourlyRollup, MarketSnapshot
+from src.data.models import MarketHourlyRollup, MarketSnapshot, User
 from src.data.repositories import MarketDataRepository
 from src.reporting.bcv_history_service import BCVHistoryService
 
@@ -55,8 +56,8 @@ DEFAULT_BANK_OPTIONS: list[str] = [
     "Banco de Venezuela",
     "Mercantil",
     "Bancamiga",
-    "BBVA Banco Provincial",
-    "BNC Banco Nacional de Crédito",
+    "BBVA Provincial",
+    "BNC",
 ]
 
 
@@ -204,43 +205,137 @@ def _parse_json_dict(raw: Any) -> dict[str, Any]:
         return {}
 
 
-def _snapshot_price_for_side(snap: MarketSnapshot, side: str, bank: str) -> float:
-    if bank and bank not in ("*", "Todos") and snap.depth_json:
-        depth_payload = _parse_json_dict(snap.depth_json)
-        banks = depth_payload.get("banks")
-        if isinstance(banks, dict):
-            bank_cell = banks.get(bank)
-            if isinstance(bank_cell, dict):
-                if side == "buy":
-                    val = float(bank_cell.get("buy_best") or bank_cell.get("buy_avg") or 0.0)
-                else:
-                    val = float(bank_cell.get("sell_best") or bank_cell.get("sell_avg") or 0.0)
-                if val > 0:
-                    return val
+def _find_bank_cell(banks_dict: dict[str, Any], target_bank: str) -> dict[str, Any] | None:
+    """Busca métricas de un banco por nombre exacto o alias canónico venezolano."""
+    if not isinstance(banks_dict, dict):
+        return None
+    direct = banks_dict.get(target_bank)
+    if isinstance(direct, dict):
+        return direct
+    for k, val in banks_dict.items():
+        if isinstance(val, dict) and SpreadMonitor.bank_matches_user_bank(str(k), target_bank):
+            return val
+    return None
+
+
+def _snapshot_price_for_side(
+    snap: MarketSnapshot,
+    side: str,
+    bank: str,
+    ticket_bucket: int | None = None,
+) -> float | None:
+    is_bank_filtered = bool(bank and bank not in ("*", "Todos"))
+    depth_payload = _parse_json_dict(snap.depth_json) if snap.depth_json else {}
+    bcv_val = float(cast(float, snap.bcv_rate) or 0.0)
+
+    if ticket_bucket is not None:
+        tickets_map = depth_payload.get("tickets")
+        bucket_key = str(ticket_bucket)
+        if isinstance(tickets_map, dict):
+            t_cell = tickets_map.get(bucket_key)
+            if not isinstance(t_cell, dict):
+                return None
+            if is_bank_filtered:
+                b_cell = _find_bank_cell(t_cell.get("banks") or {}, bank)
+                if not b_cell:
+                    return None
+                buy_v = float(b_cell.get("buy_best") or b_cell.get("buy_avg") or 0.0)
+                sell_v = float(b_cell.get("sell_best") or b_cell.get("sell_avg") or 0.0)
+            else:
+                buy_v = float(t_cell.get("buy_avg20") or t_cell.get("buy_best") or 0.0)
+                sell_v = float(t_cell.get("sell_avg20") or t_cell.get("sell_best") or 0.0)
+            if side == "buy":
+                return buy_v if buy_v > 0 else None
+            if side == "evolucion":
+                mid_v = ((buy_v + sell_v) / 2.0) if (buy_v > 0 and sell_v > 0) else (sell_v or buy_v)
+                return mid_v if mid_v > 0 else None
+            if side == "brecha":
+                mid_v = ((buy_v + sell_v) / 2.0) if (buy_v > 0 and sell_v > 0) else (sell_v or buy_v)
+                return round(((mid_v - bcv_val) / bcv_val) * 100.0, 4) if (bcv_val > 0 and mid_v > 0) else None
+            return sell_v if sell_v > 0 else None
+        if ticket_bucket != 1_000_000:
+            return None
+
+    if is_bank_filtered:
+        banks_map = depth_payload.get("banks")
+        if not isinstance(banks_map, dict):
+            return None
+        bank_cell = _find_bank_cell(banks_map, bank)
+        if not bank_cell:
+            return None
+        buy_v = float(bank_cell.get("buy_best") or bank_cell.get("buy_avg") or 0.0)
+        sell_v = float(bank_cell.get("sell_best") or bank_cell.get("sell_avg") or 0.0)
+        if side == "buy":
+            return buy_v if buy_v > 0 else None
+        if side == "evolucion":
+            mid_v = ((buy_v + sell_v) / 2.0) if (buy_v > 0 and sell_v > 0) else (sell_v or buy_v)
+            return mid_v if mid_v > 0 else None
+        if side == "brecha":
+            mid_v = ((buy_v + sell_v) / 2.0) if (buy_v > 0 and sell_v > 0) else (sell_v or buy_v)
+            return round(((mid_v - bcv_val) / bcv_val) * 100.0, 4) if (bcv_val > 0 and mid_v > 0) else None
+        return sell_v if sell_v > 0 else None
 
     if side == "buy":
-        return float(cast(float, snap.p2p_buy_avg20) or cast(float, snap.p2p_buy_best) or 0.0)
+        v = float(cast(float, snap.p2p_buy_avg20) or cast(float, snap.p2p_buy_best) or 0.0)
+        return v if v > 0 else None
     if side == "brecha":
         return float(cast(float, snap.brecha_pct) or 0.0)
     if side == "evolucion":
-        return float(cast(float, snap.p2p_mid) or cast(float, snap.p2p_sell_avg20) or 0.0)
-    return float(cast(float, snap.p2p_sell_avg20) or cast(float, snap.p2p_sell_best) or 0.0)
+        v = float(cast(float, snap.p2p_mid) or cast(float, snap.p2p_sell_avg20) or 0.0)
+        return v if v > 0 else None
+    v = float(cast(float, snap.p2p_sell_avg20) or cast(float, snap.p2p_sell_best) or 0.0)
+    return v if v > 0 else None
 
 
-def _rollup_ohlc_for_side(rollup: MarketHourlyRollup, side: str, bank: str) -> dict[str, float] | float:
-    if bank and bank not in ("*", "Todos") and rollup.bank_matrix_json:
-        matrix = _parse_json_dict(rollup.bank_matrix_json)
-        bank_entry = matrix.get(bank)
-        if isinstance(bank_entry, dict):
+def _rollup_ohlc_for_side(
+    rollup: MarketHourlyRollup,
+    side: str,
+    bank: str,
+    ticket_bucket: int | None = None,
+) -> dict[str, float] | float | None:
+    is_bank_filtered = bool(bank and bank not in ("*", "Todos"))
+    matrix = _parse_json_dict(rollup.bank_matrix_json) if rollup.bank_matrix_json else {}
+
+    if is_bank_filtered:
+        if not matrix:
+            return None
+        bank_entry = _find_bank_cell(matrix, bank)
+        if not bank_entry:
+            return None
+        side_key = "buy" if side == "buy" else "sell"
+        side_cell = bank_entry.get(side_key)
+        if isinstance(side_cell, dict) and "o" in side_cell:
+            return {
+                "open": float(side_cell["o"]),
+                "high": float(side_cell["p"]),
+                "low": float(side_cell["x"]),
+                "close": float(side_cell["d"]),
+            }
+        return None
+
+    if ticket_bucket is not None:
+        tickets_map = matrix.get("tickets")
+        bucket_key = str(ticket_bucket)
+        if isinstance(tickets_map, dict):
+            t_entry = tickets_map.get(bucket_key)
+            if not isinstance(t_entry, dict):
+                return None
             side_key = "buy" if side == "buy" else "sell"
-            side_cell = bank_entry.get(side_key)
-            if isinstance(side_cell, dict) and "o" in side_cell:
+            t_cell = t_entry.get(side_key)
+            if isinstance(t_cell, dict) and "o" in t_cell:
+                if side == "brecha":
+                    bcv_val = float(cast(float, rollup.bcv_close) or 0.0)
+                    close_p = float(t_cell["d"])
+                    return round(((close_p - bcv_val) / bcv_val) * 100.0, 4) if (bcv_val > 0 and close_p > 0) else None
                 return {
-                    "open": float(side_cell["o"]),
-                    "high": float(side_cell["p"]),
-                    "low": float(side_cell["x"]),
-                    "close": float(side_cell["d"]),
+                    "open": float(t_cell["o"]),
+                    "high": float(t_cell["p"]),
+                    "low": float(t_cell["x"]),
+                    "close": float(t_cell["d"]),
                 }
+            return None
+        if ticket_bucket != 1_000_000:
+            return None
 
     if side == "buy":
         return {
@@ -279,9 +374,11 @@ def get_market_candles(
     ticket_ves: Annotated[float, Query(gt=0.0, le=500_000_000.0)] = 1_000_000.0,
     limit: Annotated[int, Query(ge=10, le=500)] = 240,
 ) -> MarketCandlesResponse:
-    """Devuelve velas OHLC filtradas por Hampel, EMAs 9/21, RSI 14 alineado y serie BCV."""
+    """Devuelve velas OHLC filtradas por Hampel, banco real y tramo de ticket (sin inventar datos)."""
     repo = MarketDataRepository(db)
     bucket_seconds = TIMEFRAME_SECONDS.get(timeframe, 300)
+    ticket_bucket = match_tracked_ticket_bucket(ticket_ves)
+    is_bank_filtered = bool(bank and bank not in ("*", "Todos"))
     maturity = count_history_maturity(db)
     rollups = repo.list_hourly_rollups(limit=min(limit * 4, 2000))
     use_rollups = timeframe in ("1h", "4h", "1D") and len(rollups) >= 3
@@ -291,21 +388,28 @@ def get_market_candles(
     bcv_by_bucket: dict[int, float] = {}
 
     if use_rollups:
+        valid_rollups = [
+            r for r in rollups if _rollup_ohlc_for_side(r, side, bank, ticket_bucket) is not None
+        ]
         cleaned_rollups = (
             hampel_filter(
-                rollups,
-                value_fn=lambda r: float(cast(float, r.sell_close) or 0.0),
+                valid_rollups,
+                value_fn=lambda r: (
+                    float(val["close"])
+                    if isinstance(val := _rollup_ohlc_for_side(r, side, bank, ticket_bucket), dict)
+                    else float(val or 0.0)
+                ),
                 window=8,
                 threshold=4.0,
             )
-            if side != "brecha" and len(rollups) >= 10
-            else rollups
+            if side != "brecha" and len(valid_rollups) >= 10
+            else valid_rollups
         )
         candles_raw = aggregate_candles(
             cleaned_rollups,
             bucket_seconds=bucket_seconds,
             time_fn=lambda r: to_utc_epoch(cast(datetime, r.hora_utc)),
-            ohlc_fn=lambda r: _rollup_ohlc_for_side(r, side, bank),
+            ohlc_fn=lambda r: _rollup_ohlc_for_side(r, side, bank, ticket_bucket) or 0.0,
             vol_fn=lambda r: float(cast(float, r.vol_sell_sum) if side != "buy" else cast(float, r.vol_buy_sum)),
         )
         for r in cleaned_rollups:
@@ -315,12 +419,15 @@ def get_market_candles(
                 bcv_by_bucket[b_ts] = round(bcv_val, 4)
     elif snapshots:
         valid_snaps = [
-            s for s in snapshots if _snapshot_price_for_side(s, side, bank) > 0 or side == "brecha"
+            s
+            for s in snapshots
+            if (p := _snapshot_price_for_side(s, side, bank, ticket_bucket)) is not None
+            and (p > 0 or side == "brecha")
         ]
         cleaned_snaps = (
             hampel_filter(
                 valid_snaps,
-                value_fn=lambda s: _snapshot_price_for_side(s, side, bank),
+                value_fn=lambda s: _snapshot_price_for_side(s, side, bank, ticket_bucket),
                 window=8,
                 threshold=4.0,
             )
@@ -331,7 +438,7 @@ def get_market_candles(
             cleaned_snaps,
             bucket_seconds=bucket_seconds,
             time_fn=lambda s: to_utc_epoch(cast(datetime, s.timestamp)),
-            ohlc_fn=lambda s: _snapshot_price_for_side(s, side, bank),
+            ohlc_fn=lambda s: float(_snapshot_price_for_side(s, side, bank, ticket_bucket) or 0.0),
             vol_fn=lambda s: float(
                 cast(float, s.vol_buy_usdt) if side == "buy" else cast(float, s.vol_sell_usdt)
             ),
@@ -356,7 +463,7 @@ def get_market_candles(
         bcv_series.append({"time": t, "value": last_bcv})
 
     band_data: dict[str, float] | None = None
-    if chained:
+    if chained and maturity["days_count"] >= MIN_PREDICTION_DAYS:
         daily_side = "buy" if side == "buy" else ("brecha" if side == "brecha" else "sell")
         daily_closes = extract_daily_closes(rollups, snapshots, side=daily_side)
         band_data = compute_percentile_band(
@@ -367,13 +474,17 @@ def get_market_candles(
         )
 
     if not chained:
+        if is_bank_filtered:
+            warnings.append(
+                f"Sin lecturas históricas registradas para {bank} en este rango todavía."
+            )
+        else:
+            warnings.append(
+                "Aún no hay lecturas guardadas para este filtro. Pulsa 'Capturar ahora' o espera 2 min al recolector."
+            )
+    if ticket_bucket is None:
         warnings.append(
-            "Aún no hay lecturas guardadas. Pulsa 'Capturar ahora' o espera 2 min al recolector automático."
-        )
-    if maturity["days_count"] < MIN_PREDICTION_DAYS:
-        warnings.append(
-            f"Rango histórico en construcción ({maturity['days_count']}/{MIN_PREDICTION_DAYS} días). "
-            f"El piso y techo estadístico se activará al completar {MIN_PREDICTION_DAYS} días cerrados."
+            f"Mostrando serie histórica base; para tu monto personalizado (Bs {ticket_ves:,.0f}) consulta la tarjeta 'Tasa Real VWAP' en vivo."
         )
 
     return MarketCandlesResponse(
@@ -433,14 +544,16 @@ def get_market_analytics(
     ticket_ves: Annotated[float, Query(gt=0.0, le=500_000_000.0)] = 1_000_000.0,
     side: Annotated[str, Query(pattern="^(sell|buy|bank|evolucion|brecha)$")] = "sell",
 ) -> MarketAnalyticsResponse:
-    """Calcula KPIs en vivo, VWAP exacto por ticket en Bs, profundidad Top 5/10/20 y backtest."""
+    """Calcula KPIs en vivo, VWAP exacto por ticket en Bs y profundidad real (Fail-Closed)."""
     repo = MarketDataRepository(db)
+    ticket_bucket = match_tracked_ticket_bucket(ticket_ves)
     maturity = count_history_maturity(db)
     snapshots = repo.list_snapshots(limit=500)
     rollups = repo.list_hourly_rollups(limit=200)
     warnings: list[str] = []
 
-    mapped_bank = "Todos" if not bank or bank.strip() in ("*", "Todos") else bank.strip()
+    is_bank_filtered = bool(bank and bank not in ("*", "Todos"))
+    mapped_bank = "Todos" if not is_bank_filtered else bank.strip()
     buy_ads: list[dict[str, Any]] = []
     sell_ads: list[dict[str, Any]] = []
     book: dict[str, Any] = {}
@@ -458,13 +571,29 @@ def get_market_analytics(
         sell_ads = list(book.get("sell_ads") or [])
         live_p2p_buy = float(book.get("best_buy_price") or 0.0)
         live_p2p_sell = float(book.get("best_sell_price") or 0.0)
+        if not buy_ads and not sell_ads:
+            warnings.append(
+                f"Binance P2P sin anuncios disponibles ahora para {mapped_bank} (monto Bs {ticket_ves:,.0f})."
+            )
     except (httpx.HTTPError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
         logger.warning("Fallo consultando libro Binance P2P para /api/market/analytics: %s", exc)
-        warnings.append("Libro Binance temporalmente inaccesible; mostrando último snapshot local.")
-        if snapshots:
+        if snapshots and not is_bank_filtered:
             last_s = snapshots[-1]
             live_p2p_buy = float(cast(float, last_s.p2p_buy_best) or 0.0)
             live_p2p_sell = float(cast(float, last_s.p2p_sell_best) or 0.0)
+            warnings.append("Libro Binance temporalmente inaccesible; mostrando último snapshot local.")
+        elif snapshots and is_bank_filtered:
+            last_s = snapshots[-1]
+            depth_p = _parse_json_dict(last_s.depth_json) if last_s.depth_json else {}
+            b_cell = _find_bank_cell(depth_p.get("banks") or {}, bank)
+            if b_cell:
+                live_p2p_buy = float(b_cell.get("buy_best") or 0.0)
+                live_p2p_sell = float(b_cell.get("sell_best") or 0.0)
+                warnings.append(f"Libro en vivo inaccesible; mostrando último registro guardado para {bank}.")
+            else:
+                warnings.append(f"Binance P2P temporalmente inaccesible y sin lectura reciente para {bank}.")
+        else:
+            warnings.append("Libro Binance temporalmente inaccesible.")
 
     live_bcv = 0.0
     try:
@@ -486,21 +615,27 @@ def get_market_analytics(
     vwap_buy_dict = compute_vwap_for_ticket(buy_ads, ticket_ves)
     vwap_sell_dict = compute_vwap_for_ticket(sell_ads, ticket_ves)
 
+    valid_snaps = [
+        s
+        for s in snapshots
+        if (p := _snapshot_price_for_side(s, side, bank, ticket_bucket)) is not None
+        and (p > 0 or side == "brecha")
+    ]
     candles = chain_candles(
         aggregate_candles(
-            snapshots,
+            valid_snaps,
             bucket_seconds=300,
             time_fn=lambda s: to_utc_epoch(cast(datetime, s.timestamp)),
-            ohlc_fn=lambda s: _snapshot_price_for_side(s, side, bank),
+            ohlc_fn=lambda s: float(_snapshot_price_for_side(s, side, bank, ticket_bucket) or 0.0),
         )
     )
-    if len(candles) < 15 and len(snapshots) >= 15:
+    if len(candles) < 15 and len(valid_snaps) >= 15:
         candles = chain_candles(
             aggregate_candles(
-                snapshots,
+                valid_snaps,
                 bucket_seconds=60,
                 time_fn=lambda s: to_utc_epoch(cast(datetime, s.timestamp)),
-                ohlc_fn=lambda s: _snapshot_price_for_side(s, side, bank),
+                ohlc_fn=lambda s: float(_snapshot_price_for_side(s, side, bank, ticket_bucket) or 0.0),
             )
         )
     rsi_series = compute_rsi_series(candles, 14)
@@ -519,14 +654,17 @@ def get_market_analytics(
     current_tot_vol = float(depth_dict["top20"]["buy_usdt"]) + float(depth_dict["top20"]["sell_usdt"])
     liq_alert = compute_liquidity_anomaly(recent_2h, current_tot_vol)
 
-    daily_closes = extract_daily_closes(rollups, snapshots, side="sell")
-    anchor = mid if mid > 0 else (daily_closes[-1] if daily_closes else 0.0)
-    band_data = (
-        compute_percentile_band(daily_closes, anchor_price=anchor, coverage=0.90)
-        if anchor > 0
-        else None
-    )
-    bt_data = backtest_percentile_band(daily_closes, coverage=0.90)
+    band_data: dict[str, float] | None = None
+    bt_data: dict[str, Any] | None = None
+    if maturity["days_count"] >= MIN_PREDICTION_DAYS:
+        daily_closes = extract_daily_closes(rollups, snapshots, side="sell")
+        anchor = mid if mid > 0 else (daily_closes[-1] if daily_closes else 0.0)
+        band_data = (
+            compute_percentile_band(daily_closes, anchor_price=anchor, coverage=0.90)
+            if anchor > 0
+            else None
+        )
+        bt_data = backtest_percentile_band(daily_closes, coverage=0.90)
 
     # Desglose por banco combinando libro vivo + máximo sostenido (pc) del último rollup horario
     sustained_map: dict[str, float | None] = {}
@@ -544,6 +682,12 @@ def get_market_analytics(
         key=lambda kv: kv[1]["vol_buy"] + kv[1]["vol_sell"],
         reverse=True,
     )[:8]:
+        pc_resolved = sustained_map.get(b_name)
+        if pc_resolved is None:
+            for s_key, s_val in sustained_map.items():
+                if SpreadMonitor.bank_matches_user_bank(s_key, b_name):
+                    pc_resolved = s_val
+                    break
         banks_snapshot.append(
             BankHourCellOut(
                 bank=b_name,
@@ -551,7 +695,7 @@ def get_market_analytics(
                 sell_avg=st["sell_avg"],
                 buy_best=st["buy_best"],
                 buy_avg=st["buy_avg"],
-                sustained_high_pc=sustained_map.get(b_name),
+                sustained_high_pc=pc_resolved,
                 vol_buy=st["vol_buy"],
                 vol_sell=st["vol_sell"],
                 buy_ads_count=int(st.get("buy_ads_count") or 0),
@@ -618,11 +762,6 @@ def get_market_analytics(
         pressure_label=str(book.get("market_pressure_label") or default_pressure),
     )
 
-    if maturity["days_count"] < MIN_PREDICTION_DAYS:
-        warnings.append(
-            f"Rango histórico en construcción ({maturity['days_count']}/{MIN_PREDICTION_DAYS} días)."
-        )
-
     verdict = _build_verdict(
         rsi14_current,
         ema4_12,
@@ -663,11 +802,13 @@ def get_market_analytics(
 @router.post("/collect", response_model=CollectTriggerResponse)
 def trigger_market_collect(
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_authenticated)] = None,  # type: ignore[assignment]
     bank: Annotated[str, Query(max_length=64)] = "*",
     ticket_ves: Annotated[float | None, Query(gt=0.0, le=500_000_000.0)] = None,
 ) -> CollectTriggerResponse:
-    """Dispara captura manual inmediata de velas/profundidad con cooldown anti-spam de 15s."""
+    """Dispara captura manual autenticada del libro global y 3 tramos de ticket (cooldown 15s)."""
     global _LAST_COLLECT_MONO
+    _ = (current_user, bank, ticket_ves)
 
     now_m = time.monotonic()
     with _COLLECT_LOCK:
@@ -682,9 +823,11 @@ def trigger_market_collect(
         _LAST_COLLECT_MONO = now_m
 
     try:
+        # Siempre capturar libro global y los 3 tramos reales para no contaminar la serie compartida
         snap = MarketCollectorService(db).capture_snapshot(
-            bank_filter=bank,
-            ticket_ves=ticket_ves,
+            bank_filter="*",
+            ticket_ves=None,
+            collect_missing_banks=False,
         )
     except (httpx.HTTPError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
         logger.warning("Captura manual de mercado abortada (Fail-Closed): %s", exc)
@@ -697,6 +840,6 @@ def trigger_market_collect(
     return CollectTriggerResponse(
         captured=True,
         cooldown_remaining_s=0.0,
-        message="Lectura en vivo guardada y añadida al gráfico.",
+        message="Lectura en vivo global y por tramos guardada correctamente.",
         snapshot_timestamp=(ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts).isoformat(),
     )

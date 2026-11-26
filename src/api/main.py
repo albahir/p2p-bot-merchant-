@@ -49,18 +49,25 @@ async def lifespan(app: FastAPI):
 
     collector_task: asyncio.Task[None] | None = None
     if os.getenv("DISABLE_MARKET_COLLECTOR") != "1":
-        def _collect_market_once() -> None:
+        def _collect_market_once(prune_old: bool = False) -> None:
+            from src.data.repositories import MarketDataRepository
+
             session = SessionLocal()
             try:
-                MarketCollectorService(session).capture_snapshot()
+                MarketCollectorService(session).capture_snapshot(collect_missing_banks=True)
+                if prune_old:
+                    MarketDataRepository(session).prune_old_snapshots(days_keep=30)
             finally:
                 session.close()
 
         async def _market_collector_loop() -> None:
             await asyncio.sleep(3.0)
+            cycle = 0
             while True:
                 try:
-                    await asyncio.to_thread(_collect_market_once)
+                    should_prune = (cycle % 30) == 0
+                    await asyncio.to_thread(_collect_market_once, should_prune)
+                    cycle += 1
                 except (httpx.HTTPError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
                     logger.debug("Recolector P2P en espera (%s)", exc)
                 await asyncio.sleep(120.0)

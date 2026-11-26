@@ -98,3 +98,83 @@ Para cerrar un período mensual o anual y entregarlo al Contador Público Colegi
    - Incluye: Resumen Ejecutivo / Liquidación SENIAT, Estado de Resultados (PEPS o Promedio), Balance General `BA VEN-NIF 12`, Kardex USDT (`Art. 177 Rgto. LISLR`), Conciliación Bancaria, Libro Diario con **Sumas Iguales** y Libro Mayor.
 4. **Declaración Oficial (fuera del sistema, en `www.seniat.gob.ve`)**:
    - El contribuyente o su contador carga las cifras definitivas del papel de trabajo en el portal del SENIAT para emitir la **Forma DPN-99025** (PN) o **DPJ-99026** (PJ) y archiva el certificado electrónico junto con el expediente de respaldo (plazo de resguardo tributario: **6 a 10 años** según COT/normativa vigente).
+
+---
+
+## 8. Mapeo Exacto de Casillas — Forma DPN-99025 (ISLR Persona Natural Residente)
+
+Referencia directa de las casillas e ítems oficiales del formulario electrónico **DPN-99025** relevantes para el comercio P2P de criptoactivos (expresados en **Bolívares actuales**, `UT = Bs. 43,00`):
+
+### Sección E — Estado Demostrativo de Ingresos, Costos y Gastos (Fuente Territorial)
+| Casilla | Ítem | Concepto Oficial DPN-99025 | Origen en Sistema P2P |
+| :---: | :---: | :--- | :--- |
+| **3** *(u 11)* | `703` *(o `709`)* | Ventas Brutas al Sector Privado *(u Otros Ingresos)* | Total Ventas P2P completadas en VES |
+| **15** | `711` | **Total Ingresos Netos** | Suma de ventas brutas netas (`703 − 710`) |
+| **16** | `712` | **Inventario Inicial** | Costo en VES del inventario inicial USDT |
+| **17 / 19** | `713` / `715` | **Compras Netas Nacionales / Total Compras Netas** | Total Compras P2P completadas en VES |
+| **20** | `716` | **Total Mercancía Disponible** (`16 + 19`) | Inventario Inicial + Compras Netas (VES) |
+| **21** | `717` | **Menos: Inventario Final** | Costo remanente en VES del inventario final USDT (PEPS o Promedio) |
+| **22 / 39** | `718` / `734` | **Costo de Ventas Mercancías Vendidas / Total Costo de Ventas** (`20 − 21`) | Costo de adquisición de los USDT vendidos (PEPS o Promedio) |
+| **50 / 52** | `742` / `743` | **Otros Gastos / Total Gastos** | Comisiones deducibles verificables: Exchange (Binance) + Bancarias (`0,30%` Pago Móvil / transferencias) |
+| **53 / 70 / 74** | `744` / `761` / `763` | **Utilidad Contable → Enriquecimiento Neto o Pérdida Fiscal** | `711 − 734 − 743` (traslada a Sección C, Casilla 1, Ítem `135`) |
+
+### Sección C, G y Rebajas — Autoliquidación Persona Natural Residente
+| Sección / Casilla | Ítem | Concepto Oficial DPN-99025 | Nota Operativa |
+| :--- | :---: | :--- | :--- |
+| **Secc. C — Casilla 1** | `135` | Enriquecimiento Neto (Tarifa N° 1) | Proviene de Sección E, Casilla 74 (`763`) |
+| **Secc. C — Casilla 2** | `143` | Sueldos, Salarios y Remuneraciones | Solo si el comerciante también tuvo empleo bajo relación de dependencia |
+| **Secc. G — Casilla 6 → C.3** | `851` → `163` | **Desgravamen Único (`774 UT`)** | `Bs. 33.282,00` (o desgravámenes detallados `810`, `813`, `808`, `814` → `850`) |
+| **Secc. C — Casilla 4 / 6 / 10** | `175` / `182` / `431` | Enriquecimiento Gravable / Renta Neta Mundial | Base sobre la cual se aplica Tarifa N° 1 (`185`) |
+| **Rebajas — Casilla 29** | `202` | **Rebaja Personal (`10 UT`)** | `Bs. 430,00` (solo residentes) |
+| **Rebajas — Casilla 30** | `201` | **Carga Familiar (`N × 10 UT`)** | `Bs. 430,00` por cada carga familiar elegible |
+| **Anticipos — Casilla 35** | `221` | Impuestos Retenidos en el Ejercicio | Soportados con comprobantes **AR-C** |
+| **Autoliquidación — Casilla 54** | `90` | **Total Impuesto a Pagar** | Se cancela mediante compromiso de pago electrónico del portal SENIAT |
+
+---
+
+## 9. Mapeo Exacto de Casillas — Forma DPJ-99026 (ISLR Persona Jurídica) y Tarifas LISLR
+
+Para contribuyentes con RIF jurídico (`J-`), la declaración electrónica usa la **Forma DPJ-99026** (sin desgravamen único ni rebaja personal/familiar):
+
+| Sección / Casilla | Ítem | Concepto Oficial DPJ-99026 | Diferencia clave frente a DPN-99025 |
+| :--- | :---: | :--- | :--- |
+| **Secc. E — Cas. 3 / 19 → 22** | `703` / `709` → `711` | Ventas Bienes Sector Privado / Otros Ingresos → Total Ingresos Netos | Mismos ítems base que DPN-99025 |
+| **Secc. E — Cas. 23–29 → 51** | `712..718` → `734` | Inv. Inicial (`712`) + Compras (`713/715`) − Inv. Final (`717`) = Costo Ventas (`718/734`) | Mismos ítems base que DPN-99025 |
+| **Secc. E — Cas. 70 / 82 → 83** | `774` / `742` → `743` | **Comisiones Varias (`774`)** / Otros Gastos (`742`) → Total Gastos (`743`) | DPJ dispone de casilla dedicada `774` para comisiones |
+| **Secc. E — Cas. 86 → 109** | `744` → `761` → `763` | Utilidad Contable → Enriquecimiento Neto Fiscal | Traslada a Sección C, Casilla 1, **Ítem `137`** |
+| **Secc. C — Cas. 1 / 3 / 7** | `137` → `178` → `431` | Enriquecimiento Neto / Gravable / Renta Neta Mundial | Sin desgravamen único (`774 UT`) ni rebajas personales |
+| **Secc. C — Cas. 8 → 54** | `185` → `442` → `90` | Impuesto Determinado (**Tarifa N° 2**) − Anticipos (`291`) = Total a Pagar (`90`) | Aplica Tarifa N° 2 (Art. 52 LISLR) |
+
+### Escalas Oficiales de Tarifas ISLR (`UT = Bs. 43,00` — SNAT/2025/000048)
+
+- **Tarifa N° 1 — Personas Naturales Residentes (Art. 50 LISLR)**:
+  1. Hasta `1.000 UT`: **6%** (sustraendo `0 UT`)
+  2. `> 1.000` a `1.500 UT`: **9%** (sustraendo `30 UT`)
+  3. `> 1.500` a `2.000 UT`: **12%** (sustraendo `75 UT`)
+  4. `> 2.000` a `2.500 UT`: **16%** (sustraendo `155 UT`)
+  5. `> 2.500` a `3.000 UT`: **20%** (sustraendo `255 UT`)
+  6. `> 3.000` a `4.000 UT`: **24%** (sustraendo `375 UT`)
+  7. `> 4.000` a `6.000 UT`: **29%** (sustraendo `575 UT`)
+  8. Más de `6.000 UT`: **34%** (sustraendo `875 UT`)
+- **Tarifa N° 2 — Personas Jurídicas (Art. 52 LISLR)**:
+  1. Hasta `2.000 UT`: **15%** (sustraendo `0 UT`)
+  2. `> 2.000` a `3.000 UT`: **22%** (sustraendo `140 UT`)
+  3. Más de `3.000 UT`: **34%** (sustraendo `500 UT` = `Bs. 21.500,00` con UT Bs. 43)
+
+---
+
+## 10. Cumplimiento Regulatorio No Tributario del Comerciante P2P (Nov 2026)
+
+Reglas vigentes que no son impuestos pero que el sistema debe respetar y documentar, porque condicionan la validez de la conciliación bancaria y la defensa ante bancos, SUDEBAN, UNIF o SENIAT:
+
+- **Legalidad de la actividad**: Comprar, tener y vender criptoactivos (USDT, BTC) **no es ilegal** en Venezuela. Sigue vigente el *Decreto Constituyente sobre el Sistema Integral de Criptoactivos* (G.O. N° 41.575), pero la **SUNACRIP** continúa intervenida/en reestructuración desde marzo de 2023: no existe un registro operativo para que personas naturales P2P obtengan licencia, y solo pocos operadores locales mantienen licencias puntuales.
+- **SUDEBAN — Circular SIB-DSB-#08954**: Instruyó a la banca nacional suspender relaciones con fintechs/custodios de stablecoins sin licencia vigente (caso Kontigo / OHA Technology). Implicación: la liquidación P2P debe hacerse solo por **cuentas bancarias propias** y canales bancarios regulares (Pago Móvil / transferencias).
+- **Prevención de Legitimación de Capitales (LOCDOFT, UNIF, normas SUDEBAN)**: Los bancos aplican monitoreo automático de alta rotación y múltiples remitentes; las causas principales de bloqueo son la **triangulación** (pagos de terceros con fondos de estafas) y flujos sin respaldo documental.
+  - **Titularidad coincidente obligatoria**: El nombre/cédula del remitente o beneficiario bancario debe coincidir con la contraparte verificada de la orden Binance. El sistema debe **marcar como alerta "Posible pago de tercero"** cualquier movimiento bancario cuyo titular/cédula no coincida con la contraparte de la orden conciliada.
+  - **Expediente de origen de fondos**: Conservar orden Binance + comprobante/estado bancario + titular/cédula + hora VET por cada operación, listo para presentar al banco o a la UNIF ante un bloqueo preventivo.
+  - El sistema **no debe** sugerir ocultar o disfrazar la naturaleza de las operaciones ante los bancos; la defensa válida es la trazabilidad documental completa.
+- **BCV — Tipo de cambio oficial**: Fijado diariamente a partir de las mesas de cambio bancarias; es de **uso obligatorio** para contabilidad, facturación y obligaciones fiscales. La tasa P2P (con brecha típica de 15–20 % sobre la oficial) es solo dato operativo de mercado, **nunca** base tributaria.
+- **Binance (requisitos de plataforma)**: Exige KYC completo y depósitos de garantía en USDT para comerciantes verificados; reincorporó métodos de pago de banca pública (BDV, Banco del Tesoro, Banco Digital de los Trabajadores), lo que aumenta la exposición al monitoreo bancario estatal.
+
+
+

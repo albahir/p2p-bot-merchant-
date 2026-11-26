@@ -88,6 +88,8 @@ No flag runs the full static audit: phases 0-6 and 8-9, no DAST.
 | Phase 6a manual review of AI-code failure classes | `references/vibecoding-checklist.md` |
 | Phase 6b app calls an LLM API | `references/llm-app-security.md` |
 | Phase 3/6a/7 JWT & session token inspection, encoding & validation (`jwt-decode`, `jwt-encode`, `jwt-validate`) | `references/jwt-security.md` |
+| Phase 5/7 Live web/UI, network, cookie & multi-user storage inspection (`Chrome DevTools` & `Playwright MCP`) | `references/browser-devtools-security.md` |
+| Phase 5/7 Cloudflare Edge, DNS, TLS, Cache Rules, Rate Limiting & Workers audit (`cloudflare_cloudflare` MCP & `cf-cli`) | `references/cloudflare-edge-security.md` |
 | Phase 7 DAST, or probing authorization/IDOR | `references/dast-and-authz.md` |
 | Phase 9 compliance appendix requested | `references/compliance-mapping.md` |
 | A live credential was found and needs rotating | `references/credential-rotation.md` |

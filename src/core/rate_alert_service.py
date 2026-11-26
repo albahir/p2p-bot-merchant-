@@ -7,6 +7,8 @@ import re
 import time
 from datetime import date
 
+import httpx
+
 from src.core.spread_monitor import BankRateQuote, SpreadMonitor
 from src.reporting.bcv_service import BCVService
 
@@ -147,12 +149,20 @@ class RateAlertService:
         if fecha_valor:
             lines.append(f"• Fecha Valor Oficial: *{fecha_valor}*")
 
-        ref_p2p = 1000.0
-        quotes = self.monitor.get_market_quotes()
-        if quotes:
-            ref_p2p = quotes[0].buy_rate
-        gap = self.monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=current_rate)
-        lines.append(f"• Brecha P2P vs BCV: `{gap:+.2f}%`")
+        ref_p2p = 0.0
+        try:
+            quotes = self.monitor.fetch_live_quotes(use_public_bapi=True)
+            valid_rates = [q.buy_rate for q in quotes if getattr(q, "buy_rate", 0.0) > 0 and getattr(q, "source", "") not in ("calibrated", "mock", "fallback")]
+            if valid_rates:
+                ref_p2p = valid_rates[0]
+        except (httpx.HTTPError, OSError, RuntimeError, ValueError, TypeError):
+            ref_p2p = 0.0
+
+        if ref_p2p > 0:
+            gap = self.monitor.calculate_bcv_gap(p2p_price=ref_p2p, bcv_rate=current_rate)
+            lines.append(f"• Brecha P2P vs BCV: `{gap:+.2f}%`")
+        else:
+            lines.append("• Brecha P2P vs BCV: `N/D (Sin datos P2P en vivo)`")
         lines.append("\n💡 *Acción recomendada*: Revisa y ajusta los precios de tus anuncios Maker en Binance P2P.")
 
         return "\n".join(lines)

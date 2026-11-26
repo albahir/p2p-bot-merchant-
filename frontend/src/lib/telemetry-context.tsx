@@ -104,7 +104,6 @@ export function TelemetryProvider({ children }: { children: React.ReactNode }) {
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "visible") {
         refreshTelemetry(false);
-    warmAuthenticatedSession();
       }
     }, 45_000);
 

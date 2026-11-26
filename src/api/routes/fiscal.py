@@ -52,6 +52,14 @@ class FiscalReconciliationResponse(BaseModel):
     message: str
     bcv_rate: float
     cost_method: str = "FIFO"
+    bank_fees_ves: float = 0.0
+    exchange_fees_ves: float = 0.0
+    unique_counterparties: int = 0
+    inventory_warnings: list[str] = Field(default_factory=list)
+    taxpayer_type: str = "NATURAL"
+    form_code: str = "DPN-99025"
+    estimated_islr_ves: float = 0.0
+    tcmv_rate_ves: float = 0.0
 
 
 @router.get("/summary", response_model=FiscalReconciliationResponse)
@@ -107,6 +115,14 @@ def get_fiscal_summary(
             message=res.message,
             bcv_rate=bcv_val,
             cost_method=res.cost_method,
+            bank_fees_ves=res.bank_fees_ves,
+            exchange_fees_ves=res.exchange_fees_ves,
+            unique_counterparties=res.unique_counterparties,
+            inventory_warnings=res.inventory_warnings,
+            taxpayer_type=res.taxpayer_type,
+            form_code=res.form_code,
+            estimated_islr_ves=res.estimated_islr_ves,
+            tcmv_rate_ves=res.tcmv_rate_ves,
         )
     except ValueError as val_err:
         raise HTTPException(
@@ -173,6 +189,14 @@ def execute_fiscal_reconciliation(
             message=res.message,
             bcv_rate=bcv_val,
             cost_method=res.cost_method,
+            bank_fees_ves=res.bank_fees_ves,
+            exchange_fees_ves=res.exchange_fees_ves,
+            unique_counterparties=res.unique_counterparties,
+            inventory_warnings=res.inventory_warnings,
+            taxpayer_type=res.taxpayer_type,
+            form_code=res.form_code,
+            estimated_islr_ves=res.estimated_islr_ves,
+            tcmv_rate_ves=res.tcmv_rate_ves,
         )
     except ValueError as val_err:
         raise HTTPException(

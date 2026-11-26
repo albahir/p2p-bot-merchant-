@@ -42,6 +42,7 @@ from src.data.models import BankVoucher, FiscalPeriodSnapshot, Order
 from src.data.repositories import BankVoucherRepository, OrderRepository, _apply_user_scope
 from src.integrations.ai_assistant import AIKeyPool
 from src.reporting.accounting_engine import AccountingEngine
+from src.reporting.islr_calculator import is_third_party_counterparty_mismatch
 from src.reporting.normalizers import (
     detect_bank_from_text,
     normalize_bank_name,
@@ -335,6 +336,8 @@ class ParsedStatementRow:
     destination_bank: str | None = None
     tx_time_vet: str | None = None
     source_page_idx: int | None = None
+    third_party_alert: bool = False
+    third_party_detail: str | None = None
 
 
 @dataclass
@@ -399,7 +402,7 @@ def _sanitize_cell_text(raw: Any, max_len: int = 255) -> str:
 
 
 def _parse_signed_amount(raw_val: Any) -> tuple[float, Literal["DEBIT", "CREDIT"] | None]:
-    """Extrae magnitud positiva y signo explícito si viene indicado (+/-/CR/DB)."""
+    """Extrae magnitud positiva y signo explícito si viene indicado (+/-/CR/DB/paréntesis)."""
     if raw_val is None:
         return 0.0, None
     if isinstance(raw_val, (int, float)):
@@ -414,12 +417,22 @@ def _parse_signed_amount(raw_val: Any) -> tuple[float, Literal["DEBIT", "CREDIT"
         return 0.0, None
 
     explicit_dir: Literal["DEBIT", "CREDIT"] | None = None
-    if s.startswith("-") or re.search(r"\b(DB|DR|DEBITO|CARGO|D)\b", s):
+    if (
+        s.startswith("-")
+        or s.endswith("-")
+        or (s.startswith("(") and s.endswith(")"))
+        or bool(re.search(r"(?:-\s*\d|\bDB\b|\bDR\b|\bDEBITO\b|\bCARGO\b|\bEGRESO\b)", s))
+    ):
         explicit_dir = "DEBIT"
-    elif s.startswith("+") or re.search(r"\b(CR|CREDITO|ABONO|C)\b", s):
+    elif (
+        s.startswith("+")
+        or s.endswith("+")
+        or bool(re.search(r"(?:\+\s*\d|\bCR\b|\bCREDITO\b|\bABONO\b|\bINGRESO\b)", s))
+    ):
         explicit_dir = "CREDIT"
 
-    mag = parse_monetary_amount(s)
+    s_clean = s.replace("(", "").replace(")", "").strip("-+ ")
+    mag = parse_monetary_amount(s_clean)
     return mag, explicit_dir
 
 
@@ -529,14 +542,20 @@ def _extract_cover_summary(meta_text: str) -> dict[str, float | int | None]:
     summary: dict[str, float | int | None] = {}
 
     m_open = re.search(
-        r"(?:SALDO\s+(?:AL\s+)?INICIO(?:\s+DEL\s+PERIODO)?|SALDO\s+INICIAL|SALDO\s+MES\s+ANTERIOR|\bINICIAL\b)\s*:?[^\d+-]{0,60}([+-]?\d[\d.,]*[.,]\d{2})",
+        r"(?:SALDO\s+(?:AL\s+)?INICIO(?:\s+DEL\s+PERIODO)?|SALDO\s+INICIAL|SALDO\s+MES\s+ANTERIOR|SALDO\s+ANTERIOR|\bINICIAL\b)"
+        r"(?:\s*[:\-]?\s*(?:AL|DEL?)?\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})?"
+        r"(?:\s*(?:AL|A)\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})?"
+        r"\s*:?[^\d+-]{0,60}([+-]?\d[\d.,]*[.,]\d{2})",
         upper,
     )
     if m_open:
         summary["opening_balance"] = _parse_flexible_summary_amount(m_open.group(1))
 
     m_close = re.search(
-        r"(?:SALDO\s+(?:AL\s+)?FINAL(?:\s+DEL\s+PERIODO)?|\bFINAL\b)\s*:?\s*(?:\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\s+)?([+-]?\d[\d.,]*[.,]\d{2})",
+        r"(?:SALDO\s+(?:AL\s+)?FINAL(?:\s+DEL\s+PERIODO)?|SALDO\s+FINAL|SALDO\s+ACTUAL|SALDO\s+DE\s+CIERRE|SALDO\s+AL\s+CORTE|\bFINAL\b)"
+        r"(?:\s*[:\-]?\s*(?:AL|DEL?)?\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})?"
+        r"(?:\s*(?:AL|A)\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})?"
+        r"\s*:?[^\d+-]{0,60}([+-]?\d[\d.,]*[.,]\d{2})",
         upper,
     )
     if m_close:
@@ -563,6 +582,35 @@ def _extract_cover_summary(meta_text: str) -> dict[str, float | int | None]:
         summary["declared_debits_total"] = _parse_flexible_summary_amount(m_deb_b.group(2))
 
     return summary
+
+
+def _is_personal_or_non_p2p_expense(concept: str) -> bool:
+    """Identifica consumos por tarjeta de débito/POS, compras en comercios, canales SMS y servicios personales no P2P."""
+    upper = normalize_text(concept)
+    keywords = (
+        "CONSUMO TARJETA",
+        "CONSUMO TDD",
+        "CONSUMO POS",
+        "CONSUMO PUNTO",
+        "COMPRA POS",
+        "COMPRA EN PUNTO",
+        "TARJETA DE DEBITO",
+        "PUNTO DE VENTA",
+        "CANAL SMS",
+        "USO DEL CANAL",
+        "SERVICIO SMS",
+        "MENSAJERIA SMS",
+        "PAGO DE SERVICIO",
+        "PAGO SERVICIO",
+        "PAGO CANTV",
+        "RECARGA MOVISTAR",
+        "RECARGA DIGITEL",
+        "RECARGA MOVILNET",
+        "RETIRO CAJERO",
+        "DISPENSACION CAJERO",
+        "RETIRO ATM",
+    )
+    return any(kw in upper for kw in keywords)
 
 
 def _enrich_row_metadata(row: ParsedStatementRow, full_desc: str) -> None:
@@ -2743,6 +2791,10 @@ class BankStatementImporter:
                             meta_lines.extend(
                                 ln.text for ln in _group_words_into_lines(left_words, y_tol=eff_y_tol)
                             )
+                        for ln in wlines:
+                            ln_u = normalize_text(ln.text)
+                            if any(k in ln_u for k in ("SALDO", "INICIAL", "FINAL", "CREDITO", "DEBITO", "RESUMEN")):
+                                meta_lines.append(ln.text)
 
                     if table_x_min > 0.0:
                         hdr_word_ids = {id(w) for ln in wlines[hdr_start:hdr_end] for w in ln.words}
@@ -3877,14 +3929,25 @@ class BankStatementImporter:
         # 2. Verificar matemáticamente transición cronológica de saldo
         chron_rows = rows if order == "ASC" else list(reversed(rows))
         with_bal = [r for r in rows if r.balance_ves is not None]
-        if with_bal:
-            first_bal = next((r.balance_ves for r in chron_rows if r.balance_ves is not None), None)
-            last_bal = next((r.balance_ves for r in reversed(chron_rows) if r.balance_ves is not None), None)
-            if first_bal is not None:
-                first_row = next(r for r in chron_rows if r.balance_ves is not None)
-                net0 = first_row.amount_ves if first_row.movement_type == "CREDIT" else -first_row.amount_ves
-                result.opening_balance = round(first_bal - net0, 2)
-            result.closing_balance = round(last_bal, 2) if last_bal is not None else None
+        first_bal = next((r.balance_ves for r in chron_rows if r.balance_ves is not None), None) if with_bal else None
+        last_bal = next((r.balance_ves for r in reversed(chron_rows) if r.balance_ves is not None), None) if with_bal else None
+
+        # Priorizar saldo oficial declarado en resumen de portada bancaria
+        cs = result.cover_summary or {}
+        cs_open = cs.get("opening_balance") if cs else None
+        cs_close = cs.get("closing_balance") if cs else None
+
+        if isinstance(cs_open, (int, float)):
+            result.opening_balance = round(float(cs_open), 2)
+        elif first_bal is not None:
+            first_row = next(r for r in chron_rows if r.balance_ves is not None)
+            net0 = first_row.amount_ves if first_row.movement_type == "CREDIT" else -first_row.amount_ves
+            result.opening_balance = round(first_bal - net0, 2)
+
+        if isinstance(cs_close, (int, float)):
+            result.closing_balance = round(float(cs_close), 2)
+        elif last_bal is not None:
+            result.closing_balance = round(last_bal, 2)
 
         mismatches = 0
         prev_bal: float | None = None
@@ -3892,13 +3955,15 @@ class BankStatementImporter:
             if r.balance_ves is None:
                 continue
             if prev_bal is not None:
-                if r.amount_uncertain:
-                    if abs((prev_bal + r.amount_ves) - r.balance_ves) <= 0.02:
-                        r.movement_type = "CREDIT"
-                        r.amount_uncertain = False
-                    elif abs((prev_bal - r.amount_ves) - r.balance_ves) <= 0.02:
-                        r.movement_type = "DEBIT"
-                        r.amount_uncertain = False
+                # Verificación de sentido con balance matemático como fuente de verdad
+                is_math_debit = abs((prev_bal - r.amount_ves) - r.balance_ves) <= 0.02
+                is_math_credit = abs((prev_bal + r.amount_ves) - r.balance_ves) <= 0.02
+                if is_math_debit and not is_math_credit:
+                    r.movement_type = "DEBIT"
+                    r.amount_uncertain = False
+                elif is_math_credit and not is_math_debit:
+                    r.movement_type = "CREDIT"
+                    r.amount_uncertain = False
 
                 net = r.amount_ves if r.movement_type == "CREDIT" else -r.amount_ves
                 expected_bal = round(prev_bal + net, 2)
@@ -3918,17 +3983,9 @@ class BankStatementImporter:
         result.balance_verified = bool(len(with_bal) >= 2 and mismatches == 0)
 
         # 2b. Verificación contra resumen de portada (fundamental para Mercantil sin columna Saldo por fila y auditoría Banesco)
-        cs = result.cover_summary or {}
         if cs:
-            cs_open = cs.get("opening_balance")
-            cs_close = cs.get("closing_balance")
             cs_cred_tot = cs.get("declared_credits_total")
             cs_deb_tot = cs.get("declared_debits_total")
-            if result.opening_balance is None and isinstance(cs_open, (int, float)):
-                result.opening_balance = round(float(cs_open), 2)
-            if result.closing_balance is None and isinstance(cs_close, (int, float)):
-                result.closing_balance = round(float(cs_close), 2)
-
             sum_credits = round(sum(r.amount_ves for r in rows if r.movement_type == "CREDIT"), 2)
             sum_debits = round(sum(r.amount_ves for r in rows if r.movement_type == "DEBIT"), 2)
 
@@ -3956,8 +4013,9 @@ class BankStatementImporter:
                             f"(Créditos Bs. {sum_credits:.2f}, Débitos Bs. {sum_debits:.2f})."
                         )
 
-        # 3. Clasificación base sin BD (comisiones bancarias explícitas e implícitas 0.30% de Banesco Pago Móvil)
+        # 3. Clasificación base sin BD (comisiones bancarias, consumos personales por tarjeta/SMS y P2P)
         fee_count = 0
+        ignore_count = 0
         for idx, r in enumerate(chron_rows):
             if r.movement_type == "DEBIT" and _is_bank_fee_concept(r.concept):
                 r.suggested_action = "BANK_FEE"
@@ -3966,14 +4024,19 @@ class BankStatementImporter:
                 fee_count += 1
                 continue
 
-            # Comisión implícita Banesco: fila inmediata con misma ref y concepto "Banesco Pago Movil" (con o sin espacios OCR) por ~0.30%
+            if r.movement_type == "DEBIT" and _is_personal_or_non_p2p_expense(r.concept):
+                r.suggested_action = "IGNORE"
+                r.notes = "Gasto personal / consumo no P2P (tarjeta de débito/canal SMS/servicio)"
+                ignore_count += 1
+                continue
+
+            # Comisión implícita Banesco: fila inmediata con misma ref por ~0.30%
             is_implicit_banesco_fee = False
             curr_compact = re.sub(r"\s+", "", normalize_text(r.concept))
             if (
                 idx > 0
                 and r.movement_type == "DEBIT"
                 and r.reference_number != "S/R"
-                and ("BANESCOPAGOMOVIL" in curr_compact or "PAGOMOVIL" in curr_compact)
             ):
                 prev_r = chron_rows[idx - 1]
                 prev_compact = re.sub(r"\s+", "", normalize_text(prev_r.concept))
@@ -3982,7 +4045,16 @@ class BankStatementImporter:
                     and prev_r.suggested_action != "BANK_FEE"
                     and prev_r.date_vet == r.date_vet
                     and prev_r.reference_number == r.reference_number
-                    and ("BANESCOPAGOMOVIL" in prev_compact or "PAGOMOVIL" in prev_compact)
+                    and (
+                        "BANESCO" in curr_compact
+                        or "PAGOMOVIL" in curr_compact
+                        or "MOVIL" in curr_compact
+                        or "CCE" in curr_compact
+                        or "BANESCO" in prev_compact
+                        or "PAGOMOVIL" in prev_compact
+                        or "MOVIL" in prev_compact
+                        or "CCE" in prev_compact
+                    )
                     and 0.0 < r.amount_ves < prev_r.amount_ves
                 ):
                     expected_fee = round(prev_r.amount_ves * 0.003, 2)
@@ -3999,7 +4071,7 @@ class BankStatementImporter:
                 r.suggested_action = "P2P_UNMATCHED"
 
         result.bank_fee_count = fee_count
-        result.unmatched_count = len(rows) - fee_count
+        result.unmatched_count = len(rows) - fee_count - ignore_count
 
     def preview_from_bytes(
         self,
@@ -4097,7 +4169,18 @@ class BankStatementImporter:
                 row.matched_order_crypto = float(matched_order.crypto_amount or 0.0)
                 row.matched_order_fiat = float(matched_order.fiat_amount or 0.0)
                 row.match_confidence = confidence
-                row.notes = f"Emparejada con orden {matched_order.order_number}"
+                tp_alert, tp_detail = is_third_party_counterparty_mismatch(
+                    row.counterparty_name,
+                    cast(str | None, matched_order.counterparty_name),
+                    bank_sender_id=row.sender_id,
+                )
+                row.third_party_alert = tp_alert
+                row.third_party_detail = tp_detail
+                row.notes = (
+                    f"Emparejada con orden {matched_order.order_number} · ⚠ {tp_detail}"
+                    if tp_alert and tp_detail
+                    else f"Emparejada con orden {matched_order.order_number}"
+                )
                 match_count += 1
             else:
                 row.suggested_action = "P2P_UNMATCHED"

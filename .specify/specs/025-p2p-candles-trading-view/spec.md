@@ -18,7 +18,7 @@ Dotar a `p2p-bot-merchant` de una pestaña independiente (**`Velas P2P`** -> `/m
    - **Filtro de Hampel MAD** (`ventana=10`, `umbral=4`) para suprimir anuncios anómalos de 1 USDT antes de formar velas.
    - **Indicadores Técnicos**: EMA9, EMA21, EMA4/12, RSI 14 de Wilder (alineado por índice), velocidad de la brecha BCV vs P2P.
    - **Microestructura y Profundidad Real**: Acumulado Top 5 / Top 10 / Top 20, desequilibrio `(demanda - oferta) / total`, detección de liquidez flaca (`< 60%` de mediana de 2h) y cálculo de **VWAP real por ticket** (*¿a qué tasa promedio llenas tu monto exacto?*).
-   - **Banda Probabilística del 90% por Percentiles Ponderados**: Calculada cuando existen `>= 15` días cerrados en historial (`backtest` honesto, sin campana de Gauss ni datos inventados — Fail-Closed).
+   - **Banda Probabilística del 90% por Percentiles Ponderados**: Calculada cuando existen `>= 20` días cerrados en historial (`backtest` honesto, sin campana de Gauss ni datos inventados — Fail-Closed).
 3. **Interfaz TradingView `lightweight-charts` en `/market`**:
    - 5 vistas: `USDT · Venta`, `USDT · Compra`, `Por Banco & Monto`, `Evolución P2P vs BCV` y `Brecha (%)`.
    - Tipos de gráfico: `Velas`, `Línea`, `Área`, toggle `EMA9 / EMA21`, panel sincronizado `RSI 14` (70/30), líneas de banda probable (cuando haya datos), controles de zoom / volver al presente y captura manual en vivo.
@@ -27,5 +27,5 @@ Dotar a `p2p-bot-merchant` de una pestaña independiente (**`Velas P2P`** -> `/m
 
 ## 2. Reglas Innegociables
 1. **Aislamiento Total**: Nuevo botón lateral independiente `/market`; cero impacto en rendimiento o diseño de las páginas actuales.
-2. **Principio Fail-Closed (Constitución #2)**: Si el historial aún no alcanza el mínimo de días para banda probabilística (`15` días) o profundidad histórica (`2h`), mostrar el estado honesto (*"Recolectando historial: X lecturas / Y días"*) sin inventar predicciones ficticias.
+2. **Principio Fail-Closed (Constitución #2)**: Si el historial aún no alcanza el mínimo de días para banda probabilística (`20` días) o profundidad histórica (`2h`), mostrar el estado honesto (*"Recolectando historial: X lecturas / Y días"*) sin inventar predicciones ficticias.
 3. **Cero Secretos**: Solo consume endpoints públicos Binance C2C y tasa BCV oficial ya existentes en `SpreadMonitor` y `BCVHistoryService`.

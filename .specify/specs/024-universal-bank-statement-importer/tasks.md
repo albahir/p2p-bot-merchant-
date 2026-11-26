@@ -54,3 +54,10 @@
 - [x] T24.25: Implementar conciliación indexada O(1) sin límites `500/2000`, anti-doble-comisión, commit atómico por lotes (`AccountingEngine` + `BankStatementImporter`), fix de `reconcile_orphan_vouchers` (`src/integrations/receipt_ocr.py`), entrada manual expandida (`src/api/routes/accounting.py`) y ventanas VET consistentes (`src/reporting/accounting_engine.py`, `src/reporting/fiscal_reconciler.py`).
 - [x] T24.26: Actualizar `frontend/src/components/statement-import-modal.tsx` (paginación + filtros por estado + búsqueda), `frontend/src/app/accounting/page.tsx` (tope 50 MB, entrada manual con fecha/tipo/comisión, jerarquía PDF principal) y `docker/docker-compose.yml` (liberar estrangulamiento de RAM para VPS Contabo 12 GB).
 - [x] T24.27: Ejecutar suite completa (`pytest`, `ruff check .`, `mypy src/`, build frontend) y auditorías obligatorias `security-review` y `venezuela-tax-cpa`, actualizando `tasks.md` y `MEMORY.md` (ADR 076).
+
+## Fase 10: Robustez de Producción VPS (Saldo Inicial con Fechas, Gastos Personales IGNORE, Comisiones MOVIL CCE y Tolerancia Red Móvil)
+- [x] T24.28: Rescate de `opening_balance` en `_extract_cover_summary` tolerando fechas del período intermedias (`SALDO AL INICIO DEL PERIODO: 01/10/2026`) y otorgando precedencia al saldo oficial bancario de portada.
+- [x] T24.29: Clasificación automática de gastos personales no P2P (`CONSUMO TARJETA DE DEBITO`, `USO DEL CANAL SMS`, `CONSUMO POS`, `PAGO DE SERVICIOS`) como `IGNORE` con notas explicativas.
+- [x] T24.30: Detección de comisiones implícitas 0.30% Pago Móvil Banesco bajo conceptos abreviados (`MOVIL CCE` / `CCE`) y preservación matemática de saldos contables negativos (`-24484.48`, `(24484.48)`, `24484.48-`).
+- [x] T24.31: Resiliencia de red móvil en frontend (`api.ts`), tolerando hasta 30 reintentos de red celular (`Failed to fetch`) con mensajes amigables en español.
+- [x] T24.32: Validación total con pruebas TDD en `tests/unit/test_high_volume_reconciliation_and_banks.py`, `ruff`, `mypy`, y `tsc --noEmit`.

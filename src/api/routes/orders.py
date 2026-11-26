@@ -262,11 +262,44 @@ def export_orders(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_authenticated)],
     format: str = Query(default="xlsx", pattern="^(xlsx|csv_semicolon|csv_comma)$"),
+    trade_type: Annotated[str | None, Query(pattern="^(BUY|SELL)$")] = None,
+    order_status: Annotated[str | None, Query()] = None,
+    payment_method: Annotated[str | None, Query(max_length=64)] = None,
+    date_from: Annotated[str | None, Query()] = None,
+    date_to: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query()] = None,
 ) -> Response:
-    """Genera y descarga el archivo con el historial de órdenes del operador autenticado en Excel o CSV."""
+    """Genera y descarga el archivo con el historial de órdenes del operador autenticado (VET) en Excel o CSV."""
+    from datetime import UTC, datetime, timedelta, timezone
+    from datetime import date as date_cls
+
     uid = int(current_user.id) if current_user and current_user.id is not None else None
     repo = OrderRepository(db, user_id=uid)
-    orders = repo.list_completed(user_id=uid)
+
+    if any([trade_type, order_status, payment_method, date_from, date_to, search]):
+        vet_tz = timezone(timedelta(hours=-4))
+        start_dt: datetime | None = None
+        end_dt: datetime | None = None
+        if date_from and date_from.strip():
+            d_f = date_cls.fromisoformat(date_from.strip())
+            start_dt = datetime(d_f.year, d_f.month, d_f.day, 0, 0, 0, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+        if date_to and date_to.strip():
+            d_t = date_cls.fromisoformat(date_to.strip())
+            end_dt = datetime(d_t.year, d_t.month, d_t.day, 23, 59, 59, 999999, tzinfo=vet_tz).astimezone(UTC).replace(tzinfo=None)
+        _, orders = repo.list_paginated(
+            skip=0,
+            limit=10_000,
+            trade_type=trade_type,
+            order_status=order_status or "COMPLETED",
+            start_date=start_dt,
+            end_date=end_dt,
+            search=search,
+            user_id=uid,
+            payment_method=payment_method,
+            sort_by="date_desc",
+        )
+    else:
+        orders = repo.list_completed(user_id=uid)
 
     if format == "xlsx":
         file_bytes = BinanceHistorySyncer.generate_orders_excel(orders)

@@ -81,6 +81,7 @@ fi
 
 echo "==> [5/6] Construyendo e iniciando contenedores en segundo plano..."
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --build --remove-orphans
+docker image prune -f >/dev/null 2>&1 || true
 
 echo "==> [6/6] Verificando estado de servicios..."
 sleep 5

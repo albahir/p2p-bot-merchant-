@@ -7,6 +7,7 @@ idempotente en la base de datos y generar reportes exportables en CSV.
 
 import calendar
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
@@ -182,6 +183,16 @@ class BinanceHistorySyncer:
         return aware.astimezone(vet_tz).strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
+    def _safe_spreadsheet_text(raw: Any, max_len: int = 200) -> str:
+        """Neutraliza caracteres de control e inyección de fórmulas (=, +, -, @) al exportar CSV/Excel."""
+        if raw is None:
+            return ""
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw)).strip()
+        if len(text) > 1 and text.startswith(("=", "+", "-", "@")) and not re.match(r"^[-+]\d", text):
+            text = "'" + text
+        return text[:max_len]
+
+    @staticmethod
     def generate_orders_df(orders: list[Order]) -> pd.DataFrame:
         """Construye un DataFrame normalizado en hora VET (UTC-4) y referencia oficial BCV."""
         rows = []
@@ -191,7 +202,7 @@ class BinanceHistorySyncer:
             usd_bcv = round(fiat_amt / bcv, 2) if bcv > 0 else 0.0
             rows.append(
                 {
-                    "Número de Orden": str(o.order_number),
+                    "Número de Orden": BinanceHistorySyncer._safe_spreadsheet_text(o.order_number, max_len=64),
                     "Tipo": o.trade_type,
                     "Estado": o.order_status,
                     "Criptoactivo": o.asset,
@@ -203,7 +214,10 @@ class BinanceHistorySyncer:
                     "Comisión Fiat": o.fee_fiat,
                     "Tasa BCV (VES/USD)": round(bcv, 4) if bcv > 0 else 0.0,
                     "Equivalente USD (BCV)": usd_bcv,
-                    "Contraparte": o.counterparty_name,
+                    "Banco / Método de Pago": BinanceHistorySyncer._safe_spreadsheet_text(
+                        getattr(o, "payment_method", None) or "-"
+                    ),
+                    "Contraparte": BinanceHistorySyncer._safe_spreadsheet_text(o.counterparty_name),
                     "Fecha y Hora (VET)": BinanceHistorySyncer._to_vet_str(cast(datetime | None, o.created_at)),
                     "Fecha y Hora (UTC)": o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "",
                 }

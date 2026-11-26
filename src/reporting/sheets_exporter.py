@@ -3,8 +3,17 @@
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+
+VET_TZ = timezone(timedelta(hours=-4))
+
+
+def _to_vet_str(dt: datetime | None) -> str:
+    if not dt:
+        return "-"
+    aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+    return aware.astimezone(VET_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 from src.data.models import JournalEntry
 from src.reporting.accounting_engine import LedgerSummary
@@ -180,6 +189,7 @@ class SheetsExporter:
             headers_detalle: list[Any] = [
                 "Fecha y Hora (UTC)",
                 "Orden",
+                "Fecha y Hora (VET)",
                 "Tipo",
                 "Cripto (USDT)",
                 "Precio Venta (VES)",
@@ -196,6 +206,7 @@ class SheetsExporter:
                 data_detalle.append([
                     date_str,
                     r.order_number,
+                    _to_vet_str(r.created_at),
                     r.trade_type,
                     round(r.crypto_amount, 4),
                     round(r.sell_price_fiat, 2),
@@ -220,7 +231,7 @@ class SheetsExporter:
             total_profit_usd = sum(r.net_profit_usd for r in results)
             margin_pct = (total_profit_ves / total_revenue * 100.0) if total_revenue > 0 else 0.0
 
-            sync_timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+            sync_timestamp = datetime.now(VET_TZ).strftime("%Y-%m-%d %H:%M:%S VET")
 
             headers_resumen: list[Any] = ["Métrica", "Valor"]
             data_resumen: list[list[Any]] = [
@@ -299,16 +310,17 @@ class SheetsExporter:
             # 2. Detalle P2P
             ws_p2p = self._get_or_create_worksheet(sh, "Detalle P2P", rows=max(100, len(p2p_orders) + 10), cols=15)
             p2p_headers: list[Any] = [
-                "Fecha (UTC)", "Número de Pedido", "Tipo", "Activo", "Cripto",
+                "Fecha (VET)", "Número de Pedido", "Tipo", "Banco / Método de Pago", "Activo", "Cripto",
                 "Precio Unitario", "Moneda Fiat", "Monto Fiat", "Comisión", "Tasa BCV", "Estado",
             ]
             p2p_rows: list[list[Any]] = [p2p_headers]
             for o in p2p_orders:
-                dt_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S") if o.created_at else "-"
+                dt_str = _to_vet_str(getattr(o, "created_at", None))
                 p2p_rows.append([
                     dt_str,
                     str(o.order_number),
                     str(o.trade_type),
+                    str(getattr(o, "payment_method", "-") or "-"),
                     str(o.asset),
                     float(o.crypto_amount),
                     float(o.unit_price),
@@ -324,11 +336,11 @@ class SheetsExporter:
             # 3. Depósitos y Retiros
             ws_movs = self._get_or_create_worksheet(sh, "Depósitos y Retiros", rows=max(100, len(wallet_movements) + 10), cols=12)
             movs_headers: list[Any] = [
-                "Fecha (UTC)", "Tipo Movimiento", "Activo", "Monto", "Comisión Red", "Red", "TXID", "Dirección", "Estado",
+                "Fecha (VET)", "Tipo Movimiento", "Activo", "Monto", "Comisión Red", "Red", "TXID", "Dirección", "Estado",
             ]
             movs_rows: list[list[Any]] = [movs_headers]
             for m in wallet_movements:
-                dt_str = m.timestamp.strftime("%Y-%m-%d %H:%M:%S") if m.timestamp else "-"
+                dt_str = _to_vet_str(getattr(m, "timestamp", None))
                 movs_rows.append([
                     dt_str,
                     str(m.movement_type),
@@ -346,12 +358,12 @@ class SheetsExporter:
             # 4. Conciliación Bancaria
             ws_vouchers = self._get_or_create_worksheet(sh, "Conciliación Bancaria", rows=max(100, len(vouchers) + 10), cols=12)
             voucher_headers: list[Any] = [
-                "Fecha", "Banco", "Referencia", "Monto (VES)", "Cédula/RIF Emisor",
+                "Fecha (VET)", "Banco", "Referencia", "Monto (VES)", "Cédula/RIF Emisor",
                 "Nombre Titular", "Método Pago", "Orden P2P Vinculada", "Estado Verificación",
             ]
             voucher_rows: list[list[Any]] = [voucher_headers]
             for v in vouchers:
-                dt_str = v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "-"
+                dt_str = _to_vet_str(getattr(v, "voucher_date", None) or getattr(v, "created_at", None))
                 voucher_rows.append([
                     dt_str,
                     str(v.bank_name),
@@ -440,14 +452,14 @@ class SheetsExporter:
             # 2. Entradas (Ventas P2P)
             ws_ventas = self._get_or_create_worksheet(sh, "Entradas (Ventas P2P)", rows=max(100, len(sell_orders) + 10), cols=15)
             ventas_headers: list[Any] = [
-                "Fecha y Hora (UTC)", "Número de Orden", "Contraparte Binance", "Activo Cripto",
+                "Fecha y Hora (VET)", "Número de Orden", "Contraparte Binance", "Activo Cripto",
                 "Precio Unitario (VES)", "Monto Acreditado (VES)", "Comisión Binance", "Tasa BCV", "Estado",
                 "Referencia Bancaria", "Nombre Pagador Bancario", "Cédula/RIF Pagador",
             ]
             ventas_rows: list[list[Any]] = [ventas_headers]
             for o in sell_orders:
                 created_dt = getattr(o, "created_at", None)
-                dt_str = created_dt.strftime("%Y-%m-%d %H:%M:%S") if created_dt else "-"
+                dt_str = _to_vet_str(created_dt)
                 v = voucher_map.get(getattr(o, "order_number", ""))
                 ventas_rows.append([
                     dt_str,
@@ -469,14 +481,14 @@ class SheetsExporter:
             # 3. Salidas (Compras P2P)
             ws_compras = self._get_or_create_worksheet(sh, "Salidas (Compras P2P)", rows=max(100, len(buy_orders) + 10), cols=15)
             compras_headers: list[Any] = [
-                "Fecha y Hora (UTC)", "Número de Orden", "Contraparte Binance", "Activo Cripto Recibido",
+                "Fecha y Hora (VET)", "Número de Orden", "Contraparte Binance", "Activo Cripto Recibido",
                 "Precio Unitario (VES)", "Monto Debitado (VES)", "Comisión Binance", "Tasa BCV", "Estado",
                 "Referencia Bancaria", "Beneficiario Bancario", "Cédula/RIF Beneficiario",
             ]
             compras_rows: list[list[Any]] = [compras_headers]
             for o in buy_orders:
                 created_dt = getattr(o, "created_at", None)
-                dt_str = created_dt.strftime("%Y-%m-%d %H:%M:%S") if created_dt else "-"
+                dt_str = _to_vet_str(created_dt)
                 v = voucher_map.get(getattr(o, "order_number", ""))
                 compras_rows.append([
                     dt_str,
@@ -498,13 +510,13 @@ class SheetsExporter:
             # 4. Traza de Conciliación
             ws_traza = self._get_or_create_worksheet(sh, "Traza de Conciliación", rows=max(100, len(vouchers) + 10), cols=12)
             traza_headers: list[Any] = [
-                "Fecha", "Banco", "Referencia Bancaria", "Monto (VES)", "Cédula/RIF",
+                "Fecha (VET)", "Banco", "Referencia Bancaria", "Monto (VES)", "Cédula/RIF",
                 "Nombre Titular", "Método de Pago", "Orden Binance Asociada", "Estado Conciliación",
             ]
             traza_rows: list[list[Any]] = [traza_headers]
             for v in vouchers:
-                v_created = getattr(v, "created_at", None)
-                dt_str = v_created.strftime("%Y-%m-%d %H:%M:%S") if v_created else "-"
+                v_created = getattr(v, "voucher_date", None) or getattr(v, "created_at", None)
+                dt_str = _to_vet_str(v_created)
                 traza_rows.append([
                     dt_str,
                     str(getattr(v, "bank_name", "")),
@@ -533,7 +545,7 @@ class SheetsExporter:
         journal_entries: list[JournalEntry],
         ledger_summaries: list[LedgerSummary],
     ) -> bool:
-        """Exporta el Libro Diario y Libro Mayor formal a Google Sheets."""
+        """Exporta el Libro Diario (VET, Sumas Iguales, sin ruido técnico) y Libro Mayor formal a Google Sheets."""
         if not sheet_id:
             self.last_error = "No se configuró 'GOOGLE_SHEET_ID' para la exportación contable."
             logger.warning(self.last_error)
@@ -546,30 +558,41 @@ class SheetsExporter:
         try:
             sh = client.open_by_key(sheet_id)
 
-            # 1. Pestaña: Libro Diario
+            # 1. Pestaña: Libro Diario (VET UTC-4 sin Hash técnico)
             ws_diario = self._get_or_create_worksheet(
-                sh, "Libro Diario", rows=max(100, len(journal_entries) + 10), cols=12
+                sh, "Libro Diario", rows=max(100, len(journal_entries) + 12), cols=10
             )
             headers_diario: list[Any] = [
-                "Asiento #", "Fecha y Hora", "Código Cuenta", "Nombre de Cuenta",
+                "Asiento #", "Fecha y Hora (VET)", "Código Cuenta", "Nombre de Cuenta",
                 "Debe (VES)", "Haber (VES)", "Referencia", "Descripción / Glosa",
-                "Orden P2P", "Hash SHA-256",
+                "Orden P2P",
             ]
             data_diario: list[list[Any]] = [headers_diario]
+            tot_d = 0.0
+            tot_h = 0.0
             for e in journal_entries:
-                dt_str = e.date_time.strftime("%Y-%m-%d %H:%M:%S") if e.date_time else "-"
+                dt_str = _to_vet_str(getattr(e, "date_time", None))
+                deb = float(e.debit)
+                cred = float(e.credit)
+                tot_d += deb
+                tot_h += cred
                 data_diario.append([
                     int(e.entry_number),
                     dt_str,
                     str(e.account_code),
                     str(e.account_name),
-                    float(e.debit),
-                    float(e.credit),
+                    deb,
+                    cred,
                     str(e.reference),
                     str(e.description),
                     str(e.order_number or "-"),
-                    str(e.entry_hash),
                 ])
+            data_diario.append([
+                "", "", "", "SUMAS IGUALES",
+                round(tot_d, 2), round(tot_h, 2), "",
+                "Partida Doble Cuadrada" if abs(tot_d - tot_h) < 0.02 else "Revisar descuadre",
+                "",
+            ])
             ws_diario.clear()
             ws_diario.append_rows(data_diario)
 
