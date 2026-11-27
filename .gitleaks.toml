@@ -17,4 +17,6 @@ regexes = [
     '''(?i)binance_api_key''',
     '''(?i)binance_private_key''',
     '''AIzaSy[a-zA-Z0-9_-]{33}''',
+    '''p2p_calc_direction''',
+    '''p2p_perspective_mode''',
 ]
