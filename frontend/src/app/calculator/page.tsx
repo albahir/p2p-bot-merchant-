@@ -5,31 +5,36 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { BankAmountInput } from "@/components/bank-amount-input";
+import { BankLogo } from "@/components/bank-logo";
 import { BinanceTierBadge } from "@/components/binance-tier-badge";
+import { PerspectiveToggle } from "@/components/perspective-toggle";
+import { PerspectiveMode, usePerspective } from "@/lib/perspective-context";
 import {
   ArbitrageMatrix,
   BCVRates,
   RateQuote,
+  VENEZUELAN_BANK_CATALOG,
   getArbitrageMatrix,
   getBCVRates,
   getCachedApiResponse,
 } from "@/lib/api";
 import {
   BankTransferType,
+  CycleDirection,
   DEFAULT_VES_BASE_MAKER_FEE_PCT,
-  LEGACY_BASE_MAKER_FEE_PCT,
   MERCHANT_TIERS,
   MerchantTier,
   OrderRole,
   calculateP2PCycle,
   compareMerchantTiers,
+  computeTargetRateForMargin,
   formatFeePct,
   getMerchantTierConfig,
 } from "@/lib/p2p-calculator";
 
 const STORAGE_TIER_KEY = "p2p_calc_merchant_tier";
-const STORAGE_BASE_FEE_KEY = "p2p_calc_base_maker_pct";
 const STORAGE_CUSTOM_FEE_KEY = "p2p_calc_custom_maker_pct";
+const STORAGE_DIRECTION_KEY = "p2p_calc_direction";
 
 function getTierBadgeClasses(tier: MerchantTier, active: boolean): string {
   if (!active) {
@@ -49,9 +54,25 @@ function getTierBadgeClasses(tier: MerchantTier, active: boolean): string {
   }
 }
 
+function fmtBs(val: number): string {
+  return val.toLocaleString("es-VE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function CalculatorContent() {
   const searchParams = useSearchParams();
+  const { perspective, setPerspective } = usePerspective();
 
+  const urlRoleParam = searchParams.get("role");
+  const initialRole: OrderRole =
+    urlRoleParam === "TAKER" || urlRoleParam === "MAKER"
+      ? urlRoleParam
+      : perspective;
+
+  const [cycleDirection, setCycleDirection] =
+    useState<CycleDirection>("USDT_VES_USDT");
   const [capitalUsdt, setCapitalUsdt] = useState<number>(
     Number(searchParams.get("amount")) || 250
   );
@@ -59,7 +80,7 @@ function CalculatorContent() {
     searchParams.get("buyBank") || "Banesco"
   );
   const [sellBank, setSellBank] = useState<string>(
-    searchParams.get("sellBank") || "Pago Móvil"
+    searchParams.get("sellBank") || "Banco de Venezuela"
   );
   const [buyRate, setBuyRate] = useState<number>(
     Number(searchParams.get("buyRate")) || 0
@@ -69,14 +90,12 @@ function CalculatorContent() {
   );
 
   const [merchantTier, setMerchantTier] = useState<MerchantTier>("STANDARD");
-  const [baseMakerFeePct, setBaseMakerFeePct] = useState<number>(
-    DEFAULT_VES_BASE_MAKER_FEE_PCT
-  );
   const [customMakerFeePct, setCustomMakerFeePct] = useState<number>(
     DEFAULT_VES_BASE_MAKER_FEE_PCT
   );
-  const [buyRole, setBuyRole] = useState<OrderRole>("MAKER");
-  const [sellRole, setSellRole] = useState<OrderRole>("MAKER");
+  const [buyRole, setBuyRole] = useState<OrderRole>(initialRole);
+  const [sellRole, setSellRole] = useState<OrderRole>(initialRole);
+
   const [bankTransferType, setBankTransferType] = useState<BankTransferType>(
     searchParams.get("buyBank") &&
       searchParams.get("sellBank") &&
@@ -84,36 +103,41 @@ function CalculatorContent() {
       ? "SAME_BANK"
       : "INTERBANK_PM"
   );
-  const [cyclesPerDay, setCyclesPerDay] = useState<number>(3);
+  const [customBankFeePct, setCustomBankFeePct] = useState<number>(0.3);
+  const [splitOrdersCount, setSplitOrdersCount] = useState<number>(1);
+  const [minBankFeePerOrderVes, setMinBankFeePerOrderVes] = useState<number>(0);
 
-  // Restaurar nivel VIP de comerciante guardado en el navegador
+  const [cyclesPerDay, setCyclesPerDay] = useState<number>(3);
+  const [operatingDaysPerMonth, setOperatingDaysPerMonth] = useState<number>(26);
+  const [desiredMarginPct, setDesiredMarginPct] = useState<number>(1.0);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const savedTier = localStorage.getItem(STORAGE_TIER_KEY) as MerchantTier | null;
     if (savedTier && MERCHANT_TIERS.some((t) => t.id === savedTier)) {
       setMerchantTier(savedTier);
     }
-    const savedBase = Number(localStorage.getItem(STORAGE_BASE_FEE_KEY));
-    if (Number.isFinite(savedBase) && savedBase > 0 && savedBase <= 5) {
-      setBaseMakerFeePct(savedBase);
-    }
     const savedCustom = Number(localStorage.getItem(STORAGE_CUSTOM_FEE_KEY));
     if (Number.isFinite(savedCustom) && savedCustom >= 0 && savedCustom <= 5) {
       setCustomMakerFeePct(savedCustom);
     }
+    const savedDir = localStorage.getItem(STORAGE_DIRECTION_KEY) as CycleDirection | null;
+    if (savedDir === "USDT_VES_USDT" || savedDir === "VES_USDT_VES") {
+      setCycleDirection(savedDir);
+    }
   }, []);
+
+  function handleSelectDirection(dir: CycleDirection) {
+    setCycleDirection(dir);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(STORAGE_DIRECTION_KEY, dir);
+    }
+  }
 
   function handleSelectTier(nextTier: MerchantTier) {
     setMerchantTier(nextTier);
     if (typeof window !== "undefined") {
       localStorage.setItem(STORAGE_TIER_KEY, nextTier);
-    }
-  }
-
-  function handleSelectBaseFee(nextBase: number) {
-    setBaseMakerFeePct(nextBase);
-    if (typeof window !== "undefined") {
-      localStorage.setItem(STORAGE_BASE_FEE_KEY, String(nextBase));
     }
   }
 
@@ -128,7 +152,9 @@ function CalculatorContent() {
 
   const initialMatrix =
     typeof window !== "undefined"
-      ? getCachedApiResponse<ArbitrageMatrix>("/api/spreads/matrix?amount_usdt=100&merchant_only=false")
+      ? getCachedApiResponse<ArbitrageMatrix>(
+          "/api/spreads/matrix?amount_usdt=100&merchant_only=false"
+        )
       : null;
   const initialBcv =
     typeof window !== "undefined"
@@ -146,6 +172,12 @@ function CalculatorContent() {
     ]).then(([matrixData, bcvData]) => {
       if (!mounted) return;
       if (bcvData) setBcv(bcvData);
+
+      const fallbackRef =
+        bcvData?.p2p_usdt_ref && bcvData.p2p_usdt_ref > 0
+          ? bcvData.p2p_usdt_ref
+          : 0;
+
       if (matrixData?.quotes?.length) {
         const seen = new Set<string>();
         const deduped = matrixData.quotes.filter((q) => {
@@ -154,16 +186,26 @@ function CalculatorContent() {
           return true;
         });
         setQuotes(deduped);
-        // Autocompletar tasas iniciales si no vinieron por query params
-        setBuyRate((prev) => (prev > 0 ? prev : deduped[0].buy_rate));
-        setSellRate((prev) =>
-          prev > 0
-            ? prev
-            : deduped[Math.min(1, deduped.length - 1)].sell_rate
-        );
-      } else {
-        setBuyRate((prev) => (prev > 0 ? prev : 45.2));
-        setSellRate((prev) => (prev > 0 ? prev : 46.15));
+
+        const savedMode =
+          urlRoleParam === "TAKER" || urlRoleParam === "MAKER"
+            ? urlRoleParam
+            : typeof window !== "undefined" &&
+              localStorage.getItem("p2p_perspective_mode") === "TAKER"
+            ? "TAKER"
+            : "MAKER";
+        const q0 = deduped[0];
+        const q1 = deduped[Math.min(1, deduped.length - 1)];
+        const defaultBuy =
+          savedMode === "MAKER" ? q0.buy_rate : q0.sell_rate || fallbackRef;
+        const defaultSell =
+          savedMode === "MAKER" ? q1.sell_rate : q1.buy_rate || fallbackRef;
+
+        setBuyRate((prev) => (prev > 0 ? prev : defaultBuy));
+        setSellRate((prev) => (prev > 0 ? prev : defaultSell));
+      } else if (fallbackRef > 0) {
+        setBuyRate((prev) => (prev > 0 ? prev : fallbackRef));
+        setSellRate((prev) => (prev > 0 ? prev : Number((fallbackRef * 1.008).toFixed(2))));
       }
     });
     return () => {
@@ -171,103 +213,211 @@ function CalculatorContent() {
     };
   }, []);
 
-  // Sincronizar automáticamente comisión bancaria al cambiar bancos
+  useEffect(() => {
+    if (urlRoleParam === "TAKER" || urlRoleParam === "MAKER") {
+      setPerspective(urlRoleParam);
+      return;
+    }
+    setBuyRole(perspective);
+    setSellRole(perspective);
+  }, [perspective, urlRoleParam, setPerspective]);
+
+  function handleSwitchGlobalPerspective(nextMode: PerspectiveMode) {
+    setBuyRole(nextMode);
+    setSellRole(nextMode);
+    const foundBuy = quotes.find((q) => q.bank_name === buyBank);
+    if (foundBuy) {
+      const nextBuyR = nextMode === "MAKER" ? foundBuy.buy_rate : foundBuy.sell_rate;
+      if (nextBuyR > 0) setBuyRate(nextBuyR);
+    }
+    const foundSell = quotes.find((q) => q.bank_name === sellBank);
+    if (foundSell) {
+      const nextSellR = nextMode === "MAKER" ? foundSell.sell_rate : foundSell.buy_rate;
+      if (nextSellR > 0) setSellRate(nextSellR);
+    }
+  }
+
+  function handleChangeBuyLegRole(nextRole: OrderRole) {
+    setBuyRole(nextRole);
+    const found = quotes.find((q) => q.bank_name === buyBank);
+    if (found) {
+      const rate = nextRole === "MAKER" ? found.buy_rate : found.sell_rate;
+      if (rate > 0) setBuyRate(rate);
+    }
+  }
+
+  function handleChangeSellLegRole(nextRole: OrderRole) {
+    setSellRole(nextRole);
+    const found = quotes.find((q) => q.bank_name === sellBank);
+    if (found) {
+      const rate = nextRole === "MAKER" ? found.sell_rate : found.buy_rate;
+      if (rate > 0) setSellRate(rate);
+    }
+  }
+
   function handleSelectBuyBank(name: string) {
     setBuyBank(name);
     const found = quotes.find((q) => q.bank_name === name);
-    if (found) setBuyRate(found.buy_rate);
+    if (found) {
+      const rate = buyRole === "MAKER" ? found.buy_rate : found.sell_rate;
+      if (rate > 0) setBuyRate(rate);
+    }
     setBankTransferType(name === sellBank ? "SAME_BANK" : "INTERBANK_PM");
   }
 
   function handleSelectSellBank(name: string) {
     setSellBank(name);
     const found = quotes.find((q) => q.bank_name === name);
-    if (found) setSellRate(found.sell_rate);
+    if (found) {
+      const rate = sellRole === "MAKER" ? found.sell_rate : found.buy_rate;
+      if (rate > 0) setSellRate(rate);
+    }
     setBankTransferType(buyBank === name ? "SAME_BANK" : "INTERBANK_PM");
   }
 
-  // Motor matemático exacto de ciclo P2P en Binance con niveles VIP de comerciante
-  const simulation = useMemo(
-    () =>
-      calculateP2PCycle({
-        capitalUsdt,
-        buyRate,
-        sellRate,
-        buyRole,
-        sellRole,
-        bankTransferType,
-        merchantTier,
-        baseMakerFeePct,
-        customMakerFeePct,
-        cyclesPerDay,
-        bcvUsd: bcv?.usd || 0,
-      }),
+  const bankSelectList = useMemo(() => {
+    if (quotes.length > 0) {
+      const names = quotes.map((q) => q.bank_name);
+      for (const fallback of [buyBank, sellBank]) {
+        if (fallback && !names.includes(fallback)) names.push(fallback);
+      }
+      return names;
+    }
+    return [...VENEZUELAN_BANK_CATALOG];
+  }, [quotes, buyBank, sellBank]);
+
+  const refP2pRate = bcv?.p2p_usdt_ref && bcv.p2p_usdt_ref > 0 ? bcv.p2p_usdt_ref : 0;
+
+  const simulationInput = useMemo(
+    () => ({
+      capitalUsdt,
+      buyRate,
+      sellRate,
+      buyRole,
+      sellRole,
+      cycleDirection,
+      bankTransferType,
+      customBankFeePct,
+      splitOrdersCount,
+      minBankFeePerOrderVes,
+      merchantTier,
+      baseMakerFeePct: DEFAULT_VES_BASE_MAKER_FEE_PCT,
+      customMakerFeePct,
+      cyclesPerDay,
+      operatingDaysPerMonth,
+      refP2pRate,
+    }),
     [
       capitalUsdt,
       buyRate,
       sellRate,
       buyRole,
       sellRole,
+      cycleDirection,
       bankTransferType,
+      customBankFeePct,
+      splitOrdersCount,
+      minBankFeePerOrderVes,
       merchantTier,
-      baseMakerFeePct,
       customMakerFeePct,
       cyclesPerDay,
-      bcv,
+      operatingDaysPerMonth,
+      refP2pRate,
     ]
   );
 
+  const simulation = useMemo(
+    () => calculateP2PCycle(simulationInput),
+    [simulationInput]
+  );
+
   const tierComparison = useMemo(
-    () =>
-      compareMerchantTiers({
-        capitalUsdt,
-        buyRate,
-        sellRate,
-        buyRole,
-        sellRole,
-        bankTransferType,
-        baseMakerFeePct,
-        customMakerFeePct,
-        cyclesPerDay,
-        bcvUsd: bcv?.usd || 0,
-      }),
-    [
-      capitalUsdt,
-      buyRate,
-      sellRate,
-      buyRole,
-      sellRole,
-      bankTransferType,
-      baseMakerFeePct,
-      customMakerFeePct,
-      cyclesPerDay,
-      bcv,
-    ]
+    () => compareMerchantTiers(simulationInput),
+    [simulationInput]
+  );
+
+  const targetRateSolveFor = cycleDirection === "USDT_VES_USDT" ? "BUY" : "SELL";
+  const targetRateValue = useMemo(
+    () => computeTargetRateForMargin(simulationInput, desiredMarginPct, targetRateSolveFor),
+    [simulationInput, desiredMarginPct, targetRateSolveFor]
   );
 
   const activeTierConfig = getMerchantTierConfig(merchantTier);
   const formattedMakerFee = formatFeePct(simulation.effectiveMakerFeePct);
-  const isProfitable = simulation.netProfitVes > 0;
+  const isUsdCycle = cycleDirection === "USDT_VES_USDT";
+  const isDifferentBankMultiCycle = buyBank !== sellBank && cyclesPerDay > 1;
+
+  const statusBadge =
+    simulation.profitStatus === "INCOMPLETE"
+      ? { label: "INGRESA TASAS", cls: "bg-slate-800 text-slate-300 border-slate-700" }
+      : simulation.profitStatus === "LOSS"
+      ? { label: "EN PÉRDIDA", cls: "bg-error/15 text-error border-error/40" }
+      : simulation.profitStatus === "MARGINAL"
+      ? { label: "MUY JUSTO (<0,30%)", cls: "bg-amber-500/15 text-amber-300 border-amber-500/40" }
+      : { label: "RENTABLE", cls: "bg-tertiary/15 text-tertiary border-tertiary/40" };
 
   return (
     <AppShell
       title="Calculadora de ciclos"
-      subtitle="Simula compra, venta y comisiones."
+      badge={
+        buyRole === sellRole
+          ? buyRole === "MAKER"
+            ? "MODO MAKER"
+            : "MODO TAKER"
+          : "MODO HÍBRIDO"
+      }
+      subtitle={
+        isUsdCycle
+          ? "Ciclo USDT → Bs → USDT: vendes USDT, recibes Bs (0% banco) y recompras protegiendo tu capital en cripto."
+          : "Ciclo Bs → USDT → Bs: inviertes bolívares (pagando comisión al enviar) y liquidas de vuelta a Bs."
+      }
       actions={
-        <Link
-          href="/"
-          className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-slate-200 flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-[16px] text-primary">
-            grid_view
-          </span>
-          <span>Volver a matriz</span>
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <PerspectiveToggle onSelectMode={handleSwitchGlobalPerspective} />
+          <Link
+            href="/"
+            className="px-3 py-1.5 rounded-lg bg-surface-container border border-[#1e2430] hover:border-primary-container/50 text-xs font-mono text-slate-200 flex items-center gap-1.5"
+          >
+            <span className="material-symbols-outlined text-[16px] text-primary">
+              grid_view
+            </span>
+            <span>Volver a matriz</span>
+          </Link>
+        </div>
       }
     >
       <div className="space-y-5">
-        {/* Alerta de Cobertura de Riesgo Cambiario cuando el Spread se vuelve negativo o insuficiente */}
-        {!isProfitable && buyRate > 0 && sellRate > 0 && (
+        {/* Aviso si falta tasa real (nunca sustituye por 0,01) */}
+        {!simulation.hasValidRates && (
+          <div
+            role="status"
+            className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/35 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-200"
+          >
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[18px] text-amber-400">
+                info
+              </span>
+              <span>
+                Introduce una <strong>Tasa Compra</strong> y una <strong>Tasa Venta</strong> válidas (mayores a Bs. 0,00) para calcular tu punto de equilibrio y ganancia real.
+              </span>
+            </div>
+            {refP2pRate > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (buyRate <= 0) setBuyRate(refP2pRate);
+                  if (sellRate <= 0) setSellRate(Number((refP2pRate * 1.008).toFixed(2)));
+                }}
+                className="px-3 py-1 rounded-lg bg-primary-container text-on-primary font-mono text-[11px] font-bold cursor-pointer"
+              >
+                Usar ref. P2P (Bs. {refP2pRate.toFixed(2)})
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Alerta de Riesgo Cambiario cuando hay tasas reales y el resultado es pérdida */}
+        {simulation.hasValidRates && simulation.profitStatus === "LOSS" && (
           <div
             role="alert"
             aria-live="polite"
@@ -279,59 +429,84 @@ function CalculatorContent() {
               </span>
               <div>
                 <div className="font-bold text-white">
-                  Alerta de Riesgo Cambiario — Ciclo en Pérdida ({simulation.netRoiPct.toFixed(2)}% Retorno)
+                  Alerta — Ciclo en Pérdida ({simulation.netRoiPct.toFixed(2)}% ROI)
                 </div>
                 <div className="text-slate-300 mt-0.5">
-                  La tasa de venta actual (<span className="font-mono text-error font-semibold">Bs. {sellRate.toFixed(2)}</span>) está por debajo del punto de equilibrio (<span className="font-mono text-primary font-semibold">Bs. {simulation.breakEvenSellRate.toFixed(2)}</span>), generando una pérdida neta de <span className="font-mono text-error font-semibold">Bs. {Math.abs(simulation.netProfitVes).toFixed(2)}</span>.
+                  {isUsdCycle ? (
+                    <>
+                      Tu recompra (<span className="font-mono text-error font-semibold">Bs. {buyRate.toFixed(2)}</span>) supera tu límite máximo de equilibrio (<span className="font-mono text-primary font-semibold">Bs. {simulation.breakEvenRate.toFixed(2)}</span>), perdiendo <span className="font-mono text-error font-semibold">{Math.abs(simulation.netProfitUsdt).toFixed(2)} USDT</span>.
+                    </>
+                  ) : (
+                    <>
+                      Tu venta (<span className="font-mono text-error font-semibold">Bs. {sellRate.toFixed(2)}</span>) está debajo del equilibrio (<span className="font-mono text-primary font-semibold">Bs. {simulation.breakEvenRate.toFixed(2)}</span>), perdiendo <span className="font-mono text-error font-semibold">Bs. {fmtBs(Math.abs(simulation.netProfitVes))}</span>.
+                    </>
+                  )}
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setSellRate(Number((simulation.breakEvenSellRate * 1.008).toFixed(2)))}
-              className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary font-mono text-[11px] font-bold hover:brightness-110 transition-all shrink-0 cursor-pointer"
-            >
-              Ajustar a Tasa Objetivo (+0,8%)
-            </button>
+            {targetRateValue > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  isUsdCycle ? setBuyRate(targetRateValue) : setSellRate(targetRateValue)
+                }
+                className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary font-mono text-[11px] font-bold hover:brightness-110 transition-all shrink-0 cursor-pointer"
+              >
+                Ajustar a +{desiredMarginPct.toFixed(1)}% (Bs. {targetRateValue.toFixed(2)})
+              </button>
+            )}
           </div>
         )}
 
-        {/* 4 KPIs Principales Corregidos (2 por fila en móvil) */}
+        {/* 4 KPIs Principales (sin distorsión BCV ni errores por 0,00) */}
         <section className="grid grid-cols-2 xl:grid-cols-4 gap-2.5 sm:gap-3">
           {/* KPI 1 */}
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span className="truncate sm:hidden">Capital req.</span>
-              <span className="truncate hidden sm:inline">Capital Total Requerido</span>
+              <span className="truncate">
+                {isUsdCycle ? "Bolívares Generados" : "Capital Requerido"}
+              </span>
               <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-secondary shrink-0">
                 account_balance_wallet
               </span>
             </div>
             <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-white tabular-nums truncate">
-              Bs. {simulation.totalVesInvested.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {simulation.hasValidRates
+                ? `Bs. ${fmtBs(simulation.totalVesInvested)}`
+                : "—"}
             </div>
-            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums leading-tight break-words">
-              Base: {capitalUsdt} USDT • Com: Bs. {simulation.bankFeeVes.toFixed(2)}
+            <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums leading-tight truncate">
+              {simulation.hasValidRates
+                ? `Base: ${capitalUsdt} USDT • Com. envío: Bs. ${fmtBs(simulation.bankFeeVes)}`
+                : `Lote base: ${capitalUsdt} USDT`}
             </div>
           </div>
 
           {/* KPI 2 */}
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
-              <span className="truncate">Tasa Equilibrio</span>
+              <span className="truncate">
+                {isUsdCycle ? "Máx. Recompra (0%)" : "Tasa Equilibrio (0%)"}
+              </span>
               <span className="material-symbols-outlined text-[15px] sm:text-[16px] text-primary shrink-0">
                 balance
               </span>
             </div>
             <div className="mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold text-primary tabular-nums truncate">
-              Bs. {simulation.breakEvenSellRate.toFixed(2)}
+              {simulation.hasValidRates && simulation.breakEvenRate > 0
+                ? `Bs. ${simulation.breakEvenRate.toFixed(2)}`
+                : "—"}
             </div>
             <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
-              Venta: Bs. {sellRate.toFixed(2)} / USDT
+              {simulation.hasValidRates
+                ? isUsdCycle
+                  ? `Recompra actual: Bs. ${buyRate.toFixed(2)}`
+                  : `Venta actual: Bs. ${sellRate.toFixed(2)}`
+                : "Sin tasa activa"}
             </div>
           </div>
 
-          {/* KPI 3 Corregido: GANANCIA NETA POR CICLO */}
+          {/* KPI 3: Ganancia Neta por Ciclo */}
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container border border-primary-container/30 min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-primary">
               <span className="truncate">Ganancia por Ciclo</span>
@@ -341,22 +516,27 @@ function CalculatorContent() {
             </div>
             <div
               className={`mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold tabular-nums truncate ${
-                isProfitable ? "text-tertiary" : "text-error"
+                !simulation.hasValidRates
+                  ? "text-slate-400"
+                  : simulation.netProfitUsdt > 0
+                  ? "text-tertiary"
+                  : "text-error"
               }`}
             >
-              {simulation.netProfitUsdt >= 0 ? "+" : ""}
-              {simulation.netProfitUsdt.toFixed(2)} USDT
+              {simulation.hasValidRates
+                ? `${simulation.netProfitUsdt >= 0 ? "+" : ""}${simulation.netProfitUsdt.toFixed(2)} USDT`
+                : "—"}
             </div>
             <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-300 tabular-nums truncate">
-              {simulation.netProfitVes >= 0 ? "+" : ""}Bs.{" "}
-              {simulation.netProfitVes.toLocaleString("es-VE", {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}
+              {simulation.hasValidRates
+                ? `${simulation.netProfitVes >= 0 ? "+" : ""}Bs. ${fmtBs(simulation.netProfitVes)}`
+                : isUsdCycle
+                ? "Cierra en USDT reales"
+                : "Cierra en Bs"}
             </div>
           </div>
 
-          {/* KPI 4 */}
+          {/* KPI 4: Retorno Neto Real (sin distorsión BCV) */}
           <div className="p-3 sm:p-4 rounded-xl bg-surface-container-low border border-[#1e2430] min-w-0">
             <div className="flex items-center justify-between gap-1.5 min-w-0 text-[10px] font-mono uppercase tracking-wider text-slate-400">
               <span className="truncate">Retorno Neto Real</span>
@@ -366,16 +546,23 @@ function CalculatorContent() {
             </div>
             <div
               className={`mt-1.5 sm:mt-2 text-base sm:text-xl font-mono font-bold tabular-nums truncate ${
-                isProfitable ? "text-tertiary" : "text-error"
+                !simulation.hasValidRates
+                  ? "text-slate-400"
+                  : simulation.profitStatus === "PROFITABLE"
+                  ? "text-tertiary"
+                  : simulation.profitStatus === "MARGINAL"
+                  ? "text-amber-300"
+                  : "text-error"
               }`}
             >
-              {simulation.netRoiPct >= 0 ? "+" : ""}
-              {simulation.netRoiPct.toFixed(2)}%
+              {simulation.hasValidRates
+                ? `${simulation.netRoiPct >= 0 ? "+" : ""}${simulation.netRoiPct.toFixed(2)}%`
+                : "—"}
             </div>
             <div className="mt-0.5 sm:mt-1 text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
-              {simulation.netProfitBcvUsd !== 0
-                ? `≈ $${simulation.netProfitBcvUsd.toFixed(2)} BCV`
-                : `${cyclesPerDay} ciclos / día`}
+              {simulation.hasValidRates
+                ? `Spread neto real • ${cyclesPerDay} ${cyclesPerDay === 1 ? "ciclo" : "ciclos"}/día`
+                : "Completa las tasas"}
             </div>
           </div>
         </section>
@@ -383,14 +570,46 @@ function CalculatorContent() {
         {/* Grilla Principal */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Panel Izquierdo: Parámetros de Ejecución */}
-          <section className="lg:col-span-5 p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
-            <div className="flex items-center justify-between border-b border-[#1e2430] pb-3">
+          <section className="lg:col-span-5 p-4 sm:p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
+            <div className="flex items-center justify-between gap-2 border-b border-[#1e2430] pb-3 flex-wrap">
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
                 <span className="material-symbols-outlined text-[18px] text-primary">
                   tune
                 </span>
                 Parámetros
               </h2>
+
+              {/* Dirección del ciclo: USDT -> Bs -> USDT vs Bs -> USDT -> Bs */}
+              <div
+                role="group"
+                aria-label="Dirección del ciclo comercial"
+                className="p-0.5 rounded-lg bg-surface-container border border-[#1e2430] flex items-center text-[10px] font-mono"
+              >
+                <button
+                  type="button"
+                  aria-pressed={isUsdCycle}
+                  onClick={() => handleSelectDirection("USDT_VES_USDT")}
+                  className={`px-2 py-1 rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                    isUsdCycle
+                      ? "bg-tertiary text-on-tertiary font-bold"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  USDT → Bs → USDT
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={!isUsdCycle}
+                  onClick={() => handleSelectDirection("VES_USDT_VES")}
+                  className={`px-2 py-1 rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                    !isUsdCycle
+                      ? "bg-primary-container text-on-primary font-bold"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Bs → USDT → Bs
+                </button>
+              </div>
             </div>
 
             {/* Volumen del Ciclo */}
@@ -399,14 +618,14 @@ function CalculatorContent() {
                 htmlFor="calc-capital-usdt"
                 className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5"
               >
-                Monto (USDT)
+                {isUsdCycle ? "Capital Inicial (USDT)" : "Lote a Operar (USDT)"}
               </label>
               <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                 <BankAmountInput
                   id="calc-capital-usdt"
                   value={capitalUsdt}
                   onChange={setCapitalUsdt}
-                  ariaLabel="Volumen Operativo por Ciclo (USDT)"
+                  ariaLabel="Monto Operativo por Ciclo (USDT)"
                   className="w-full sm:flex-1 min-w-0 px-3.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] focus:border-primary-container focus:outline-hidden text-sm font-mono font-bold text-white tabular-nums"
                 />
                 <div className="grid grid-cols-4 sm:flex items-center gap-1.5 shrink-0">
@@ -415,7 +634,7 @@ function CalculatorContent() {
                       key={preset}
                       type="button"
                       onClick={() => setCapitalUsdt(preset)}
-                      className={`px-2 py-2 rounded-lg text-xs font-mono border text-center transition-colors ${
+                      className={`px-2 py-2 rounded-lg text-xs font-mono border text-center transition-colors cursor-pointer ${
                         capitalUsdt === preset
                           ? "bg-primary-container text-on-primary font-bold border-primary-container"
                           : "bg-surface-container border-[#1e2430] text-slate-300 hover:text-white"
@@ -428,14 +647,14 @@ function CalculatorContent() {
               </div>
             </div>
 
-            {/* Nivel de Comerciante Binance P2P (Descuentos VIP sobre Comisión Maker) */}
+            {/* Nivel de Comerciante Binance P2P (Con nombres claros debajo de cada escudo; base oficial VES 0,25%) */}
             <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-2.5">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <label className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-semibold flex items-center gap-1.5">
                   <span className="material-symbols-outlined text-[15px] text-primary">
                     workspace_premium
                   </span>
-                  Nivel Comerciante Binance
+                  Nivel Comerciante Binance (VES)
                 </label>
                 <span className="text-[10px] font-mono text-primary font-semibold">
                   Maker: {formattedMakerFee} • Taker: 0%
@@ -458,8 +677,11 @@ function CalculatorContent() {
                         active
                       )}`}
                     >
-                      <BinanceTierBadge tier={tier.id} size={24} />
-                      <span className="text-[9px] font-mono leading-none opacity-90">
+                      <BinanceTierBadge tier={tier.id} size={22} />
+                      <span className="text-[9px] font-sans font-semibold leading-none truncate max-w-full">
+                        {tier.shortLabel}
+                      </span>
+                      <span className="text-[9px] font-mono leading-none opacity-85">
                         {tier.id === "CUSTOM"
                           ? "%"
                           : tier.discountPct > 0
@@ -494,139 +716,45 @@ function CalculatorContent() {
                   </div>
                 </div>
               ) : (
-                <div className="flex items-center justify-between gap-2 flex-wrap pt-0.5 text-[10px] font-mono text-slate-400">
+                <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-slate-400 pt-0.5">
                   <span>{activeTierConfig.requirementHint}</span>
-                  <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Base:</span>
-                    {[DEFAULT_VES_BASE_MAKER_FEE_PCT, LEGACY_BASE_MAKER_FEE_PCT].map(
-                      (baseOpt) => (
-                        <button
-                          key={baseOpt}
-                          type="button"
-                          onClick={() => handleSelectBaseFee(baseOpt)}
-                          className={`px-1.5 py-0.5 rounded border transition-colors cursor-pointer ${
-                            baseMakerFeePct === baseOpt
-                              ? "bg-surface-container-high border-primary-container/60 text-white font-semibold"
-                              : "border-[#1e2430] text-slate-400 hover:text-white"
-                          }`}
-                        >
-                          {formatFeePct(baseOpt)}
-                        </button>
-                      )
-                    )}
-                  </div>
+                  <span>Comisión estándar: 0,25%</span>
                 </div>
               )}
             </div>
 
-            {/* Pierna 1: Compra de USDT */}
-            <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-3">
-              <div className="flex items-center justify-between gap-2">
+            {/* Pierna de VENTA USDT (Recibir Bs = 0% comisión bancaria) */}
+            <div
+              className={`p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-3 ${
+                isUsdCycle ? "" : "order-last"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-xs font-bold text-white">
-                  1. Ruta de Entrada (Compra USDT)
+                  {isUsdCycle ? "1. Venta USDT (Recibes Bs)" : "2. Salida / Venta USDT (Recibes Bs)"}
                 </span>
                 <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono shrink-0">
                   <button
                     type="button"
-                    onClick={() => setBuyRole("MAKER")}
-                    className={`px-2 py-0.5 rounded cursor-pointer ${
-                      buyRole === "MAKER"
-                        ? "bg-primary-container text-on-primary font-bold"
-                        : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    Anuncio {formattedMakerFee}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBuyRole("TAKER")}
-                    className={`px-2 py-0.5 rounded cursor-pointer ${
-                      buyRole === "TAKER"
-                        ? "bg-tertiary text-on-tertiary font-bold"
-                        : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    Directo 0%
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <div>
-                  <label
-                    htmlFor="calc-buy-bank"
-                    className="block text-[10px] font-mono text-slate-400 mb-1"
-                  >
-                    Banco Origen
-                  </label>
-                  <select
-                    id="calc-buy-bank"
-                    value={buyBank}
-                    onChange={(e) => handleSelectBuyBank(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white focus:border-primary-container focus:outline-hidden"
-                  >
-                    {quotes.length > 0 ? (
-                      quotes.map((q) => (
-                        <option key={`buy-${q.bank_name}`} value={q.bank_name}>
-                          {q.bank_name}
-                        </option>
-                      ))
-                    ) : (
-                      <>
-                        <option value="Banesco">Banesco</option>
-                        <option value="Mercantil">Mercantil</option>
-                        <option value="Banco de Venezuela">Banco de Venezuela</option>
-                        <option value="Pago Móvil">Pago Móvil</option>
-                      </>
-                    )}
-                  </select>
-                </div>
-                <div>
-                  <label
-                    htmlFor="calc-buy-rate"
-                    className="block text-[10px] font-mono text-slate-400 mb-1"
-                  >
-                    Tasa Compra (Bs/USDT)
-                  </label>
-                  <BankAmountInput
-                    id="calc-buy-rate"
-                    value={buyRate}
-                    onChange={setBuyRate}
-                    ariaLabel="Tasa Compra (Bs/USDT)"
-                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono font-bold text-white tabular-nums focus:border-primary-container focus:outline-hidden"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Pierna 2: Venta de USDT */}
-            <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-bold text-white">
-                  2. Ruta de Salida (Venta USDT)
-                </span>
-                <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setSellRole("MAKER")}
+                    onClick={() => handleChangeSellLegRole("MAKER")}
                     className={`px-2 py-0.5 rounded cursor-pointer ${
                       sellRole === "MAKER"
                         ? "bg-primary-container text-on-primary font-bold"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Anuncio {formattedMakerFee}
+                    Publicar ({formattedMakerFee})
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSellRole("TAKER")}
+                    onClick={() => handleChangeSellLegRole("TAKER")}
                     className={`px-2 py-0.5 rounded cursor-pointer ${
                       sellRole === "TAKER"
                         ? "bg-tertiary text-on-tertiary font-bold"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Directo 0%
+                    Tomar (0%)
                   </button>
                 </div>
               </div>
@@ -637,29 +765,23 @@ function CalculatorContent() {
                     htmlFor="calc-sell-bank"
                     className="block text-[10px] font-mono text-slate-400 mb-1"
                   >
-                    Banco Destino
+                    Banco donde recibes Bs
                   </label>
-                  <select
-                    id="calc-sell-bank"
-                    value={sellBank}
-                    onChange={(e) => handleSelectSellBank(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white focus:border-primary-container focus:outline-hidden"
-                  >
-                    {quotes.length > 0 ? (
-                      quotes.map((q) => (
-                        <option key={`sell-${q.bank_name}`} value={q.bank_name}>
-                          {q.bank_name}
+                  <div className="flex items-center gap-2">
+                    <BankLogo bankName={sellBank} size={28} />
+                    <select
+                      id="calc-sell-bank"
+                      value={sellBank}
+                      onChange={(e) => handleSelectSellBank(e.target.value)}
+                      className="flex-1 min-w-0 px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white focus:border-primary-container focus:outline-hidden"
+                    >
+                      {bankSelectList.map((b) => (
+                        <option key={`sell-${b}`} value={b}>
+                          {b}
                         </option>
-                      ))
-                    ) : (
-                      <>
-                        <option value="Pago Móvil">Pago Móvil</option>
-                        <option value="Banesco">Banesco</option>
-                        <option value="Mercantil">Mercantil</option>
-                        <option value="Banco de Venezuela">Banco de Venezuela</option>
-                      </>
-                    )}
-                  </select>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div>
                   <label
@@ -677,141 +799,386 @@ function CalculatorContent() {
                   />
                 </div>
               </div>
+
+              <div className="flex items-center gap-1.5 text-[10px] font-mono text-tertiary bg-tertiary/10 border border-tertiary/25 rounded-md px-2.5 py-1">
+                <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                <span>Recibir Bs al vender USDT cuesta 0% de comisión bancaria.</span>
+              </div>
             </div>
 
-            {/* Selector Explícito de Comisión Bancaria Venezolana */}
-            <div>
-              <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
-                Comisión bancaria
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setBankTransferType("SAME_BANK")}
-                  className={`p-2.5 rounded-lg border text-left transition-all ${
-                    bankTransferType === "SAME_BANK"
-                      ? "bg-tertiary/15 border-tertiary text-white"
-                      : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
-                  }`}
-                >
-                  <div className="text-xs font-mono font-bold">0% Mismo banco</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBankTransferType("INTERBANK_PM")}
-                  className={`p-2.5 rounded-lg border text-left transition-all ${
-                    bankTransferType === "INTERBANK_PM"
-                      ? "bg-primary-container/15 border-primary-container text-white"
-                      : "bg-surface-container border-[#1e2430] text-slate-400 hover:text-white"
-                  }`}
-                >
-                  <div className="text-xs font-mono font-bold">0.30% Pago Móvil</div>
-                </button>
+            {/* Pierna de COMPRA / RECOMPRA USDT (Aquí es donde TÚ envías Bs -> aplica comisión bancaria) */}
+            <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430] space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs font-bold text-white">
+                  {isUsdCycle ? "2. Recompra USDT (Envías Bs)" : "1. Entrada / Compra USDT (Envías Bs)"}
+                </span>
+                <div className="flex rounded-md bg-surface-container-lowest p-0.5 border border-[#1e2430] text-[10px] font-mono shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleChangeBuyLegRole("MAKER")}
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
+                      buyRole === "MAKER"
+                        ? "bg-primary-container text-on-primary font-bold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Publicar ({formattedMakerFee})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleChangeBuyLegRole("TAKER")}
+                    className={`px-2 py-0.5 rounded cursor-pointer ${
+                      buyRole === "TAKER"
+                        ? "bg-tertiary text-on-tertiary font-bold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Tomar (0%)
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label
+                    htmlFor="calc-buy-bank"
+                    className="block text-[10px] font-mono text-slate-400 mb-1"
+                  >
+                    Banco desde donde envías Bs
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <BankLogo bankName={buyBank} size={28} />
+                    <select
+                      id="calc-buy-bank"
+                      value={buyBank}
+                      onChange={(e) => handleSelectBuyBank(e.target.value)}
+                      className="flex-1 min-w-0 px-2.5 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs text-white focus:border-primary-container focus:outline-hidden"
+                    >
+                      {bankSelectList.map((b) => (
+                        <option key={`buy-${b}`} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label
+                    htmlFor="calc-buy-rate"
+                    className="block text-[10px] font-mono text-slate-400 mb-1"
+                  >
+                    Tasa Compra (Bs/USDT)
+                  </label>
+                  <BankAmountInput
+                    id="calc-buy-rate"
+                    value={buyRate}
+                    onChange={setBuyRate}
+                    ariaLabel="Tasa Compra (Bs/USDT)"
+                    className="w-full px-3 py-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-xs font-mono font-bold text-white tabular-nums focus:border-primary-container focus:outline-hidden"
+                  />
+                </div>
+              </div>
+
+              {/* Comisión bancaria ubicada dentro de la compra (envío de Bs) */}
+              <div className="pt-2 border-t border-[#1e2430] space-y-2">
+                <label className="block text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                  Comisión bancaria al enviar Bs
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setBankTransferType("SAME_BANK")}
+                    className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      bankTransferType === "SAME_BANK"
+                        ? "bg-tertiary/15 border-tertiary text-white"
+                        : "bg-surface-container-lowest border-[#1e2430] text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <div className="text-[11px] font-mono font-bold">0% Mismo</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBankTransferType("INTERBANK_PM")}
+                    className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      bankTransferType === "INTERBANK_PM"
+                        ? "bg-primary-container/15 border-primary-container text-white"
+                        : "bg-surface-container-lowest border-[#1e2430] text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <div className="text-[11px] font-mono font-bold">0,30% PM</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBankTransferType("CUSTOM")}
+                    className={`p-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      bankTransferType === "CUSTOM"
+                        ? "bg-secondary/15 border-secondary text-white"
+                        : "bg-surface-container-lowest border-[#1e2430] text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <div className="text-[11px] font-mono font-bold">Manual</div>
+                  </button>
+                </div>
+
+                {bankTransferType === "CUSTOM" && (
+                  <div className="grid grid-cols-3 gap-2 pt-1 text-[10px] font-mono">
+                    <div>
+                      <span className="text-slate-400 block mb-0.5">% Comisión</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={0.05}
+                        value={customBankFeePct}
+                        onChange={(e) => setCustomBankFeePct(Number(e.target.value) || 0)}
+                        className="w-full px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-white text-right tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block mb-0.5">N° órdenes</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={splitOrdersCount}
+                        onChange={(e) =>
+                          setSplitOrdersCount(Math.max(1, Math.round(Number(e.target.value) || 1)))
+                        }
+                        className="w-full px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-white text-right tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block mb-0.5">Mín. Bs/ord</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={minBankFeePerOrderVes}
+                        onChange={(e) => setMinBankFeePerOrderVes(Math.max(0, Number(e.target.value) || 0))}
+                        className="w-full px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-white text-right tabular-nums"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </section>
 
           {/* Panel Derecho */}
           <section className="lg:col-span-7 space-y-5">
+            {/* Resumen del ciclo */}
             <div className="p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <h2 className="text-sm font-bold text-white flex items-center gap-2">
                   <span className="material-symbols-outlined text-[18px] text-secondary">
                     schema
                   </span>
-                  Resumen del ciclo
+                  Resumen del ciclo ({isUsdCycle ? "USDT → Bs → USDT" : "Bs → USDT → Bs"})
                 </h2>
                 <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                    isProfitable
-                      ? "bg-tertiary/15 text-tertiary"
-                      : "bg-error/15 text-error"
-                  }`}
+                  className={`px-2.5 py-0.5 rounded border text-[10px] font-mono font-bold ${statusBadge.cls}`}
                 >
-                  {isProfitable ? "RENTABLE" : "EN PÉRDIDA"}
+                  {statusBadge.label}
                 </span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {/* Paso 1 */}
-                <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
-                  <div className="text-[10px] font-mono uppercase text-secondary font-bold">
-                    Paso 1 • Compra P2P
-                  </div>
-                  <div className="text-xs font-semibold text-white mt-1">
-                    VES → USDT ({buyBank})
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
-                    <div className="flex justify-between text-slate-400">
-                      <span>Inversión:</span>
-                      <span className="text-white">
-                        Bs. {simulation.totalVesInvested.toFixed(2)}
-                      </span>
+                {isUsdCycle ? (
+                  <>
+                    {/* Paso 1: Venta USDT -> Bs */}
+                    <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                      <div className="text-[10px] font-mono uppercase text-primary font-bold">
+                        Paso 1 • Venta P2P
+                      </div>
+                      <div className="text-xs font-semibold text-white mt-1 flex items-center gap-1.5">
+                        <BankLogo bankName={sellBank} size={18} />
+                        <span className="truncate">USDT → {sellBank}</span>
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Bs recibidos:</span>
+                          <span className="text-white">
+                            {simulation.hasValidRates ? `Bs. ${fmtBs(simulation.vesReceivedOnSell)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Banco (recibir):</span>
+                          <span className="text-tertiary">0% (Bs. 0,00)</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Com. Binance:</span>
+                          <span>
+                            {simulation.hasValidRates ? `-${simulation.sellFeeUsdt.toFixed(3)} U` : "—"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Comisión Binance:</span>
-                      <span>-{simulation.buyFeeUsdt.toFixed(3)} USDT</span>
-                    </div>
-                  </div>
-                </div>
 
-                {/* Paso 2 */}
-                <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
-                  <div className="text-[10px] font-mono uppercase text-primary font-bold">
-                    Paso 2 • Inventario Neto
-                  </div>
-                  <div className="text-xs font-semibold text-white mt-1">
-                    Billetera de Fondos Binance
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
-                    <div className="flex justify-between text-slate-400">
-                      <span>Disponible:</span>
-                      <span className="text-primary font-bold">
-                        {simulation.usdtAfterBuyFee.toFixed(3)} USDT
-                      </span>
+                    {/* Paso 2: Capital en Banco */}
+                    <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                      <div className="text-[10px] font-mono uppercase text-secondary font-bold">
+                        Paso 2 • En Banco
+                      </div>
+                      <div className="text-xs font-semibold text-white mt-1 truncate">
+                        Bolívares Disponibles
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Saldo banco:</span>
+                          <span className="text-white font-bold">
+                            {simulation.hasValidRates ? `Bs. ${fmtBs(simulation.vesReceivedOnSell)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Máx. recompra:</span>
+                          <span className="text-primary">
+                            {simulation.hasValidRates ? `Bs. ${simulation.breakEvenRate.toFixed(2)}` : "—"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Equilibrio:</span>
-                      <span>Bs. {simulation.breakEvenSellRate.toFixed(2)}</span>
-                    </div>
-                  </div>
-                </div>
 
-                {/* Paso 3 */}
-                <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
-                  <div className="text-[10px] font-mono uppercase text-tertiary font-bold">
-                    Paso 3 • Liquidación P2P
-                  </div>
-                  <div className="text-xs font-semibold text-white mt-1">
-                    USDT → VES ({sellBank})
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
-                    <div className="flex justify-between text-slate-400">
-                      <span>Retorno VES:</span>
-                      <span className="text-white">
-                        Bs. {simulation.grossVesOut.toFixed(2)}
-                      </span>
+                    {/* Paso 3: Recompra USDT */}
+                    <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                      <div className="text-[10px] font-mono uppercase text-tertiary font-bold">
+                        Paso 3 • Recompra P2P
+                      </div>
+                      <div className="text-xs font-semibold text-white mt-1 flex items-center gap-1.5">
+                        <BankLogo bankName={buyBank} size={18} />
+                        <span className="truncate">{buyBank} → USDT</span>
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Banco (enviar):</span>
+                          <span className="text-amber-300">
+                            {simulation.hasValidRates ? `-Bs. ${fmtBs(simulation.bankFeeVes)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>USDT finales:</span>
+                          <span className="text-white">
+                            {simulation.hasValidRates ? `${simulation.finalUsdtOut.toFixed(2)} U` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Utilidad neta:</span>
+                          <span
+                            className={`font-bold ${
+                              !simulation.hasValidRates
+                                ? "text-slate-400"
+                                : simulation.netProfitUsdt > 0
+                                ? "text-tertiary"
+                                : "text-error"
+                            }`}
+                          >
+                            {simulation.hasValidRates
+                              ? `${simulation.netProfitUsdt >= 0 ? "+" : ""}${simulation.netProfitUsdt.toFixed(2)} U`
+                              : "—"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Comisión Binance:</span>
-                      <span>-{simulation.sellFeeUsdt.toFixed(3)} USDT</span>
+                  </>
+                ) : (
+                  <>
+                    {/* Paso 1: Compra P2P */}
+                    <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                      <div className="text-[10px] font-mono uppercase text-secondary font-bold">
+                        Paso 1 • Compra P2P
+                      </div>
+                      <div className="text-xs font-semibold text-white mt-1 flex items-center gap-1.5">
+                        <BankLogo bankName={buyBank} size={18} />
+                        <span className="truncate">{buyBank} → USDT</span>
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Inversión total:</span>
+                          <span className="text-white">
+                            {simulation.hasValidRates ? `Bs. ${fmtBs(simulation.totalVesInvested)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Banco (enviar):</span>
+                          <span className="text-amber-300">
+                            {simulation.hasValidRates ? `Bs. ${fmtBs(simulation.bankFeeVes)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Com. Binance:</span>
+                          <span>
+                            {simulation.hasValidRates ? `-${simulation.buyFeeUsdt.toFixed(3)} U` : "—"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Utilidad Neta:</span>
-                      <span
-                        className={`font-bold ${
-                          isProfitable ? "text-tertiary" : "text-error"
-                        }`}
-                      >
-                        {simulation.netProfitUsdt >= 0 ? "+" : ""}
-                        {simulation.netProfitUsdt.toFixed(2)} USDT
-                      </span>
+
+                    {/* Paso 2: Inventario Neto */}
+                    <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                      <div className="text-[10px] font-mono uppercase text-primary font-bold">
+                        Paso 2 • Inventario Neto
+                      </div>
+                      <div className="text-xs font-semibold text-white mt-1 truncate">
+                        Billetera Binance Fondos
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
+                        <div className="flex justify-between text-slate-400">
+                          <span>USDT netos:</span>
+                          <span className="text-primary font-bold">
+                            {simulation.hasValidRates ? `${simulation.usdtAfterBuyFee.toFixed(3)} U` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Mín. venta:</span>
+                          <span>
+                            {simulation.hasValidRates ? `Bs. ${simulation.breakEvenRate.toFixed(2)}` : "—"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
+
+                    {/* Paso 3: Liquidación P2P */}
+                    <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                      <div className="text-[10px] font-mono uppercase text-tertiary font-bold">
+                        Paso 3 • Liquidación P2P
+                      </div>
+                      <div className="text-xs font-semibold text-white mt-1 flex items-center gap-1.5">
+                        <BankLogo bankName={sellBank} size={18} />
+                        <span className="truncate">USDT → {sellBank}</span>
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-[#1e2430] space-y-1 text-[11px] font-mono tabular-nums">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Retorno VES:</span>
+                          <span className="text-white">
+                            {simulation.hasValidRates ? `Bs. ${fmtBs(simulation.grossVesOut)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Banco (recibir):</span>
+                          <span className="text-tertiary">0%</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Utilidad neta:</span>
+                          <span
+                            className={`font-bold ${
+                              !simulation.hasValidRates
+                                ? "text-slate-400"
+                                : simulation.netProfitVes > 0
+                                ? "text-tertiary"
+                                : "text-error"
+                            }`}
+                          >
+                            {simulation.hasValidRates
+                              ? `${simulation.netProfitUsdt >= 0 ? "+" : ""}${simulation.netProfitUsdt.toFixed(2)} U`
+                              : "—"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
 
-              {/* Resumen de Comisión Total Binance y Ahorro VIP */}
+              {/* Resumen de Comisiones Binance valoradas a tasa real (no promedio con 0,01) */}
               <div className="px-3.5 py-2.5 rounded-xl bg-surface-container border border-[#1e2430] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
                 <div className="flex items-center gap-2 text-slate-300 flex-wrap">
                   <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container-high border border-[#283140] text-[10px] text-white font-semibold">
@@ -819,56 +1186,116 @@ function CalculatorContent() {
                     <span>{formattedMakerFee}</span>
                   </span>
                   <span>
-                    Comisión total Binance:{" "}
+                    Comisión Binance:{" "}
                     <strong className="text-primary">
-                      {simulation.totalBinanceFeeUsdt.toFixed(3)} USDT
+                      {simulation.hasValidRates
+                        ? `${simulation.totalBinanceFeeUsdt.toFixed(3)} USDT`
+                        : "—"}
                     </strong>{" "}
-                    <span className="text-slate-400">
-                      (≈ Bs. {simulation.totalBinanceFeeVes.toFixed(2)})
-                    </span>
+                    {simulation.hasValidRates && (
+                      <span className="text-slate-400">
+                        (≈ Bs. {fmtBs(simulation.totalBinanceFeeVes)})
+                      </span>
+                    )}
                   </span>
                 </div>
-                {simulation.vipSavingsUsdt > 0.0005 && (
+                {simulation.hasValidRates && simulation.vipSavingsUsdt > 0.0005 && (
                   <span className="text-tertiary font-semibold">
-                    Ahorro VIP: +{simulation.vipSavingsUsdt.toFixed(3)} USDT/ciclo (+
-                    {simulation.monthlyVipSavingsUsdt.toFixed(2)} USDT/mes)
+                    Ahorro VIP: +{simulation.vipSavingsUsdt.toFixed(3)} USDT/ciclo
                   </span>
                 )}
               </div>
+
+              {/* Calculador Inverso: "¿A qué tasa publicar para ganar X% neto?" */}
+              <div className="p-3.5 rounded-xl bg-surface-container-lowest border border-primary-container/25 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-primary">
+                      ads_click
+                    </span>
+                    Calculador Inverso: Quiero ganar{" "}
+                    <span className="text-primary font-mono">{desiredMarginPct.toFixed(2)}%</span> neto
+                  </div>
+                  <div className="text-[11px] font-mono text-slate-300">
+                    {targetRateValue > 0 ? (
+                      isUsdCycle ? (
+                        <>
+                          Publica tu anuncio de <strong>recompra</strong> a:{" "}
+                          <strong className="text-tertiary">Bs. {targetRateValue.toFixed(2)}</strong>
+                        </>
+                      ) : (
+                        <>
+                          Publica tu anuncio de <strong>venta</strong> a:{" "}
+                          <strong className="text-tertiary">Bs. {targetRateValue.toFixed(2)}</strong>
+                        </>
+                      )
+                    ) : (
+                      "Ingresa la tasa base de la otra pierna para calcular tu tasa objetivo."
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                  {[0.5, 1.0, 1.5, 2.0].map((mPct) => (
+                    <button
+                      key={mPct}
+                      type="button"
+                      onClick={() => setDesiredMarginPct(mPct)}
+                      className={`px-2 py-1 rounded text-[10px] font-mono border cursor-pointer transition-colors ${
+                        desiredMarginPct === mPct
+                          ? "bg-primary-container text-on-primary font-bold border-primary-container"
+                          : "bg-surface-container border-[#1e2430] text-slate-300 hover:text-white"
+                      }`}
+                    >
+                      +{mPct}%
+                    </button>
+                  ))}
+                  {targetRateValue > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        isUsdCycle ? setBuyRate(targetRateValue) : setSellRate(targetRateValue)
+                      }
+                      className="px-2.5 py-1 rounded bg-tertiary text-on-tertiary text-[10px] font-mono font-bold hover:brightness-110 cursor-pointer"
+                    >
+                      Aplicar
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
 
-            {/* Comparativa en Vivo por Nivel VIP de Comerciante */}
-            <div className="p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div>
-                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                    <span className="material-symbols-outlined text-[18px] text-primary">
-                      military_tech
-                    </span>
-                    Impacto por Nivel de Comerciante (Binance P2P)
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Haz clic en un nivel para aplicarlo (base Maker {formatFeePct(baseMakerFeePct)} • {cyclesPerDay}{" "}
-                    {cyclesPerDay === 1 ? "ciclo" : "ciclos"}/día).
-                  </p>
-                </div>
+            {/* Comparativa en Vivo por Nivel VIP (compacta en móvil sin desbordes ni saltos de línea) */}
+            <div className="p-4 sm:p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3">
+              <div>
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-primary">
+                    military_tech
+                  </span>
+                  Impacto por Nivel de Comerciante
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Toca cualquier nivel para aplicarlo (base Maker VES 0,25%).
+                </p>
               </div>
 
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
                   <thead>
-                    <tr className="border-b border-[#1e2430] text-[10px] uppercase tracking-wider text-slate-400">
-                      <th scope="col" className="py-2 pr-3">Nivel</th>
-                      <th scope="col" className="py-2 px-2 text-right">Fee Maker</th>
-                      <th scope="col" className="py-2 px-2 text-right">Equilibrio</th>
-                      <th scope="col" className="py-2 px-2 text-right">Ciclo (USDT)</th>
-                      <th scope="col" className="py-2 pl-2 text-right">Mes (26d)</th>
+                    <tr className="border-b border-[#1e2430] text-[10px] uppercase tracking-wider text-slate-400 whitespace-nowrap">
+                      <th scope="col" className="py-2 pr-2">Nivel</th>
+                      <th scope="col" className="py-2 px-1.5 text-right">Fee</th>
+                      <th scope="col" className="py-2 px-1.5 text-right">Equilibrio</th>
+                      <th scope="col" className="py-2 px-1.5 text-right">Gan./Ciclo</th>
+                      <th scope="col" className="py-2 pl-2 text-right hidden sm:table-cell">
+                        Mes ({operatingDaysPerMonth}d)
+                      </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#1e2430]/70">
+                  <tbody className="divide-y divide-[#1e2430]/70 whitespace-nowrap">
                     {tierComparison.map(({ tier, config, result }) => {
                       const isSelected = merchantTier === tier;
-                      const rowProfit = result.netProfitUsdt > 0;
+                      const rowProfit = result.hasValidRates && result.netProfitUsdt > 0;
                       return (
                         <tr
                           key={tier}
@@ -879,41 +1306,52 @@ function CalculatorContent() {
                               : "hover:bg-surface-container/70"
                           }`}
                         >
-                          <td className="py-2.5 pr-3">
-                            <div className="flex items-center gap-2" title={config.label}>
-                              <BinanceTierBadge tier={tier} size={20} />
-                              {config.discountPct > 0 ? (
-                                <span className="px-1.5 py-0.5 rounded bg-tertiary/15 text-tertiary text-[10px] font-bold">
+                          <td className="py-2.5 pr-2">
+                            <div className="flex items-center gap-1.5">
+                              <BinanceTierBadge tier={tier} size={18} />
+                              <span className="font-sans font-semibold text-white text-[11px]">
+                                {config.shortLabel}
+                              </span>
+                              {config.discountPct > 0 && (
+                                <span className="px-1 py-0.2 rounded bg-tertiary/15 text-tertiary text-[9px] font-bold">
                                   -{config.discountPct}%
                                 </span>
-                              ) : (
-                                <span className="text-[10px] text-slate-400">0%</span>
                               )}
                             </div>
                           </td>
-                          <td className="py-2.5 px-2 text-right text-slate-300">
+                          <td className="py-2.5 px-1.5 text-right text-slate-300">
                             {formatFeePct(result.effectiveMakerFeePct)}
                           </td>
-                          <td className="py-2.5 px-2 text-right text-primary">
-                            Bs. {result.breakEvenSellRate.toFixed(2)}
+                          <td className="py-2.5 px-1.5 text-right text-primary">
+                            {result.hasValidRates
+                              ? `Bs. ${result.breakEvenRate.toFixed(2)}`
+                              : "—"}
                           </td>
                           <td
-                            className={`py-2.5 px-2 text-right font-semibold ${
-                              rowProfit ? "text-tertiary" : "text-error"
+                            className={`py-2.5 px-1.5 text-right font-semibold ${
+                              !result.hasValidRates
+                                ? "text-slate-400"
+                                : rowProfit
+                                ? "text-tertiary"
+                                : "text-error"
                             }`}
                           >
-                            {result.netProfitUsdt >= 0 ? "+" : ""}
-                            {result.netProfitUsdt.toFixed(2)} U
+                            {result.hasValidRates
+                              ? `${result.netProfitUsdt >= 0 ? "+" : ""}${result.netProfitUsdt.toFixed(2)} U`
+                              : "—"}
                           </td>
                           <td
-                            className={`py-2.5 pl-2 text-right font-bold ${
-                              result.monthlyProfitUsdt >= 0
+                            className={`py-2.5 pl-2 text-right font-bold hidden sm:table-cell ${
+                              !result.hasValidRates
+                                ? "text-slate-400"
+                                : result.monthlyProfitUsdt >= 0
                                 ? "text-white"
                                 : "text-error"
                             }`}
                           >
-                            {result.monthlyProfitUsdt >= 0 ? "+" : ""}
-                            {result.monthlyProfitUsdt.toFixed(2)} U
+                            {result.hasValidRates
+                              ? `${result.monthlyProfitUsdt >= 0 ? "+" : ""}${result.monthlyProfitUsdt.toFixed(2)} U`
+                              : "—"}
                           </td>
                         </tr>
                       );
@@ -923,86 +1361,121 @@ function CalculatorContent() {
               </div>
             </div>
 
-            {/* Proyección de Velocidad de Rotación Diaria */}
-            <div className="p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-4">
+            {/* Proyección Lineal Compacta (sin interés compuesto ficticio ni días rígidos) */}
+            <div className="p-4 sm:p-5 rounded-xl bg-surface-container-low border border-[#1e2430] space-y-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
                   <h2 className="text-sm font-bold text-white">
-                    Proyección por Velocidad de Rotación de Capital
+                    Estimación Teórica a Spread Constante
                   </h2>
-                  <p className="text-xs text-slate-400">
-                    Estimación operativa rotando el mismo bloque de {capitalUsdt} USDT durante la jornada.
+                  <p className="text-[11px] text-slate-400">
+                    Cálculo lineal rotando {capitalUsdt} USDT (sin interés compuesto).
                   </p>
                 </div>
 
-                <div className="grid grid-cols-4 sm:flex items-center gap-1 w-full sm:w-auto bg-surface-container p-1 rounded-lg border border-[#1e2430]">
-                  {[1, 3, 5, 8].map((n) => (
-                    <button
-                      key={n}
-                      type="button"
-                      onClick={() => setCyclesPerDay(n)}
-                      className={`px-1.5 sm:px-2.5 py-1 rounded text-[11px] sm:text-xs font-mono text-center whitespace-nowrap transition-colors ${
-                        cyclesPerDay === n
-                          ? "bg-primary-container text-on-primary font-bold"
-                          : "text-slate-400 hover:text-white"
-                      }`}
-                    >
-                      {n} {n === 1 ? "Ciclo" : "Ciclos"}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-2 flex-wrap text-xs font-mono">
+                  <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
+                    {[1, 3, 5, 8].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setCyclesPerDay(n)}
+                        className={`px-2 py-0.5 rounded text-[11px] transition-colors cursor-pointer ${
+                          cyclesPerDay === n
+                            ? "bg-primary-container text-on-primary font-bold"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {n}x
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-1 bg-surface-container p-1 rounded-lg border border-[#1e2430]">
+                    {[20, 26, 30].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setOperatingDaysPerMonth(d)}
+                        className={`px-2 py-0.5 rounded text-[11px] transition-colors cursor-pointer ${
+                          operatingDaysPerMonth === d
+                            ? "bg-surface-container-high text-white font-bold"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {d}d
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+              {isDifferentBankMultiCycle && (
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 flex items-start gap-2">
+                  <span className="material-symbols-outlined text-[16px] text-amber-400 shrink-0 mt-0.5">
+                    swap_horiz
+                  </span>
+                  <span>
+                    <strong>Salto entre bancos ({sellBank} ≠ {buyBank}):</strong> para repetir {cyclesPerDay} ciclos al día entre cuentas distintas, el segundo ciclo requiere operar en sentido inverso o fondear entre tus cuentas propias (considerando límites diarios de Pago Móvil).
+                  </span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-3 gap-2.5">
+                <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430]">
                   <div className="text-[10px] font-mono uppercase text-slate-400">
-                    Jornada Diaria ({cyclesPerDay} vueltas)
+                    Diario ({cyclesPerDay} cic.)
                   </div>
                   <div
-                    className={`mt-1.5 text-lg font-mono font-bold tabular-nums ${
-                      simulation.dailyProfitUsdt >= 0 ? "text-tertiary" : "text-error"
+                    className={`mt-1 text-sm sm:text-base font-mono font-bold tabular-nums ${
+                      !simulation.hasValidRates
+                        ? "text-slate-400"
+                        : simulation.dailyProfitUsdt >= 0
+                        ? "text-tertiary"
+                        : "text-error"
                     }`}
                   >
-                    {simulation.dailyProfitUsdt >= 0 ? "+" : ""}
-                    {simulation.dailyProfitUsdt.toFixed(2)} USDT
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400 tabular-nums mt-0.5">
-                    Compuesto: {simulation.compoundDailyUsdt >= 0 ? "+" : ""}
-                    {simulation.compoundDailyUsdt.toFixed(2)} USDT
+                    {simulation.hasValidRates
+                      ? `${simulation.dailyProfitUsdt >= 0 ? "+" : ""}${simulation.dailyProfitUsdt.toFixed(2)} U`
+                      : "—"}
                   </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430]">
                   <div className="text-[10px] font-mono uppercase text-slate-400">
-                    Proyección Semanal (6 días)
+                    Semana (6d)
                   </div>
                   <div
-                    className={`mt-1.5 text-lg font-mono font-bold tabular-nums ${
-                      simulation.weeklyProfitUsdt >= 0 ? "text-white" : "text-error"
+                    className={`mt-1 text-sm sm:text-base font-mono font-bold tabular-nums ${
+                      !simulation.hasValidRates
+                        ? "text-slate-400"
+                        : simulation.weeklyProfitUsdt >= 0
+                        ? "text-white"
+                        : "text-error"
                     }`}
                   >
-                    {simulation.weeklyProfitUsdt >= 0 ? "+" : ""}
-                    {simulation.weeklyProfitUsdt.toFixed(2)} USDT
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400 tabular-nums mt-0.5">
-                    {cyclesPerDay * 6} ciclos ejecutados
+                    {simulation.hasValidRates
+                      ? `${simulation.weeklyProfitUsdt >= 0 ? "+" : ""}${simulation.weeklyProfitUsdt.toFixed(2)} U`
+                      : "—"}
                   </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-surface-container border border-[#1e2430]">
+                <div className="p-3 rounded-xl bg-surface-container border border-[#1e2430]">
                   <div className="text-[10px] font-mono uppercase text-slate-400">
-                    Proyección Mensual (26 días)
+                    Mes ({operatingDaysPerMonth}d)
                   </div>
                   <div
-                    className={`mt-1.5 text-lg font-mono font-bold tabular-nums ${
-                      simulation.monthlyProfitUsdt >= 0 ? "text-primary" : "text-error"
+                    className={`mt-1 text-sm sm:text-base font-mono font-bold tabular-nums ${
+                      !simulation.hasValidRates
+                        ? "text-slate-400"
+                        : simulation.monthlyProfitUsdt >= 0
+                        ? "text-primary"
+                        : "text-error"
                     }`}
                   >
-                    {simulation.monthlyProfitUsdt >= 0 ? "+" : ""}
-                    {simulation.monthlyProfitUsdt.toFixed(2)} USDT
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400 tabular-nums mt-0.5">
-                    {cyclesPerDay * 26} ciclos acumulados
+                    {simulation.hasValidRates
+                      ? `${simulation.monthlyProfitUsdt >= 0 ? "+" : ""}${simulation.monthlyProfitUsdt.toFixed(2)} U`
+                      : "—"}
                   </div>
                 </div>
               </div>

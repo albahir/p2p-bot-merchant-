@@ -3,6 +3,7 @@ import localFont from "next/font/local";
 import "./globals.css";
 import { ThemeProvider } from "@/lib/theme-context";
 import { TelemetryProvider } from "@/lib/telemetry-context";
+import { PerspectiveProvider } from "@/lib/perspective-context";
 
 const inter = localFont({
   src: [
@@ -70,7 +71,9 @@ export default function RootLayout({
         className="bg-background text-on-surface antialiased selection:bg-[#f59e0b] selection:text-black min-h-screen flex flex-col"
       >
         <ThemeProvider>
-          <TelemetryProvider>{children}</TelemetryProvider>
+          <PerspectiveProvider>
+            <TelemetryProvider>{children}</TelemetryProvider>
+          </PerspectiveProvider>
         </ThemeProvider>
       </body>
     </html>

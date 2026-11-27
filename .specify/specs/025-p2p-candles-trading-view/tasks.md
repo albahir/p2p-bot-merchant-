@@ -17,3 +17,8 @@
 
 ## Fase 5: Verificación, Auditoría y Documentación
 - [x] T25.8: Ejecutar `pytest`, `ruff check .`, `mypy src/ scripts/`, `tsc --noEmit`, auditoría `security-review` y actualizar `memory.md` (ADR 065).
+
+## Fase 6: Interruptor Global de Perspectiva Operativa `Maker (Anuncio)` vs `Taker (Directo)` en Matriz, Velas y Calculadora
+- [x] T25.9: Crear `frontend/src/lib/perspective-context.tsx` (por defecto `MAKER`, persistido en `localStorage`) y el componente accesible `frontend/src/components/perspective-toggle.tsx`, integrándolo en `frontend/src/app/layout.tsx`.
+- [x] T25.10: Adaptar `Matriz` (`frontend/src/app/page.tsx`), `Velas P2P` (`frontend/src/app/market/page.tsx`) y `Calculadora` (`frontend/src/app/calculator/page.tsx`) para proyectar puntas, libros de competencia, VWAP, profundidad y simulación de ciclos en perspectiva 100% `Maker` por defecto con conmutación instantánea a `Taker`.
+- [x] T25.11: Verificar `tsc --noEmit` (0 errores TypeScript) y actualizar `memory.md` (ADR 078).

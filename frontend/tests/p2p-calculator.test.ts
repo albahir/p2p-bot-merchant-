@@ -4,6 +4,7 @@ import {
   DEFAULT_VES_BASE_MAKER_FEE_PCT,
   calculateP2PCycle,
   compareMerchantTiers,
+  computeTargetRateForMargin,
   getEffectiveMakerFeePct,
 } from "../src/lib/p2p-calculator";
 
@@ -106,4 +107,61 @@ test("higher VIP tier strictly improves net profit and lowers break-even sell ra
     bcvUsd: 900,
   });
   assert.ok(Math.abs(atBreakEven.netProfitVes) < 1e-6);
+});
+
+test("zero buyRate or sellRate returns safe incomplete state without 0.01 distortion", () => {
+  const zeroBuy = calculateP2PCycle({
+    capitalUsdt: 250,
+    buyRate: 0,
+    sellRate: 1094.99,
+    buyRole: "MAKER",
+    sellRole: "MAKER",
+    cycleDirection: "VES_USDT_VES",
+    bankTransferType: "INTERBANK_PM",
+    merchantTier: "STANDARD",
+    cyclesPerDay: 3,
+  });
+
+  assert.equal(zeroBuy.hasValidRates, false);
+  assert.equal(zeroBuy.profitStatus, "INCOMPLETE");
+  assert.equal(zeroBuy.totalVesInvested, 0);
+  assert.equal(zeroBuy.netProfitUsdt, 0);
+  assert.equal(zeroBuy.netRoiPct, 0);
+});
+
+test("USDT -> Bs -> USDT direction and target rate solver preserve real USDT math", () => {
+  const res = calculateP2PCycle({
+    capitalUsdt: 500,
+    buyRate: 1080,
+    sellRate: 1100,
+    buyRole: "MAKER",
+    sellRole: "MAKER",
+    cycleDirection: "USDT_VES_USDT",
+    bankTransferType: "INTERBANK_PM",
+    merchantTier: "STANDARD",
+    cyclesPerDay: 2,
+  });
+
+  assert.equal(res.hasValidRates, true);
+  assert.ok(res.netProfitUsdt > 0);
+  assert.ok(res.breakEvenRate > 1080 && res.breakEvenRate < 1100);
+  // Valoración consistente de comisión Binance a tasa real (~1.248 U * 1080 Bs/U ≈ 1347 Bs, nunca la mitad)
+  assert.ok(Math.abs(res.totalBinanceFeeVes - res.totalBinanceFeeUsdt * 1080) < 0.01);
+
+  const targetBuy = computeTargetRateForMargin(
+    {
+      capitalUsdt: 500,
+      buyRate: 1080,
+      sellRate: 1100,
+      buyRole: "MAKER",
+      sellRole: "MAKER",
+      cycleDirection: "USDT_VES_USDT",
+      bankTransferType: "INTERBANK_PM",
+      merchantTier: "STANDARD",
+      cyclesPerDay: 2,
+    },
+    1.0,
+    "BUY"
+  );
+  assert.ok(targetBuy > 0 && targetBuy < res.breakEvenRate);
 });

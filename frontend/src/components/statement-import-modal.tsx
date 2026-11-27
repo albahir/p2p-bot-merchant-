@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import {
   StatementAction,
+  StatementAvailableOrder,
   StatementCommitRowPayload,
   StatementCommitResponse,
   StatementPreviewResponse,
@@ -10,6 +11,73 @@ import {
   commitBankStatement,
   previewBankStatement,
 } from "@/lib/api";
+
+function parseVetDateDays(dateStr: string): number | null {
+  if (!dateStr || dateStr.length < 10) return null;
+  const parts = dateStr.slice(0, 10).split("-");
+  if (parts.length !== 3) return null;
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  return Math.floor(Date.UTC(y, m - 1, d) / 86400000);
+}
+
+function getCandidateOrdersForRow(
+  r: EditableRow,
+  availableOrders: StatementAvailableOrder[]
+): {
+  exactMatches: StatementAvailableOrder[];
+  nearbyDateMatches: StatementAvailableOrder[];
+} {
+  const expectedTrade = r.movement_type === "DEBIT" ? "BUY" : "SELL";
+  const rowDays = parseVetDateDays(r.date_vet);
+  const exactMatches: Array<{ ord: StatementAvailableOrder; amtDiff: number; dayDiff: number }> = [];
+  const nearbyDateMatches: Array<{ ord: StatementAvailableOrder; amtDiff: number; dayDiff: number }> = [];
+  const seen = new Set<string>();
+
+  const currentOrdNum = (r.selectedOrder || r.matched_order_number || "").trim();
+  if (currentOrdNum) {
+    const found = availableOrders.find((o) => o.order_number === currentOrdNum);
+    const pinned: StatementAvailableOrder = found || {
+      order_number: currentOrdNum,
+      trade_type: r.matched_order_type || expectedTrade,
+      fiat_amount: r.matched_order_fiat ?? r.amount_ves,
+      crypto_amount: r.matched_order_crypto ?? 0,
+      date_vet: r.date_vet,
+    };
+    seen.add(currentOrdNum);
+    exactMatches.push({ ord: pinned, amtDiff: 0, dayDiff: 0 });
+  }
+
+  const amtTol = Math.max(1.0, r.amount_ves * 0.005);
+
+  for (const ord of availableOrders) {
+    if (seen.has(ord.order_number)) continue;
+    if (String(ord.trade_type || "").toUpperCase() !== expectedTrade) continue;
+
+    const amtDiff = Math.abs(ord.fiat_amount - r.amount_ves);
+    const ordDays = parseVetDateDays(ord.date_vet);
+    const dayDiff =
+      rowDays !== null && ordDays !== null ? Math.abs(rowDays - ordDays) : 0;
+
+    if (amtDiff <= amtTol && dayDiff <= 4) {
+      seen.add(ord.order_number);
+      exactMatches.push({ ord, amtDiff, dayDiff });
+    } else if (dayDiff <= 2) {
+      seen.add(ord.order_number);
+      nearbyDateMatches.push({ ord, amtDiff, dayDiff });
+    }
+  }
+
+  exactMatches.sort((a, b) => a.amtDiff - b.amtDiff || a.dayDiff - b.dayDiff);
+  nearbyDateMatches.sort((a, b) => a.amtDiff - b.amtDiff || a.dayDiff - b.dayDiff);
+
+  return {
+    exactMatches: exactMatches.map((x) => x.ord),
+    nearbyDateMatches: nearbyDateMatches.slice(0, 20).map((x) => x.ord),
+  };
+}
 
 type StatementFilterTab =
   | "ALL"
@@ -107,15 +175,22 @@ export function StatementImportModal({
 
   function updateRowAction(rowIndex: number, action: StatementAction) {
     setRows((prev) =>
-      prev.map((r) =>
-        r.row_index === rowIndex
-          ? {
-              ...r,
-              selectedAction: action,
-              selectedOrder: action === "P2P_MATCH" ? r.selectedOrder : "",
-            }
-          : r
-      )
+      prev.map((r) => {
+        if (r.row_index !== rowIndex) return r;
+        let nextOrder =
+          action === "P2P_MATCH" ? r.selectedOrder || r.matched_order_number || "" : "";
+        if (action === "P2P_MATCH" && !nextOrder && preview) {
+          const cands = getCandidateOrdersForRow(r, preview.available_orders);
+          if (cands.exactMatches.length > 0) {
+            nextOrder = cands.exactMatches[0].order_number;
+          }
+        }
+        return {
+          ...r,
+          selectedAction: action,
+          selectedOrder: nextOrder,
+        };
+      })
     );
   }
 
@@ -484,32 +559,58 @@ export function StatementImportModal({
                     </td>
                     <td className="py-2 px-2.5">
                       {r.selectedAction === "P2P_MATCH" ? (
-                        <div className="space-y-1">
-                          <select
-                            aria-label={`Orden P2P fila ${r.row_index}`}
-                            value={r.selectedOrder}
-                            onChange={(e) => updateRowOrder(r.row_index, e.target.value)}
-                            className="px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-[11px] font-mono text-secondary max-w-[190px]"
-                          >
-                            <option value="">-- Elegir orden --</option>
-                            {preview.available_orders.map((ord) => (
-                              <option key={ord.order_number} value={ord.order_number}>
-                                {ord.order_number.slice(-8)} ({ord.trade_type} Bs.{ord.fiat_amount.toFixed(2)})
-                              </option>
-                            ))}
-                          </select>
-                          {r.third_party_alert && (
-                            <span
-                              title={
-                                r.third_party_detail ||
-                                "Titular bancario distinto a contraparte Binance (LOCDOFT / UNIF)"
-                              }
-                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] font-mono text-amber-300"
-                            >
-                              ⚠ Posible tercero
-                            </span>
-                          )}
-                        </div>
+                        (() => {
+                          const { exactMatches, nearbyDateMatches } = getCandidateOrdersForRow(
+                            r,
+                            preview.available_orders
+                          );
+                          const expectedTrade = r.movement_type === "DEBIT" ? "BUY" : "SELL";
+                          return (
+                            <div className="space-y-1">
+                              <select
+                                aria-label={`Orden P2P fila ${r.row_index}`}
+                                value={r.selectedOrder}
+                                onChange={(e) => updateRowOrder(r.row_index, e.target.value)}
+                                className="px-2 py-1 rounded bg-surface-container-lowest border border-[#1e2430] text-[11px] font-mono text-secondary max-w-[230px]"
+                              >
+                                <option value="">
+                                  {exactMatches.length === 0 && nearbyDateMatches.length === 0
+                                    ? `-- Sin orden ${expectedTrade} (${r.date_vet}) --`
+                                    : "-- Elegir orden --"}
+                                </option>
+                                {exactMatches.length > 0 && (
+                                  <optgroup label="✓ Coincidencia de monto y fecha">
+                                    {exactMatches.map((ord) => (
+                                      <option key={ord.order_number} value={ord.order_number}>
+                                        {ord.order_number.slice(-8)} ({ord.trade_type} Bs.{ord.fiat_amount.toFixed(2)} • {ord.date_vet})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                {nearbyDateMatches.length > 0 && (
+                                  <optgroup label={`Otras ${expectedTrade} del día (${r.date_vet} ±2d)`}>
+                                    {nearbyDateMatches.map((ord) => (
+                                      <option key={ord.order_number} value={ord.order_number}>
+                                        {ord.order_number.slice(-8)} ({ord.trade_type} Bs.{ord.fiat_amount.toFixed(2)} • {ord.date_vet})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                              </select>
+                              {r.third_party_alert && (
+                                <span
+                                  title={
+                                    r.third_party_detail ||
+                                    "Titular bancario distinto a contraparte Binance (LOCDOFT / UNIF)"
+                                  }
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] font-mono text-amber-300"
+                                >
+                                  ⚠ Posible tercero
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()
                       ) : (
                         <span className="text-[10px] font-mono text-slate-500">
                           {r.notes || "-"}
