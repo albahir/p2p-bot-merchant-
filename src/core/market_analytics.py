@@ -345,7 +345,11 @@ def compute_vwap_for_ticket(
             continue
 
         cap_ves = surplus_usdt * price
-        take_ves = min(remaining_ves, cap_ves)
+        max_single_ves = float(ad.get("max_ves") or 0.0)
+        effective_cap_ves = min(cap_ves, max_single_ves) if max_single_ves > 0 else cap_ves
+        take_ves = min(remaining_ves, effective_cap_ves)
+        if take_ves <= 0:
+            continue
         take_usdt = take_ves / price
         total_ves_filled += take_ves
         total_usdt_filled += take_usdt

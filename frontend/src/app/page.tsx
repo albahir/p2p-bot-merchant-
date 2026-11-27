@@ -4,6 +4,17 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { BankAmountInput } from "@/components/bank-amount-input";
+import { BankLogo } from "@/components/bank-logo";
+import { BinanceTierBadge } from "@/components/binance-tier-badge";
+import { PerspectiveToggle } from "@/components/perspective-toggle";
+import { usePerspective } from "@/lib/perspective-context";
+import {
+  DEFAULT_VES_BASE_MAKER_FEE_PCT,
+  MERCHANT_TIERS,
+  MerchantTier,
+  calculateP2PCycle,
+  formatFeePct,
+} from "@/lib/p2p-calculator";
 import {
   ArbitrageMatrix,
   BCVRates,
@@ -61,6 +72,7 @@ const BANK_FILTERS = [
 const TICKET_PRESETS = [50, 100, 250, 500, 1000];
 
 export default function SpreadMatrixPage() {
+  const { perspective, isMaker } = usePerspective();
   const [amountUsdt, setAmountUsdt] = useState<number>(100);
   const [debouncedUsdt, setDebouncedUsdt] = useState<number>(100);
   const [valuationMode, setValuationMode] = useState<ValuationMode>("PARALELO");
@@ -91,6 +103,37 @@ export default function SpreadMatrixPage() {
   const [orderbookLoading, setOrderbookLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [pinnedBanks, setPinnedBanks] = useState<string[]>([]);
+  const [merchantTier, setMerchantTier] = useState<MerchantTier>("STANDARD");
+  const [customMakerFeePct, setCustomMakerFeePct] = useState<number>(
+    DEFAULT_VES_BASE_MAKER_FEE_PCT
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const savedTier = localStorage.getItem("p2p_calc_merchant_tier") as MerchantTier | null;
+      if (savedTier && MERCHANT_TIERS.some((t) => t.id === savedTier)) {
+        setMerchantTier(savedTier);
+      }
+      const savedCustom = Number(localStorage.getItem("p2p_calc_custom_maker_pct"));
+      if (Number.isFinite(savedCustom) && savedCustom >= 0 && savedCustom <= 5) {
+        setCustomMakerFeePct(savedCustom);
+      }
+    } catch {
+      // Ignorar errores de almacenamiento
+    }
+  }, []);
+
+  function handleChangeMatrixTier(nextTier: MerchantTier) {
+    setMerchantTier(nextTier);
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("p2p_calc_merchant_tier", nextTier);
+      } catch {
+        // Ignorar errores de almacenamiento
+      }
+    }
+  }
 
   useEffect(() => {
     const cached = getCachedUserBanks();
@@ -250,7 +293,7 @@ export default function SpreadMatrixPage() {
     bcv?.brecha_pct ??
     (bcvUsd > 0 && p2pRef > 0 ? ((p2pRef - bcvUsd) / bcvUsd) * 100 : 0);
 
-  // Deduplicación defensiva por nombre de banco + Filtrado reactivo + Bancos Fijados (Pinning) arriba
+  // Deduplicación defensiva por nombre de banco + proyección según perspectiva activa (MAKER vs TAKER)
   const uniqueQuotes = useMemo<RateQuote[]>(() => {
     const raw = matrix?.quotes || [];
     const seen = new Set<string>();
@@ -258,11 +301,28 @@ export default function SpreadMatrixPage() {
     for (const q of raw) {
       if (!seen.has(q.bank_name)) {
         seen.add(q.bank_name);
-        deduped.push(q);
+        if (isMaker) {
+          deduped.push(q);
+        } else {
+          // En modo TAKER (Directo): compras pagando la punta de venta Maker (q.sell_rate)
+          // y vendes recibiendo la punta de compra Maker (q.buy_rate).
+          const takerBuy = q.sell_rate;
+          const takerSell = q.buy_rate;
+          const hasBoth = takerBuy > 0 && takerSell > 0;
+          const spreadVes = hasBoth ? takerSell - takerBuy : 0;
+          const spreadPct = hasBoth ? (spreadVes / takerBuy) * 100 : 0;
+          deduped.push({
+            ...q,
+            buy_rate: takerBuy,
+            sell_rate: takerSell,
+            spread_ves: spreadVes,
+            spread_pct: spreadPct,
+          });
+        }
       }
     }
     return deduped;
-  }, [matrix]);
+  }, [matrix, isMaker]);
 
   const isMyBanksActive = profileMode === "MY_BANKS" && userBanks.length > 0;
 
@@ -318,13 +378,24 @@ export default function SpreadMatrixPage() {
         if (sellQ.sell_rate <= 0) continue;
         const isSameBank = buyQ.bank_name === sellQ.bank_name;
         const bankFeePct = isSameBank ? 0 : 0.3;
-        const capitalVes = amountUsdt * buyQ.buy_rate;
-        const grossVesOut = amountUsdt * sellQ.sell_rate;
-        const interbankFeeVes = isSameBank ? 0 : capitalVes * 0.003;
-        const netProfitVes = grossVesOut - capitalVes - interbankFeeVes;
+        const sim = calculateP2PCycle({
+          capitalUsdt: amountUsdt,
+          buyRate: buyQ.buy_rate,
+          sellRate: sellQ.sell_rate,
+          buyRole: perspective,
+          sellRole: perspective,
+          cycleDirection: "VES_USDT_VES",
+          bankTransferType: isSameBank ? "SAME_BANK" : "INTERBANK_PM",
+          merchantTier,
+          baseMakerFeePct: DEFAULT_VES_BASE_MAKER_FEE_PCT,
+          customMakerFeePct,
+          cyclesPerDay: 1,
+        });
+        const capitalVes = sim.totalVesInvested;
+        const netProfitVes = sim.netProfitVes;
         const grossSpreadPct = ((sellQ.sell_rate - buyQ.buy_rate) / buyQ.buy_rate) * 100;
-        const netRoiPct = capitalVes > 0 ? (netProfitVes / capitalVes) * 100 : 0;
-        const netProfitUsdt = sellQ.sell_rate > 0 ? netProfitVes / sellQ.sell_rate : 0;
+        const netRoiPct = sim.netRoiPct;
+        const netProfitUsdt = sim.netProfitUsdt;
 
         const buyIsMine = bankMatchesProfile(buyQ.bank_name, userBanks);
         const sellIsMine = bankMatchesProfile(sellQ.bank_name, userBanks);
@@ -361,7 +432,16 @@ export default function SpreadMatrixPage() {
         return b.netRoiPct - a.netRoiPct;
       })
       .slice(0, 3);
-  }, [uniqueQuotes, isMyBanksActive, userBanks, userBankBalances, amountUsdt]);
+  }, [
+    uniqueQuotes,
+    isMyBanksActive,
+    userBanks,
+    userBankBalances,
+    amountUsdt,
+    perspective,
+    merchantTier,
+    customMakerFeePct,
+  ]);
 
   const optimalRoute = topRoutes[0] || null;
 
@@ -376,10 +456,15 @@ export default function SpreadMatrixPage() {
   return (
     <AppShell
       title="Matriz de Bancos"
-      badge="EN VIVO"
-      subtitle="Tasas P2P por método de pago."
+      badge={isMaker ? "MODO MAKER" : "MODO TAKER"}
+      subtitle={
+        isMaker
+          ? "Perspectiva Comerciante (Anuncio): tasas donde publicas tus anuncios de compra y venta."
+          : "Perspectiva Ejecución Directa (Taker 0% fee): tasas al tomar anuncios ya publicados."
+      }
       actions={
-        <>
+        <div className="flex flex-wrap items-center gap-2">
+          <PerspectiveToggle />
           {/* Selector de Valuación Dual */}
           <div className="p-0.5 rounded-lg bg-surface-container-low border border-[#1e2430] flex items-center text-[11px] font-mono">
             <button
@@ -424,7 +509,7 @@ export default function SpreadMatrixPage() {
             </span>
             <span>Actualizar</span>
           </button>
-        </>
+        </div>
       }
     >
       <div className="space-y-5">
@@ -828,113 +913,136 @@ export default function SpreadMatrixPage() {
           </div>
         </section>
 
-        {/* SECCIÓN 1: SPREAD POR PRECIO Y LIBRO DE ANUNCIOS EN VIVO (TAL CUAL COMO EN BINANCE P2P) */}
-        {(spreadViewMode === "AMBOS" || spreadViewMode === "PRECIO") && (
+        {/* SECCIÓN 1: LIBRO DE ANUNCIOS EN VIVO ADAPTADO A LA PERSPECTIVA ACTIVA (MAKER vs TAKER) */}
+        {(spreadViewMode === "AMBOS" || spreadViewMode === "PRECIO") && (() => {
+          // En Binance P2P:
+          // - orderbook.sell_ads (pestaña Vender) = Comerciantes COMPRANDO USDT (Tu Compra Maker / Tu Venta Taker)
+          // - orderbook.buy_ads (pestaña Comprar) = Comerciantes VENDIENDO USDT (Tu Venta Maker / Tu Compra Taker)
+          const entryAds = isMaker ? orderbook?.sell_ads || [] : orderbook?.buy_ads || [];
+          const exitAds = isMaker ? orderbook?.buy_ads || [] : orderbook?.sell_ads || [];
+          const entryBestPrice = isMaker
+            ? orderbook?.best_sell_price || 0
+            : orderbook?.best_buy_price || 0;
+          const exitBestPrice = isMaker
+            ? orderbook?.best_buy_price || 0
+            : orderbook?.best_sell_price || 0;
+          const totalEntryAds = isMaker
+            ? orderbook?.total_sell_ads ?? entryAds.length
+            : orderbook?.total_buy_ads ?? entryAds.length;
+          const totalExitAds = isMaker
+            ? orderbook?.total_buy_ads ?? exitAds.length
+            : orderbook?.total_sell_ads ?? exitAds.length;
+          const primarySpreadPct = isMaker
+            ? orderbook?.maker_spread_pct ?? 0
+            : orderbook?.taker_spread_pct ?? 0;
+          const primarySpreadVes = isMaker
+            ? orderbook?.maker_spread_ves ?? 0
+            : orderbook?.taker_spread_ves ?? 0;
+          const secondarySpreadPct = isMaker
+            ? orderbook?.taker_spread_pct ?? 0
+            : orderbook?.maker_spread_pct ?? 0;
+          const secondarySpreadVes = isMaker
+            ? orderbook?.taker_spread_ves ?? 0
+            : orderbook?.maker_spread_ves ?? 0;
+
+          return (
           <section className="rounded-xl bg-surface-container-low border border-[#1e2430] overflow-hidden space-y-4 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#1e2430]">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="material-symbols-outlined text-[19px] text-primary">
                   candlestick_chart
                 </span>
-                <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                  <span>Libro de anuncios</span>
+                <h2 className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+                  <span>
+                    {isMaker ? "Libro de anuncios (Vista Maker)" : "Libro de anuncios (Vista Taker)"}
+                  </span>
                   <span className="px-2 py-0.5 rounded bg-primary-container/20 text-primary text-[10px] font-mono">
                     {selectedBankChip} • {amountUsdt} USDT
                   </span>
                 </h2>
               </div>
 
-              {orderbook && orderbook.best_buy_price > 0 && orderbook.best_sell_price > 0 && (
+              {orderbook && entryBestPrice > 0 && exitBestPrice > 0 && (
                 <Link
                   href={`/calculator?buyBank=${encodeURIComponent(
                     selectedBankChip === "Todos" ? "Pago Móvil" : selectedBankChip
-                  )}&buyRate=${(orderbook.recommended_mode === "MAKER"
-                    ? orderbook.best_sell_price
-                    : orderbook.best_buy_price
-                  ).toFixed(2)}&sellBank=${encodeURIComponent(
+                  )}&buyRate=${entryBestPrice.toFixed(2)}&sellBank=${encodeURIComponent(
                     selectedBankChip === "Todos" ? "Pago Móvil" : selectedBankChip
-                  )}&sellRate=${(orderbook.recommended_mode === "MAKER"
-                    ? orderbook.best_buy_price
-                    : orderbook.best_sell_price
-                  ).toFixed(2)}&amount=${amountUsdt}`}
+                  )}&sellRate=${exitBestPrice.toFixed(2)}&amount=${amountUsdt}&role=${perspective}`}
                   className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary text-xs font-mono font-bold flex items-center gap-1.5 hover:brightness-110 transition-all"
                 >
-                  <span>Simular</span>
+                  <span>{isMaker ? "Simular como Maker" : "Simular como Taker"}</span>
                   <span className="material-symbols-outlined text-[15px]">calculate</span>
                 </Link>
               )}
             </div>
 
-            {/* Tarjetas de Puntas y Spread por Precio (2 por fila en móvil) */}
+            {/* Tarjetas de Puntas y Spread por Precio según perspectiva */}
             {orderbook && (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
                   <div className="text-[10px] font-mono uppercase text-slate-400 truncate">
-                    Mejor compra
+                    {isMaker ? "Tu Compra (Anuncio)" : "Compra Directa (Taker)"}
                   </div>
                   <div className="mt-1 text-base sm:text-lg font-mono font-bold text-tertiary tabular-nums truncate">
-                    {orderbook.best_buy_price > 0
-                      ? `Bs. ${orderbook.best_buy_price.toFixed(2)}`
-                      : "--"}
+                    {entryBestPrice > 0 ? `Bs. ${entryBestPrice.toFixed(2)}` : "--"}
                   </div>
                   <div className="text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
-                    {orderbook.buy_ads[0]
-                      ? `${orderbook.buy_ads[0].nick_name} (${orderbook.buy_ads[0].finish_rate_pct}%)`
+                    {entryAds[0]
+                      ? `${isMaker ? "Comp: " : ""}${entryAds[0].nick_name} (${entryAds[0].finish_rate_pct}%)`
                       : "Sin anuncios"}
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
                   <div className="text-[10px] font-mono uppercase text-slate-400 truncate">
-                    Mejor venta
+                    {isMaker ? "Tu Venta (Anuncio)" : "Venta Directa (Taker)"}
                   </div>
                   <div className="mt-1 text-base sm:text-lg font-mono font-bold text-primary tabular-nums truncate">
-                    {orderbook.best_sell_price > 0
-                      ? `Bs. ${orderbook.best_sell_price.toFixed(2)}`
-                      : "--"}
+                    {exitBestPrice > 0 ? `Bs. ${exitBestPrice.toFixed(2)}` : "--"}
                   </div>
                   <div className="text-[10px] sm:text-[11px] font-mono text-slate-400 truncate">
-                    {orderbook.sell_ads[0]
-                      ? `${orderbook.sell_ads[0].nick_name} (${orderbook.sell_ads[0].finish_rate_pct}%)`
+                    {exitAds[0]
+                      ? `${isMaker ? "Comp: " : ""}${exitAds[0].nick_name} (${exitAds[0].finish_rate_pct}%)`
                       : "Sin anuncios"}
                   </div>
                 </div>
 
-                <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
-                  <div className="text-[10px] font-mono uppercase text-slate-400 truncate">
-                    Spread con anuncio
+                <div className="p-3 rounded-lg bg-surface-container border border-primary-container/35 min-w-0">
+                  <div className="text-[10px] font-mono uppercase text-primary truncate">
+                    {isMaker ? "Tu Margen Maker (Anuncio)" : "Tu Margen Taker (Directo)"}
                   </div>
                   <div
                     className={`mt-1 text-sm sm:text-lg font-mono font-bold tabular-nums truncate ${
-                      orderbook.maker_spread_pct > 0 ? "text-tertiary" : "text-error"
+                      primarySpreadPct > 0 ? "text-tertiary" : "text-error"
                     }`}
                   >
-                    {orderbook.maker_spread_pct >= 0 ? "+" : ""}
-                    {orderbook.maker_spread_pct.toFixed(2)}% (
-                    {orderbook.maker_spread_ves >= 0 ? "+" : ""}Bs.{" "}
-                    {orderbook.maker_spread_ves.toFixed(2)})
+                    {primarySpreadPct >= 0 ? "+" : ""}
+                    {primarySpreadPct.toFixed(2)}% (
+                    {primarySpreadVes >= 0 ? "+" : ""}Bs.{" "}
+                    {primarySpreadVes.toFixed(2)})
                   </div>
                   <div className="text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
-                    C: {orderbook.best_sell_price.toFixed(2)} → V: {orderbook.best_buy_price.toFixed(2)}
+                    C: {entryBestPrice.toFixed(2)} → V: {exitBestPrice.toFixed(2)}
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-surface-container border border-[#1e2430] min-w-0">
                   <div className="text-[10px] font-mono uppercase text-slate-400 truncate">
-                    Spread directo
+                    {isMaker ? "Comparativa Directo (Taker)" : "Comparativa con Anuncio"}
                   </div>
                   <div
                     className={`mt-1 text-sm sm:text-lg font-mono font-bold tabular-nums truncate ${
-                      orderbook.taker_spread_pct > 0 ? "text-tertiary" : "text-error"
+                      secondarySpreadPct > 0 ? "text-tertiary" : "text-error"
                     }`}
                   >
-                    {orderbook.taker_spread_pct >= 0 ? "+" : ""}
-                    {orderbook.taker_spread_pct.toFixed(2)}% (
-                    {orderbook.taker_spread_ves >= 0 ? "+" : ""}Bs.{" "}
-                    {orderbook.taker_spread_ves.toFixed(2)})
+                    {secondarySpreadPct >= 0 ? "+" : ""}
+                    {secondarySpreadPct.toFixed(2)}% (
+                    {secondarySpreadVes >= 0 ? "+" : ""}Bs.{" "}
+                    {secondarySpreadVes.toFixed(2)})
                   </div>
                   <div className="text-[10px] sm:text-[11px] font-mono text-slate-400 tabular-nums truncate">
-                    Neto:{" "}
+                    Óptimo:{" "}
                     <strong className={orderbook.net_profit_ves >= 0 ? "text-tertiary" : "text-error"}>
                       {orderbook.net_profit_ves >= 0 ? "+" : ""}Bs.{" "}
                       {orderbook.net_profit_ves.toFixed(2)}
@@ -978,11 +1086,15 @@ export default function SpreadMatrixPage() {
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[11px] font-mono tabular-nums text-tertiary font-semibold">
-                        Compra: {totalBuy.toLocaleString("es-VE")} ({buyShare.toFixed(1)}%)
+                        {isMaker
+                          ? `Comprando USDT: ${totalSell.toLocaleString("es-VE")} (${sellShare.toFixed(1)}%)`
+                          : `Ofertas Compra: ${totalBuy.toLocaleString("es-VE")} (${buyShare.toFixed(1)}%)`}
                       </span>
                       <span className="text-slate-600">•</span>
                       <span className="text-[11px] font-mono tabular-nums text-primary font-semibold">
-                        Venta: {totalSell.toLocaleString("es-VE")} ({sellShare.toFixed(1)}%)
+                        {isMaker
+                          ? `Vendiendo USDT: ${totalBuy.toLocaleString("es-VE")} (${buyShare.toFixed(1)}%)`
+                          : `Demandas Venta: ${totalSell.toLocaleString("es-VE")} (${sellShare.toFixed(1)}%)`}
                       </span>
                       <span
                         className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${pressureBadgeClass}`}
@@ -993,27 +1105,33 @@ export default function SpreadMatrixPage() {
                   </div>
                   <div
                     className="w-full h-2 rounded-full bg-surface-container overflow-hidden flex"
-                    aria-label={`Proporción Compra ${buyShare.toFixed(1)}% vs Venta ${sellShare.toFixed(1)}%`}
+                    aria-label="Proporción de anuncios en el libro"
                   >
                     <div
                       className="h-full bg-tertiary transition-all duration-300"
-                      style={{ width: `${Math.min(100, Math.max(0, buyShare))}%` }}
+                      style={{
+                        width: `${Math.min(100, Math.max(0, isMaker ? sellShare : buyShare))}%`,
+                      }}
                     />
                     <div
                       className="h-full bg-primary-container transition-all duration-300"
-                      style={{ width: `${Math.min(100, Math.max(0, sellShare))}%` }}
+                      style={{
+                        width: `${Math.min(100, Math.max(0, isMaker ? buyShare : sellShare))}%`,
+                      }}
                     />
                   </div>
                   {(orderbook.buy_month_orders_sum !== undefined ||
                     orderbook.sell_month_orders_sum !== undefined) && (
                     <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-slate-400 tabular-nums">
                       <span>
-                        Top anunciantes Compra: {orderbook.buy_merchants_count ?? 0} verificados •{" "}
-                        {(orderbook.buy_month_orders_sum ?? 0).toLocaleString("es-VE")} órds/mes
+                        {isMaker ? "Competencia Compra:" : "Top Ofertas Compra:"}{" "}
+                        {(isMaker ? orderbook.sell_merchants_count : orderbook.buy_merchants_count) ?? 0} verificados •{" "}
+                        {((isMaker ? orderbook.sell_month_orders_sum : orderbook.buy_month_orders_sum) ?? 0).toLocaleString("es-VE")} órds/mes
                       </span>
                       <span>
-                        Top anunciantes Venta: {orderbook.sell_merchants_count ?? 0} verificados •{" "}
-                        {(orderbook.sell_month_orders_sum ?? 0).toLocaleString("es-VE")} órds/mes
+                        {isMaker ? "Competencia Venta:" : "Top Demandas Venta:"}{" "}
+                        {(isMaker ? orderbook.buy_merchants_count : orderbook.sell_merchants_count) ?? 0} verificados •{" "}
+                        {((isMaker ? orderbook.buy_month_orders_sum : orderbook.sell_month_orders_sum) ?? 0).toLocaleString("es-VE")} órds/mes
                       </span>
                     </div>
                   )}
@@ -1021,38 +1139,39 @@ export default function SpreadMatrixPage() {
               );
             })()}
 
-            {/* Dos Columnas: Comprar vs Vender */}
+            {/* Dos Columnas adaptadas a Maker (tu competencia comprando / vendiendo) o Taker (ofertas / demandas directas) */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Columna Izquierda: COMPRAR USDT */}
+              {/* Columna Izquierda: ENTRADA (COMPRA DE USDT) */}
               <div className="rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden">
-                <div className="px-3.5 py-2.5 bg-tertiary/10 border-b border-[#1e2430] flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-tertiary" />
-                    <span className="text-xs font-bold text-white">
-                      Comprar USDT
+                <div className="px-3.5 py-2.5 bg-tertiary/10 border-b border-[#1e2430] flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-tertiary shrink-0" />
+                    <span className="text-xs font-bold text-white truncate">
+                      {isMaker
+                        ? "1. Tu Compra Maker (Competencia comprando USDT)"
+                        : "1. Comprar USDT Directo (Ofertas disponibles)"}
                     </span>
                   </div>
-                  <span className="text-[10px] font-mono text-tertiary tabular-nums">
-                    {orderbook?.total_buy_ads !== undefined &&
-                    orderbook.total_buy_ads > (orderbook.buy_ads?.length || 0)
-                      ? `${orderbook.buy_ads?.length || 0} de ${orderbook.total_buy_ads.toLocaleString("es-VE")} activos`
-                      : `${orderbook?.total_buy_ads ?? orderbook?.buy_ads?.length ?? 0} anuncios`}
+                  <span className="text-[10px] font-mono text-tertiary tabular-nums shrink-0">
+                    {totalEntryAds > entryAds.length
+                      ? `${entryAds.length} de ${totalEntryAds.toLocaleString("es-VE")} activos`
+                      : `${totalEntryAds} anuncios`}
                   </span>
                 </div>
 
                 <div className="divide-y divide-[#1e2430]/70 max-h-80 overflow-y-auto">
                   {orderbookLoading && !orderbook ? (
                     <div className="p-6 text-center text-xs font-mono text-slate-400">
-                      Filtrando anuncios de compra en Binance P2P...
+                      Filtrando libro en Binance P2P...
                     </div>
-                  ) : !orderbook?.buy_ads?.length ? (
+                  ) : !entryAds.length ? (
                     <div className="p-6 text-center text-xs font-mono text-slate-400">
-                      No hay anuncios de compra para {amountUsdt} USDT en {selectedBankChip}.
+                      No hay anuncios para {amountUsdt} USDT en {selectedBankChip}.
                     </div>
                   ) : (
-                    orderbook.buy_ads.map((ad, i) => (
+                    entryAds.map((ad, i) => (
                       <div
-                        key={`buy-${ad.adv_no}-${i}`}
+                        key={`entry-${ad.adv_no}-${i}`}
                         className="p-3 hover:bg-surface-container/60 transition-colors flex items-center justify-between gap-3 text-xs"
                       >
                         <div className="min-w-0 flex-1">
@@ -1099,13 +1218,13 @@ export default function SpreadMatrixPage() {
                             href={`/calculator?buyBank=${encodeURIComponent(
                               ad.banks[0] || selectedBankChip
                             )}&buyRate=${ad.price.toFixed(2)}&sellBank=${encodeURIComponent(
-                              orderbook.sell_ads[0]?.banks[0] || ad.banks[0] || selectedBankChip
-                            )}&sellRate=${(orderbook.best_sell_price || ad.price).toFixed(
+                              exitAds[0]?.banks[0] || ad.banks[0] || selectedBankChip
+                            )}&sellRate=${(exitBestPrice || ad.price).toFixed(
                               2
-                            )}&amount=${amountUsdt}`}
+                            )}&amount=${amountUsdt}&role=${perspective}`}
                             className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-tertiary/15 hover:bg-tertiary/25 text-tertiary text-[10px] font-mono font-semibold"
                           >
-                            Usar
+                            {isMaker ? "Fijar compra" : "Comprar"}
                           </Link>
                         </div>
                       </div>
@@ -1114,36 +1233,37 @@ export default function SpreadMatrixPage() {
                 </div>
               </div>
 
-              {/* Columna Derecha: Pestaña VENDER USDT */}
+              {/* Columna Derecha: SALIDA (VENTA DE USDT) */}
               <div className="rounded-lg bg-surface-container-lowest border border-[#1e2430] overflow-hidden">
-                <div className="px-3.5 py-2.5 bg-primary-container/10 border-b border-[#1e2430] flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-primary" />
-                    <span className="text-xs font-bold text-white">
-                      Vender USDT
+                <div className="px-3.5 py-2.5 bg-primary-container/10 border-b border-[#1e2430] flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-primary shrink-0" />
+                    <span className="text-xs font-bold text-white truncate">
+                      {isMaker
+                        ? "2. Tu Venta Maker (Competencia vendiendo USDT)"
+                        : "2. Vender USDT Directo (Demandas disponibles)"}
                     </span>
                   </div>
-                  <span className="text-[10px] font-mono text-primary tabular-nums">
-                    {orderbook?.total_sell_ads !== undefined &&
-                    orderbook.total_sell_ads > (orderbook.sell_ads?.length || 0)
-                      ? `${orderbook.sell_ads?.length || 0} de ${orderbook.total_sell_ads.toLocaleString("es-VE")} activos`
-                      : `${orderbook?.total_sell_ads ?? orderbook?.sell_ads?.length ?? 0} anuncios`}
+                  <span className="text-[10px] font-mono text-primary tabular-nums shrink-0">
+                    {totalExitAds > exitAds.length
+                      ? `${exitAds.length} de ${totalExitAds.toLocaleString("es-VE")} activos`
+                      : `${totalExitAds} anuncios`}
                   </span>
                 </div>
 
                 <div className="divide-y divide-[#1e2430]/70 max-h-80 overflow-y-auto">
                   {orderbookLoading && !orderbook ? (
                     <div className="p-6 text-center text-xs font-mono text-slate-400">
-                      Filtrando anuncios de venta en Binance P2P...
+                      Filtrando libro en Binance P2P...
                     </div>
-                  ) : !orderbook?.sell_ads?.length ? (
+                  ) : !exitAds.length ? (
                     <div className="p-6 text-center text-xs font-mono text-slate-400">
-                      No hay anuncios de venta para {amountUsdt} USDT en {selectedBankChip}.
+                      No hay anuncios para {amountUsdt} USDT en {selectedBankChip}.
                     </div>
                   ) : (
-                    orderbook.sell_ads.map((ad, i) => (
+                    exitAds.map((ad, i) => (
                       <div
-                        key={`sell-${ad.adv_no}-${i}`}
+                        key={`exit-${ad.adv_no}-${i}`}
                         className="p-3 hover:bg-surface-container/60 transition-colors flex items-center justify-between gap-3 text-xs"
                       >
                         <div className="min-w-0 flex-1">
@@ -1188,15 +1308,15 @@ export default function SpreadMatrixPage() {
                           </div>
                           <Link
                             href={`/calculator?buyBank=${encodeURIComponent(
-                              orderbook.buy_ads[0]?.banks[0] || ad.banks[0] || selectedBankChip
-                            )}&buyRate=${(orderbook.best_buy_price || ad.price).toFixed(
+                              entryAds[0]?.banks[0] || ad.banks[0] || selectedBankChip
+                            )}&buyRate=${(entryBestPrice || ad.price).toFixed(
                               2
                             )}&sellBank=${encodeURIComponent(
                               ad.banks[0] || selectedBankChip
-                            )}&sellRate=${ad.price.toFixed(2)}&amount=${amountUsdt}`}
+                            )}&sellRate=${ad.price.toFixed(2)}&amount=${amountUsdt}&role=${perspective}`}
                             className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-primary-container/20 hover:bg-primary-container/30 text-primary text-[10px] font-mono font-semibold"
                           >
-                            Usar
+                            {isMaker ? "Fijar venta" : "Vender"}
                           </Link>
                         </div>
                       </div>
@@ -1206,7 +1326,8 @@ export default function SpreadMatrixPage() {
               </div>
             </div>
           </section>
-        )}
+          );
+        })()}
 
         {/* SECCIÓN 2: SPREAD POR BANCO (MATRIZ INTERBANCARIA) */}
         {(spreadViewMode === "AMBOS" || spreadViewMode === "BANCO") && (
@@ -1276,7 +1397,9 @@ export default function SpreadMatrixPage() {
 
                   const allQuotes = isMyBanksActive
                     ? filteredQuotes
-                    : matrix?.quotes || [q];
+                    : uniqueQuotes.length
+                    ? uniqueQuotes
+                    : [q];
                   let bestTargetBank = q.bank_name;
                   let bestTargetSellRate = q.sell_rate;
                   let bestNetVes = hasBothSides ? intraProfitVes : Number.NEGATIVE_INFINITY;
@@ -1302,7 +1425,7 @@ export default function SpreadMatrixPage() {
                     q.bank_name
                   )}&buyRate=${q.buy_rate.toFixed(2)}&sellBank=${encodeURIComponent(
                     bestTargetBank
-                  )}&sellRate=${bestTargetSellRate.toFixed(2)}&amount=${amountUsdt}`;
+                  )}&sellRate=${bestTargetSellRate.toFixed(2)}&amount=${amountUsdt}&role=${perspective}`;
 
                   return (
                     <article
@@ -1325,6 +1448,7 @@ export default function SpreadMatrixPage() {
                           >
                             <span className="material-symbols-outlined text-[14px]">push_pin</span>
                           </button>
+                          <BankLogo bankName={q.bank_name} size={22} />
                           <span className="text-xs font-bold text-white truncate" title={q.bank_name}>
                             {q.bank_name}
                           </span>
@@ -1358,13 +1482,17 @@ export default function SpreadMatrixPage() {
 
                       <div className="grid grid-cols-2 gap-1.5 p-2 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-[11px] font-mono tabular-nums">
                         <div className="min-w-0">
-                          <div className="text-[9px] text-slate-400 uppercase">Compra</div>
+                          <div className="text-[9px] text-slate-400 uppercase truncate">
+                            {isMaker ? "Tu Compra" : "Compra Dir."}
+                          </div>
                           <div className="text-slate-200 font-semibold truncate">
                             {q.buy_rate > 0 ? q.buy_rate.toFixed(2) : "--"}
                           </div>
                         </div>
                         <div className="border-l border-[#1e2430] pl-1.5 min-w-0">
-                          <div className="text-[9px] text-slate-400 uppercase">Venta</div>
+                          <div className="text-[9px] text-slate-400 uppercase truncate">
+                            {isMaker ? "Tu Venta" : "Venta Dir."}
+                          </div>
                           <div className="text-primary font-semibold truncate">
                             {q.sell_rate > 0 ? q.sell_rate.toFixed(2) : "--"}
                           </div>
@@ -1400,9 +1528,15 @@ export default function SpreadMatrixPage() {
               <thead className="sticky top-0 z-10 bg-surface-container">
                 <tr className="border-b border-[#1e2430] bg-surface-container/95 text-[10px] font-mono uppercase tracking-wider text-slate-400">
                   <th scope="col" className="py-3 px-4">Banco / Canal VES</th>
-                  <th scope="col" className="py-3 px-4 text-right">Compra USDT (Bs)</th>
-                  <th scope="col" className="py-3 px-4 text-right">Venta USDT (Bs)</th>
-                  <th scope="col" className="py-3 px-4 text-right">Margen Intrabanco</th>
+                  <th scope="col" className="py-3 px-4 text-right">
+                    {isMaker ? "Tu Compra Maker (Bs)" : "Compra Directa (Bs)"}
+                  </th>
+                  <th scope="col" className="py-3 px-4 text-right">
+                    {isMaker ? "Tu Venta Maker (Bs)" : "Venta Directa (Bs)"}
+                  </th>
+                  <th scope="col" className="py-3 px-4 text-right">
+                    {isMaker ? "Margen Maker" : "Margen Directo"}
+                  </th>
                   <th scope="col" className="py-3 px-4 text-right">
                     Ganancia ({amountUsdt} USDT)
                   </th>
@@ -1448,7 +1582,9 @@ export default function SpreadMatrixPage() {
                     // Pre-selecciona automáticamente el mejor banco destino (dentro de Mis Bancos si el filtro de perfil está activo)
                     const allQuotes = isMyBanksActive
                       ? filteredQuotes
-                      : matrix?.quotes || [q];
+                      : uniqueQuotes.length
+                      ? uniqueQuotes
+                      : [q];
                     let bestTargetBank = q.bank_name;
                     let bestTargetSellRate = q.sell_rate;
                     let bestNetVes = hasBothSides ? intraProfitVes : Number.NEGATIVE_INFINITY;
@@ -1474,7 +1610,7 @@ export default function SpreadMatrixPage() {
                       q.bank_name
                     )}&buyRate=${q.buy_rate.toFixed(2)}&sellBank=${encodeURIComponent(
                       bestTargetBank
-                    )}&sellRate=${bestTargetSellRate.toFixed(2)}&amount=${amountUsdt}`;
+                    )}&sellRate=${bestTargetSellRate.toFixed(2)}&amount=${amountUsdt}&role=${perspective}`;
 
                     return (
                       <tr
@@ -1503,9 +1639,7 @@ export default function SpreadMatrixPage() {
                                 push_pin
                               </span>
                             </button>
-                            <span className="w-7 h-7 rounded-md bg-surface-container-high border border-[#1e2430] flex items-center justify-center text-[10px] font-mono font-bold text-primary">
-                              {q.bank_name.slice(0, 3).toUpperCase()}
-                            </span>
+                            <BankLogo bankName={q.bank_name} size={28} />
                             <div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span>{q.bank_name}</span>
@@ -1640,12 +1774,29 @@ export default function SpreadMatrixPage() {
               <span>Mejores 3 rutas</span>
               {isMyBanksActive ? (
                 <span className="px-2 py-0.5 rounded bg-primary-container/20 border border-primary-container/40 text-primary text-[10px] font-mono">
-                  ★ Recomendadas para tus bancos
+                  ★ Adaptado a tus bancos
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded bg-surface-container text-slate-400 text-[10px] font-mono">
                   Todos los bancos
                 </span>
+              )}
+              {isMaker && (
+                <div className="inline-flex items-center gap-1 bg-surface-container border border-[#1e2430] rounded-lg px-1.5 py-0.5">
+                  <BinanceTierBadge tier={merchantTier} size={15} />
+                  <select
+                    aria-label="Nivel de comerciante Binance para cálculo de rutas"
+                    value={merchantTier}
+                    onChange={(e) => handleChangeMatrixTier(e.target.value as MerchantTier)}
+                    className="bg-transparent text-[10px] font-mono text-slate-200 focus:outline-none cursor-pointer"
+                  >
+                    {MERCHANT_TIERS.map((t) => (
+                      <option key={t.id} value={t.id} className="bg-[#0a0e13] text-white">
+                        {t.shortLabel} ({t.id === "CUSTOM" ? formatFeePct(customMakerFeePct) : formatFeePct(0.25 * (1 - t.discountPct / 100))})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
             </h2>
             {userBanks.length > 0 && (
@@ -1667,7 +1818,7 @@ export default function SpreadMatrixPage() {
                 route.buyBank
               )}&buyRate=${route.buyRate.toFixed(2)}&sellBank=${encodeURIComponent(
                 route.sellBank
-              )}&sellRate=${route.sellRate.toFixed(2)}&amount=${amountUsdt}`;
+              )}&sellRate=${route.sellRate.toFixed(2)}&amount=${amountUsdt}&role=${perspective}`;
 
               return (
                 <article
@@ -1721,10 +1872,11 @@ export default function SpreadMatrixPage() {
                     <div className="grid grid-cols-2 gap-1.5 sm:gap-2 p-2 sm:p-2.5 rounded-lg bg-surface-container-lowest border border-[#1e2430] text-[11px] sm:text-xs">
                       <div className="min-w-0">
                         <div className="text-[9px] sm:text-[10px] font-mono text-slate-400 truncate">
-                          1. COMPRA
+                          {isMaker ? "1. TU COMPRA (ANUNCIO)" : "1. COMPRA DIRECTA"}
                         </div>
-                        <div className="font-semibold text-white truncate mt-0.5">
-                          {route.buyBank}
+                        <div className="font-semibold text-white truncate mt-0.5 flex items-center gap-1.5">
+                          <BankLogo bankName={route.buyBank} size={18} />
+                          <span className="truncate">{route.buyBank}</span>
                         </div>
                         <div className="font-mono text-slate-300 tabular-nums truncate">
                           Bs. {route.buyRate.toFixed(2)}
@@ -1732,10 +1884,11 @@ export default function SpreadMatrixPage() {
                       </div>
                       <div className="border-l border-[#1e2430] pl-1.5 sm:pl-2.5 min-w-0">
                         <div className="text-[9px] sm:text-[10px] font-mono text-slate-400 truncate">
-                          2. VENTA
+                          {isMaker ? "2. TU VENTA (ANUNCIO)" : "2. VENTA DIRECTA"}
                         </div>
-                        <div className="font-semibold text-white truncate mt-0.5">
-                          {route.sellBank}
+                        <div className="font-semibold text-white truncate mt-0.5 flex items-center gap-1.5">
+                          <BankLogo bankName={route.sellBank} size={18} />
+                          <span className="truncate">{route.sellBank}</span>
                         </div>
                         <div className="font-mono text-primary tabular-nums truncate">
                           Bs. {route.sellRate.toFixed(2)}

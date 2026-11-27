@@ -2,7 +2,10 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
+import { BankLogo } from "@/components/bank-logo";
+import { PerspectiveToggle } from "@/components/perspective-toggle";
 import { ChartVisualMode, TradingCandlesChart } from "@/components/trading-candles-chart";
+import { PerspectiveMode, usePerspective } from "@/lib/perspective-context";
 import { useTelemetry } from "@/lib/telemetry-context";
 import {
   MarketAnalyticsResponse,
@@ -15,13 +18,61 @@ import {
   triggerMarketCollect,
 } from "@/lib/api";
 
-const SIDE_MODES: Array<{ id: MarketSideMode; label: string; shortLabel: string; desc: string }> = [
-  { id: "sell", label: "USDT · Venta", shortLabel: "USDT · Venta", desc: "Tasa al vender USDT a bolívares" },
-  { id: "buy", label: "USDT · Compra", shortLabel: "USDT · Compra", desc: "Tasa al comprar USDT con bolívares" },
-  { id: "bank", label: "Por Banco & Monto", shortLabel: "Por Banco", desc: "Curva filtrada por banco específico" },
-  { id: "evolucion", label: "Evolución P2P vs BCV", shortLabel: "P2P vs BCV", desc: "Brecha visual sobre mismo eje" },
-  { id: "brecha", label: "Brecha (%)", shortLabel: "Brecha (%)", desc: "Porcentaje sobre dólar oficial BCV" },
-];
+function getSideModes(perspective: PerspectiveMode): Array<{
+  id: MarketSideMode;
+  label: string;
+  shortLabel: string;
+  desc: string;
+}> {
+  const isMaker = perspective === "MAKER";
+  return [
+    {
+      id: "sell",
+      label: isMaker ? "Tu Venta (Maker)" : "Venta Directa",
+      shortLabel: isMaker ? "Tu Venta" : "Venta Dir.",
+      desc: isMaker
+        ? "Velas de la punta donde tú publicas tu anuncio de VENTA de USDT"
+        : "Velas de la tasa al vender tus USDT directamente sin anuncio",
+    },
+    {
+      id: "buy",
+      label: isMaker ? "Tu Compra (Maker)" : "Compra Directa",
+      shortLabel: isMaker ? "Tu Compra" : "Compra Dir.",
+      desc: isMaker
+        ? "Velas de la punta donde tú publicas tu anuncio de COMPRA de USDT"
+        : "Velas de la tasa al comprar USDT directamente tomando un anuncio",
+    },
+    {
+      id: "bank",
+      label: "Por Banco & Monto",
+      shortLabel: "Por Banco",
+      desc: "Curva filtrada por banco y monto específico",
+    },
+    {
+      id: "evolucion",
+      label: "Evolución P2P vs BCV",
+      shortLabel: "P2P vs BCV",
+      desc: "Brecha visual sobre mismo eje",
+    },
+    {
+      id: "brecha",
+      label: "Brecha (%)",
+      shortLabel: "Brecha (%)",
+      desc: "Porcentaje sobre dólar oficial BCV",
+    },
+  ];
+}
+
+function resolveApiSide(uiSide: MarketSideMode, isMaker: boolean): MarketSideMode {
+  if (!isMaker) return uiSide;
+  // En Binance P2P:
+  // - Tu Venta como Maker ocurre publicando en la pestaña BUY ("buy")
+  // - Tu Compra como Maker ocurre publicando en la pestaña SELL ("sell")
+  if (uiSide === "sell") return "buy";
+  if (uiSide === "buy") return "sell";
+  if (uiSide === "bank") return "buy";
+  return uiSide;
+}
 
 const TIMEFRAMES: MarketTimeframe[] = ["1m", "5m", "15m", "1h", "4h", "1D"];
 
@@ -43,6 +94,7 @@ function fmtNum(val: number | null | undefined, digits = 2): string {
 
 export default function MarketPage() {
   const { user } = useTelemetry();
+  const { perspective, isMaker } = usePerspective();
   const [side, setSide] = useState<MarketSideMode>("sell");
   const [timeframe, setTimeframe] = useState<MarketTimeframe>("5m");
   const [bank, setBank] = useState<string>("*");
@@ -53,12 +105,15 @@ export default function MarketPage() {
   const [showTechMode, setShowTechMode] = useState<boolean>(false);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
 
+  const apiSide = useMemo(() => resolveApiSide(side, isMaker), [side, isMaker]);
+  const sideModes = useMemo(() => getSideModes(perspective), [perspective]);
+
   const initialCandlesCache = useMemo(
     () =>
       getCachedApiResponse<MarketCandlesResponse>(
-        "/api/market/candles?side=sell&timeframe=5m&bank=*&ticket_ves=1000000&limit=240"
+        `/api/market/candles?side=${apiSide}&timeframe=5m&bank=*&ticket_ves=1000000&limit=240`
       ),
-    []
+    [apiSide]
   );
   const initialAnalyticsCache = useMemo(
     () =>
@@ -80,7 +135,7 @@ export default function MarketPage() {
       try {
         setErrorMessage(null);
         const cRes = await getMarketCandles({
-          side,
+          side: apiSide,
           timeframe,
           bank,
           ticketVes,
@@ -102,13 +157,13 @@ export default function MarketPage() {
         }
       }
     },
-    [side, timeframe, bank, ticketVes]
+    [apiSide, timeframe, bank, ticketVes]
   );
 
   const loadAnalytics = useCallback(
     async (fresh = false, signal?: AbortSignal) => {
       try {
-        const aRes = await getMarketAnalytics({ bank, ticketVes, side, fresh, signal });
+        const aRes = await getMarketAnalytics({ bank, ticketVes, side: apiSide, fresh, signal });
         if (!signal?.aborted) {
           setAnalytics(aRes);
         }
@@ -119,7 +174,7 @@ export default function MarketPage() {
         );
       }
     },
-    [bank, ticketVes, side]
+    [bank, ticketVes, apiSide]
   );
 
   useEffect(() => {
@@ -195,18 +250,30 @@ export default function MarketPage() {
                 Comportamiento del USDT (Velas en Vivo)
               </h1>
               <span
-                title="Filtra picos aislados para mostrar solo tasas sostenidas del libro"
-                className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-mono font-semibold text-amber-400"
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-mono font-semibold ${
+                  isMaker
+                    ? "border-amber-500/35 bg-amber-500/15 text-amber-300"
+                    : "border-emerald-500/35 bg-emerald-500/15 text-emerald-300"
+                }`}
               >
-                VISTA INDEPENDIENTE · ANTI-PICOS
+                {isMaker ? "MODO MAKER · ANUNCIANTE" : "MODO TAKER · DIRECTO"}
+              </span>
+              <span
+                title="Filtra picos aislados para mostrar solo tasas sostenidas del libro"
+                className="inline-flex items-center gap-1 rounded-md border border-slate-700 bg-slate-800/70 px-2 py-0.5 text-[10px] font-mono font-semibold text-slate-300"
+              >
+                ANTI-PICOS
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Evolución del USDT minuto a minuto, liquidez real para tu monto y fuerza entre compradores y vendedores.
+              {isMaker
+                ? "Perspectiva Comerciante (Maker): evolución minuto a minuto de las puntas donde tú publicas tus anuncios de compra y venta."
+                : "Perspectiva Ejecución Directa (Taker 0% fee): evolución minuto a minuto al comprar o vender tomando anuncios publicados."}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <PerspectiveToggle />
             <label className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-[#0a0e13] px-2.5 py-1.5 text-xs text-slate-300 cursor-pointer">
               <input
                 type="checkbox"
@@ -246,30 +313,58 @@ export default function MarketPage() {
 
         {/* KPI Strip */}
         <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-          <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5">
-            <div className="text-[11px] font-medium text-slate-400">Mejor Tasa en Binance P2P</div>
-            <div className="mt-1.5 space-y-0.5 font-mono tabular-nums">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400 font-sans">Si vendes USDT:</span>
-                <span className="text-sm font-bold text-emerald-400">
-                  {fmtNum(analytics?.live_p2p_sell)} Bs
-                </span>
+          {(() => {
+            // En Binance P2P:
+            // - live_p2p_buy = pestaña BUY (donde el Maker VENDE USDT / el Taker COMPRA USDT)
+            // - live_p2p_sell = pestaña SELL (donde el Maker COMPRA USDT / el Taker VENDE USDT)
+            const userSellPrice = isMaker ? analytics?.live_p2p_buy : analytics?.live_p2p_sell;
+            const userBuyPrice = isMaker ? analytics?.live_p2p_sell : analytics?.live_p2p_buy;
+            const hasPuntas =
+              userSellPrice !== undefined &&
+              userBuyPrice !== undefined &&
+              userSellPrice > 0 &&
+              userBuyPrice > 0;
+            const spreadDiff = hasPuntas ? userSellPrice - userBuyPrice : 0;
+            const spreadPct = hasPuntas ? (spreadDiff / userBuyPrice) * 100 : 0;
+
+            return (
+              <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5">
+                <div className="text-[11px] font-medium text-slate-400">
+                  {isMaker ? "Tus Puntas Maker (Con Anuncio)" : "Ejecución Directa (Taker 0% Fee)"}
+                </div>
+                <div className="mt-1.5 space-y-0.5 font-mono tabular-nums">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-sans">
+                      {isMaker ? "Tu Venta (Anuncio):" : "Venta Directa:"}
+                    </span>
+                    <span className="text-sm font-bold text-emerald-400">
+                      {fmtNum(userSellPrice)} Bs
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-sans">
+                      {isMaker ? "Tu Compra (Anuncio):" : "Compra Directa:"}
+                    </span>
+                    <span className="text-sm font-semibold text-sky-400">
+                      {fmtNum(userBuyPrice)} Bs
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-1.5 text-[11px] font-mono text-slate-400 tabular-nums">
+                  {hasPuntas ? (
+                    <span className={spreadDiff >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                      {isMaker ? "Tu margen Maker: " : "Margen directo: "}
+                      {spreadDiff >= 0 ? "+" : ""}
+                      {fmtNum(spreadDiff)} Bs ({spreadPct >= 0 ? "+" : ""}
+                      {fmtNum(spreadPct)}%)
+                    </span>
+                  ) : (
+                    "Sin puntas disponibles"
+                  )}
+                </div>
               </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400 font-sans">Si compras USDT:</span>
-                <span className="text-sm font-semibold text-sky-400">
-                  {fmtNum(analytics?.live_p2p_buy)} Bs
-                </span>
-              </div>
-            </div>
-            <div className="mt-1.5 text-[11px] font-mono text-slate-400 tabular-nums">
-              {analytics && analytics.live_p2p_buy > 0 && analytics.live_p2p_sell > 0
-                ? analytics.live_p2p_buy >= analytics.live_p2p_sell
-                  ? `Margen anunciante: +${fmtNum(analytics.live_p2p_buy - analytics.live_p2p_sell)} Bs (${fmtNum(((analytics.live_p2p_buy - analytics.live_p2p_sell) / analytics.live_p2p_sell) * 100)}%)`
-                  : `Margen directo: +${fmtNum(analytics.live_p2p_sell - analytics.live_p2p_buy)} Bs (${fmtNum(((analytics.live_p2p_sell - analytics.live_p2p_buy) / analytics.live_p2p_buy) * 100)}%)`
-                : "Sin puntas disponibles"}
-            </div>
-          </div>
+            );
+          })()}
 
           <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5">
             <div className="text-[11px] font-medium text-slate-400">BCV Oficial y Brecha</div>
@@ -294,7 +389,7 @@ export default function MarketPage() {
 
           <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-3.5">
             <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-slate-400">
-              <span>Presión Compra / Venta</span>
+              <span>{isMaker ? "Competencia Compra / Venta" : "Ofertas Compra / Venta"}</span>
               <span className="font-mono text-[10px] text-amber-400">
                 {bank === "*" ? "Todos" : bank}
               </span>
@@ -302,7 +397,9 @@ export default function MarketPage() {
             <div className="mt-1 flex items-baseline gap-2.5 font-mono tabular-nums">
               <span className="text-base font-bold text-slate-100">
                 {analytics?.order_flow
-                  ? `${analytics.order_flow.buy_ads_share_pct.toFixed(0)}% C / ${analytics.order_flow.sell_ads_share_pct.toFixed(0)}% V`
+                  ? isMaker
+                    ? `${analytics.order_flow.sell_ads_share_pct.toFixed(0)}% C / ${analytics.order_flow.buy_ads_share_pct.toFixed(0)}% V`
+                    : `${analytics.order_flow.buy_ads_share_pct.toFixed(0)}% C / ${analytics.order_flow.sell_ads_share_pct.toFixed(0)}% V`
                   : "—"}
               </span>
               <span className="text-[11px] text-slate-400">
@@ -335,7 +432,11 @@ export default function MarketPage() {
             </div>
             <div className="mt-1 text-[11px] font-mono text-slate-400 truncate tabular-nums">
               {analytics?.banks_snapshot?.[0]
-                ? `Líder: ${analytics.banks_snapshot[0].bank} (${fmtNum(analytics.banks_snapshot[0].sell_best)} / ${fmtNum(analytics.banks_snapshot[0].buy_best)} Bs)`
+                ? `Líder: ${analytics.banks_snapshot[0].bank} (V: ${fmtNum(
+                    isMaker ? analytics.banks_snapshot[0].buy_best : analytics.banks_snapshot[0].sell_best
+                  )} / C: ${fmtNum(
+                    isMaker ? analytics.banks_snapshot[0].sell_best : analytics.banks_snapshot[0].buy_best
+                  )} Bs)`
                 : "Sin desglose bancario activo"}
             </div>
           </div>
@@ -346,7 +447,7 @@ export default function MarketPage() {
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
             {/* 5 Modos en 2 filas limpias en móvil (2 arriba + 3 abajo) */}
             <div className="grid grid-cols-6 sm:flex sm:flex-wrap items-center gap-1.5 w-full lg:w-auto">
-              {SIDE_MODES.map((m, idx) => (
+              {sideModes.map((m, idx) => (
                 <button
                   key={m.id}
                   type="button"
@@ -527,83 +628,97 @@ export default function MarketPage() {
 
           {/* Columna Derecha: Tasa Real para tu Monto + Liquidez Disponible */}
           <aside className="xl:col-span-4 space-y-3">
-            {/* Tasa Promedio Real por Monto */}
-            <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-4 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-bold text-slate-100">
-                  Tasa Real para {fmtNum(ticketVes, 0)} Bs
-                </h2>
-                <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
-                  PROMEDIO PONDERADO
-                </span>
-              </div>
+            {/* Tasa Promedio Real por Monto según perspectiva Maker o Taker */}
+            {(() => {
+              const vwapUserSell = isMaker ? analytics?.vwap_buy : analytics?.vwap_sell;
+              const vwapUserBuy = isMaker ? analytics?.vwap_sell : analytics?.vwap_buy;
+              return (
+                <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-sm font-bold text-slate-100">
+                      {isMaker
+                        ? `Competencia Real (${fmtNum(ticketVes, 0)} Bs)`
+                        : `Tasa Real (${fmtNum(ticketVes, 0)} Bs)`}
+                    </h2>
+                    <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
+                      PROMEDIO PONDERADO
+                    </span>
+                  </div>
 
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="rounded-lg border border-slate-800 bg-[#0a0e13] p-3">
-                  <div className="text-[11px] text-slate-400">Al Vender USDT</div>
-                  <div className="mt-1 text-base font-mono font-bold text-emerald-400 tabular-nums">
-                    {analytics?.vwap_sell.vwap_price ? `${fmtNum(analytics.vwap_sell.vwap_price)} Bs` : "—"}
-                  </div>
-                  <div className="mt-1 text-[10px] font-mono text-slate-400 tabular-nums">
-                    1er anuncio: {fmtNum(analytics?.vwap_sell.best_price)} Bs
-                  </div>
-                  <div
-                    className={`mt-1 text-[10px] font-mono tabular-nums ${
-                      analytics?.vwap_sell.top_price_covers_ticket
-                        ? "text-emerald-400"
-                        : analytics?.vwap_sell.fillable
-                        ? "text-amber-300"
-                        : "text-rose-400"
-                    }`}
-                  >
-                    {!analytics
-                      ? "—"
-                      : !analytics.vwap_sell.fillable
-                      ? `Solo cubre ${fmtNum(analytics.vwap_sell.covered_ves, 0)} Bs`
-                      : analytics.vwap_sell.top_price_covers_ticket
-                      ? "Cubre con 1 anuncio"
-                      : `${analytics.vwap_sell.ads_needed} anuncios · dif ${fmtNum(analytics.vwap_sell.slippage_pct)}%`}
-                  </div>
-                </div>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div className="rounded-lg border border-slate-800 bg-[#0a0e13] p-3">
+                      <div className="text-[11px] text-slate-400">
+                        {isMaker ? "Tu Venta (Maker)" : "Al Vender Directo"}
+                      </div>
+                      <div className="mt-1 text-base font-mono font-bold text-emerald-400 tabular-nums">
+                        {vwapUserSell?.vwap_price ? `${fmtNum(vwapUserSell.vwap_price)} Bs` : "—"}
+                      </div>
+                      <div className="mt-1 text-[10px] font-mono text-slate-400 tabular-nums">
+                        1er anuncio: {fmtNum(vwapUserSell?.best_price)} Bs
+                      </div>
+                      <div
+                        className={`mt-1 text-[10px] font-mono tabular-nums ${
+                          vwapUserSell?.top_price_covers_ticket
+                            ? "text-emerald-400"
+                            : vwapUserSell?.fillable
+                            ? "text-amber-300"
+                            : "text-rose-400"
+                        }`}
+                      >
+                        {!vwapUserSell
+                          ? "—"
+                          : !vwapUserSell.fillable
+                          ? `Solo cubre ${fmtNum(vwapUserSell.covered_ves, 0)} Bs`
+                          : vwapUserSell.top_price_covers_ticket
+                          ? "Cubre con 1 anuncio"
+                          : `${vwapUserSell.ads_needed} anuncios · dif ${fmtNum(vwapUserSell.slippage_pct)}%`}
+                      </div>
+                    </div>
 
-                <div className="rounded-lg border border-slate-800 bg-[#0a0e13] p-3">
-                  <div className="text-[11px] text-slate-400">Al Comprar USDT</div>
-                  <div className="mt-1 text-base font-mono font-bold text-sky-400 tabular-nums">
-                    {analytics?.vwap_buy.vwap_price ? `${fmtNum(analytics.vwap_buy.vwap_price)} Bs` : "—"}
+                    <div className="rounded-lg border border-slate-800 bg-[#0a0e13] p-3">
+                      <div className="text-[11px] text-slate-400">
+                        {isMaker ? "Tu Compra (Maker)" : "Al Comprar Directo"}
+                      </div>
+                      <div className="mt-1 text-base font-mono font-bold text-sky-400 tabular-nums">
+                        {vwapUserBuy?.vwap_price ? `${fmtNum(vwapUserBuy.vwap_price)} Bs` : "—"}
+                      </div>
+                      <div className="mt-1 text-[10px] font-mono text-slate-400 tabular-nums">
+                        1er anuncio: {fmtNum(vwapUserBuy?.best_price)} Bs
+                      </div>
+                      <div
+                        className={`mt-1 text-[10px] font-mono tabular-nums ${
+                          vwapUserBuy?.top_price_covers_ticket
+                            ? "text-emerald-400"
+                            : vwapUserBuy?.fillable
+                            ? "text-amber-300"
+                            : "text-rose-400"
+                        }`}
+                      >
+                        {!vwapUserBuy
+                          ? "—"
+                          : !vwapUserBuy.fillable
+                          ? `Solo cubre ${fmtNum(vwapUserBuy.covered_ves, 0)} Bs`
+                          : vwapUserBuy.top_price_covers_ticket
+                          ? "Cubre con 1 anuncio"
+                          : `${vwapUserBuy.ads_needed} anuncios · dif ${fmtNum(vwapUserBuy.slippage_pct)}%`}
+                      </div>
+                    </div>
                   </div>
-                  <div className="mt-1 text-[10px] font-mono text-slate-400 tabular-nums">
-                    1er anuncio: {fmtNum(analytics?.vwap_buy.best_price)} Bs
-                  </div>
-                  <div
-                    className={`mt-1 text-[10px] font-mono tabular-nums ${
-                      analytics?.vwap_buy.top_price_covers_ticket
-                        ? "text-emerald-400"
-                        : analytics?.vwap_buy.fillable
-                        ? "text-amber-300"
-                        : "text-rose-400"
-                    }`}
-                  >
-                    {!analytics
-                      ? "—"
-                      : !analytics.vwap_buy.fillable
-                      ? `Solo cubre ${fmtNum(analytics.vwap_buy.covered_ves, 0)} Bs`
-                      : analytics.vwap_buy.top_price_covers_ticket
-                      ? "Cubre con 1 anuncio"
-                      : `${analytics.vwap_buy.ads_needed} anuncios · dif ${fmtNum(analytics.vwap_buy.slippage_pct)}%`}
-                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    {isMaker
+                      ? `Ignora anuncios señuelo de poco saldo: muestra a qué precio real está parada tu competencia con liquidez suficiente para cubrir ${fmtNum(ticketVes, 0)} Bs.`
+                      : `Un anuncio en 1er lugar suele tener poco saldo. Este cálculo promedia los anuncios reales necesarios hasta llenar tus ${fmtNum(ticketVes, 0)} Bs.`}
+                  </p>
                 </div>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                Un anuncio en 1er lugar suele tener poco saldo. Este cálculo promedia los anuncios reales necesarios hasta llenar tus {fmtNum(ticketVes, 0)} Bs.
-              </p>
-            </div>
+              );
+            })()}
 
             {/* Conteo de Órdenes / Anuncios Compra vs Venta por Banco */}
             <div className="rounded-xl border border-slate-800/80 bg-[#101419] p-4 space-y-3">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h2 className="text-sm font-bold text-slate-100">
-                    Órdenes Compra vs Venta
+                    {isMaker ? "Tu Competencia de Anuncios" : "Ofertas vs Demandas Directas"}
                   </h2>
                   <div className="text-[11px] font-mono text-amber-300/90 mt-0.5">
                     Banco: {analytics?.order_flow?.bank_filter || (bank === "*" ? "Todos" : bank)}
@@ -617,34 +732,42 @@ export default function MarketPage() {
               <div className="grid grid-cols-2 gap-2.5">
                 <div className="rounded-lg border border-sky-500/25 bg-sky-500/5 p-3">
                   <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-                    <span>COMPRA (Oferta)</span>
+                    <span>{isMaker ? "COMP. COMPRA" : "OFERTAS COMPRA"}</span>
                     <span className="text-sky-400 font-bold">
-                      {analytics?.order_flow ? `${analytics.order_flow.buy_ads_share_pct.toFixed(0)}%` : "—"}
+                      {analytics?.order_flow
+                        ? `${(isMaker ? analytics.order_flow.sell_ads_share_pct : analytics.order_flow.buy_ads_share_pct).toFixed(0)}%`
+                        : "—"}
                     </span>
                   </div>
                   <div className="mt-1 text-xl font-mono font-bold text-sky-400 tabular-nums">
-                    {analytics?.order_flow ? analytics.order_flow.total_buy_ads.toLocaleString("es-VE") : "—"}
+                    {analytics?.order_flow
+                      ? (isMaker ? analytics.order_flow.total_sell_ads : analytics.order_flow.total_buy_ads).toLocaleString("es-VE")
+                      : "—"}
                   </div>
                   <div className="mt-0.5 text-[10px] font-mono text-slate-400 tabular-nums">
                     {analytics?.order_flow
-                      ? `${analytics.order_flow.buy_merchants_count} verif. · ${analytics.order_flow.buy_month_orders_sum.toLocaleString("es-VE")} órds/mes`
+                      ? `${isMaker ? analytics.order_flow.sell_merchants_count : analytics.order_flow.buy_merchants_count} verif. · ${(isMaker ? analytics.order_flow.sell_month_orders_sum : analytics.order_flow.buy_month_orders_sum).toLocaleString("es-VE")} órds/mes`
                       : "—"}
                   </div>
                 </div>
 
                 <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
                   <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-                    <span>VENTA (Demanda)</span>
+                    <span>{isMaker ? "COMP. VENTA" : "DEMANDAS VENTA"}</span>
                     <span className="text-emerald-400 font-bold">
-                      {analytics?.order_flow ? `${analytics.order_flow.sell_ads_share_pct.toFixed(0)}%` : "—"}
+                      {analytics?.order_flow
+                        ? `${(isMaker ? analytics.order_flow.buy_ads_share_pct : analytics.order_flow.sell_ads_share_pct).toFixed(0)}%`
+                        : "—"}
                     </span>
                   </div>
                   <div className="mt-1 text-xl font-mono font-bold text-emerald-400 tabular-nums">
-                    {analytics?.order_flow ? analytics.order_flow.total_sell_ads.toLocaleString("es-VE") : "—"}
+                    {analytics?.order_flow
+                      ? (isMaker ? analytics.order_flow.total_buy_ads : analytics.order_flow.total_sell_ads).toLocaleString("es-VE")
+                      : "—"}
                   </div>
                   <div className="mt-0.5 text-[10px] font-mono text-slate-400 tabular-nums">
                     {analytics?.order_flow
-                      ? `${analytics.order_flow.sell_merchants_count} verif. · ${analytics.order_flow.sell_month_orders_sum.toLocaleString("es-VE")} órds/mes`
+                      ? `${isMaker ? analytics.order_flow.buy_merchants_count : analytics.order_flow.sell_merchants_count} verif. · ${(isMaker ? analytics.order_flow.buy_month_orders_sum : analytics.order_flow.sell_month_orders_sum).toLocaleString("es-VE")} órds/mes`
                       : "—"}
                   </div>
                 </div>
@@ -655,13 +778,13 @@ export default function MarketPage() {
                   <div
                     className="h-full bg-sky-400/85 transition-all"
                     style={{
-                      width: `${analytics?.order_flow?.buy_ads_share_pct ?? 50}%`,
+                      width: `${(isMaker ? analytics?.order_flow?.sell_ads_share_pct : analytics?.order_flow?.buy_ads_share_pct) ?? 50}%`,
                     }}
                   />
                   <div
                     className="h-full bg-emerald-400/85 transition-all"
                     style={{
-                      width: `${analytics?.order_flow?.sell_ads_share_pct ?? 50}%`,
+                      width: `${(isMaker ? analytics?.order_flow?.buy_ads_share_pct : analytics?.order_flow?.sell_ads_share_pct) ?? 50}%`,
                     }}
                   />
                 </div>
@@ -725,8 +848,12 @@ export default function MarketPage() {
                   <thead>
                     <tr className="text-slate-500 border-b border-slate-800">
                       <th className="py-1.5 text-left font-medium">Tramo</th>
-                      <th className="py-1.5 text-right font-medium">Vendiendo (Compra)</th>
-                      <th className="py-1.5 text-right font-medium">Comprando (Venta)</th>
+                      <th className="py-1.5 text-right font-medium">
+                        {isMaker ? "Comp. Compra" : "Disp. Comprar"}
+                      </th>
+                      <th className="py-1.5 text-right font-medium">
+                        {isMaker ? "Comp. Venta" : "Disp. Vender"}
+                      </th>
                       <th
                         title="Porcentaje que concentra el anuncio #1 dentro de ese tramo"
                         className="py-1.5 text-right font-medium"
@@ -746,10 +873,10 @@ export default function MarketPage() {
                       <tr key={row.label}>
                         <td className="py-1.5 text-slate-300 font-semibold">{row.label}</td>
                         <td className="py-1.5 text-right text-sky-400">
-                          {row.b ? fmtNum(row.b.buy_usdt, 0) : "—"}
+                          {row.b ? fmtNum(isMaker ? row.b.sell_usdt : row.b.buy_usdt, 0) : "—"}
                         </td>
                         <td className="py-1.5 text-right text-emerald-400">
-                          {row.b ? fmtNum(row.b.sell_usdt, 0) : "—"}
+                          {row.b ? fmtNum(isMaker ? row.b.buy_usdt : row.b.sell_usdt, 0) : "—"}
                         </td>
                         <td className="py-1.5 text-right text-slate-400">
                           {row.b ? `${row.b.top1_share_pct.toFixed(0)}%` : "—"}
@@ -768,10 +895,10 @@ export default function MarketPage() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-sm font-bold text-slate-100">
-                Tasas y Liquidez por Banco (Hora Actual)
+                Tasas y Liquidez por Banco ({isMaker ? "Vista Maker" : "Vista Taker"} · Hora Actual)
               </h2>
               <p className="text-[11px] text-slate-400">
-                Haz clic en cualquier banco para ver su gráfica individual y calcular cuánto te cuesta operar allí.
+                Haz clic en cualquier banco para ver su gráfica individual según tu modo activo.
               </p>
             </div>
             {bank !== "*" && (
@@ -792,46 +919,57 @@ export default function MarketPage() {
                 Sin desglose bancario activo todavía.
               </div>
             ) : (
-              analytics?.banks_snapshot.map((row) => (
-                <button
-                  key={`mob-${row.bank}`}
-                  type="button"
-                  onClick={() => {
-                    setBank(row.bank);
-                    setSide("bank");
-                  }}
-                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                    bank === row.bank
-                      ? "border-amber-500/50 bg-amber-500/10"
-                      : "border-slate-800 bg-[#0a0e13]"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="text-xs font-bold text-slate-100 truncate">
-                      {row.bank}
-                    </span>
-                    <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0">
-                      C:{row.buy_ads_count ?? 0} · V:{row.sell_ads_count ?? 0} · {fmtNum(row.vol_buy + row.vol_sell, 0)} U
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
-                    <div>
-                      <div className="text-[9px] text-slate-500 uppercase">Vendes</div>
-                      <div className="text-emerald-400 font-semibold">{fmtNum(row.sell_best)} Bs</div>
+              analytics?.banks_snapshot.map((row) => {
+                const uSell = isMaker ? row.buy_best : row.sell_best;
+                const uBuy = isMaker ? row.sell_best : row.buy_best;
+                const uBuyAds = isMaker ? (row.sell_ads_count ?? 0) : (row.buy_ads_count ?? 0);
+                const uSellAds = isMaker ? (row.buy_ads_count ?? 0) : (row.sell_ads_count ?? 0);
+                return (
+                  <button
+                    key={`mob-${row.bank}`}
+                    type="button"
+                    onClick={() => {
+                      setBank(row.bank);
+                      setSide("bank");
+                    }}
+                    className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                      bank === row.bank
+                        ? "border-amber-500/50 bg-amber-500/10"
+                        : "border-slate-800 bg-[#0a0e13]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="inline-flex items-center gap-2 text-xs font-bold text-slate-100 truncate">
+                        <BankLogo bankName={row.bank} size={22} />
+                        <span className="truncate">{row.bank}</span>
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0">
+                        C:{uBuyAds} · V:{uSellAds} · {fmtNum(row.vol_buy + row.vol_sell, 0)} U
+                      </span>
                     </div>
-                    <div>
-                      <div className="text-[9px] text-slate-500 uppercase">Techo 1h</div>
-                      <div className="text-amber-400 font-semibold">
-                        {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
+                    <div className="grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
+                      <div>
+                        <div className="text-[9px] text-slate-500 uppercase">
+                          {isMaker ? "Tu Venta" : "Venta Dir."}
+                        </div>
+                        <div className="text-emerald-400 font-semibold">{fmtNum(uSell)} Bs</div>
+                      </div>
+                      <div>
+                        <div className="text-[9px] text-slate-500 uppercase">Techo 1h</div>
+                        <div className="text-amber-400 font-semibold">
+                          {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[9px] text-slate-500 uppercase">
+                          {isMaker ? "Tu Compra" : "Compra Dir."}
+                        </div>
+                        <div className="text-sky-400 font-semibold">{fmtNum(uBuy)} Bs</div>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div className="text-[9px] text-slate-500 uppercase">Compras</div>
-                      <div className="text-sky-400 font-semibold">{fmtNum(row.buy_best)} Bs</div>
-                    </div>
-                  </div>
-                </button>
-              ))
+                  </button>
+                );
+              })
             )}
           </div>
 
@@ -840,16 +978,24 @@ export default function MarketPage() {
               <thead>
                 <tr className="text-slate-400 border-b border-slate-800 whitespace-nowrap">
                   <th className="py-2 pr-3 text-left font-medium">Banco / Método</th>
-                  <th className="py-2 px-2 text-right font-medium">Si vendes USDT</th>
-                  <th className="py-2 px-2 text-right font-medium">Promedio Venta</th>
+                  <th className="py-2 px-2 text-right font-medium">
+                    {isMaker ? "Tu Venta Maker" : "Venta Directa"}
+                  </th>
+                  <th className="py-2 px-2 text-right font-medium">
+                    {isMaker ? "Prom. Venta Maker" : "Promedio Venta"}
+                  </th>
                   <th
                     title="Precio más alto confirmado en al menos 2 lecturas seguidas dentro de la hora (sin picos falsos)"
                     className="py-2 px-2 text-right font-medium"
                   >
                     Techo firme (1h)
                   </th>
-                  <th className="py-2 px-2 text-right font-medium">Si compras USDT</th>
-                  <th className="py-2 px-2 text-right font-medium">Anuncios (C / V)</th>
+                  <th className="py-2 px-2 text-right font-medium">
+                    {isMaker ? "Tu Compra Maker" : "Compra Directa"}
+                  </th>
+                  <th className="py-2 px-2 text-right font-medium">
+                    {isMaker ? "Competencia (C / V)" : "Anuncios (C / V)"}
+                  </th>
                   <th className="py-2 pl-2 text-right font-medium">Liquidez USDT</th>
                 </tr>
               </thead>
@@ -861,34 +1007,46 @@ export default function MarketPage() {
                     </td>
                   </tr>
                 ) : (
-                  analytics?.banks_snapshot.map((row) => (
-                    <tr
-                      key={row.bank}
-                      onClick={() => {
-                        setBank(row.bank);
-                        setSide("bank");
-                      }}
-                      className={`cursor-pointer transition-colors hover:bg-slate-800/40 whitespace-nowrap ${
-                        bank === row.bank ? "bg-amber-500/10" : ""
-                      }`}
-                    >
-                      <td className="py-2 pr-3 font-sans font-semibold text-slate-200">{row.bank}</td>
-                      <td className="py-2 px-2 text-right text-emerald-400">{fmtNum(row.sell_best)} Bs</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{fmtNum(row.sell_avg)} Bs</td>
-                      <td className="py-2 px-2 text-right text-amber-400">
-                        {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
-                      </td>
-                      <td className="py-2 px-2 text-right text-sky-400">{fmtNum(row.buy_best)} Bs</td>
-                      <td className="py-2 px-2 text-right">
-                        <span className="text-sky-400">{row.buy_ads_count ?? 0}</span>
-                        <span className="text-slate-600"> / </span>
-                        <span className="text-emerald-400">{row.sell_ads_count ?? 0}</span>
-                      </td>
-                      <td className="py-2 pl-2 text-right text-slate-300">
-                        {fmtNum(row.vol_buy + row.vol_sell, 0)}
-                      </td>
-                    </tr>
-                  ))
+                  analytics?.banks_snapshot.map((row) => {
+                    const uSell = isMaker ? row.buy_best : row.sell_best;
+                    const uSellAvg = isMaker ? row.buy_avg : row.sell_avg;
+                    const uBuy = isMaker ? row.sell_best : row.buy_best;
+                    const uBuyAds = isMaker ? (row.sell_ads_count ?? 0) : (row.buy_ads_count ?? 0);
+                    const uSellAds = isMaker ? (row.buy_ads_count ?? 0) : (row.sell_ads_count ?? 0);
+                    return (
+                      <tr
+                        key={row.bank}
+                        onClick={() => {
+                          setBank(row.bank);
+                          setSide("bank");
+                        }}
+                        className={`cursor-pointer transition-colors hover:bg-slate-800/40 whitespace-nowrap ${
+                          bank === row.bank ? "bg-amber-500/10" : ""
+                        }`}
+                      >
+                        <td className="py-2 pr-3 font-sans font-semibold text-slate-200">
+                          <span className="inline-flex items-center gap-2">
+                            <BankLogo bankName={row.bank} size={22} />
+                            <span>{row.bank}</span>
+                          </span>
+                        </td>
+                        <td className="py-2 px-2 text-right text-emerald-400">{fmtNum(uSell)} Bs</td>
+                        <td className="py-2 px-2 text-right text-slate-300">{fmtNum(uSellAvg)} Bs</td>
+                        <td className="py-2 px-2 text-right text-amber-400">
+                          {row.sustained_high_pc ? `${fmtNum(row.sustained_high_pc)} Bs` : "—"}
+                        </td>
+                        <td className="py-2 px-2 text-right text-sky-400">{fmtNum(uBuy)} Bs</td>
+                        <td className="py-2 px-2 text-right">
+                          <span className="text-sky-400">{uBuyAds}</span>
+                          <span className="text-slate-600"> / </span>
+                          <span className="text-emerald-400">{uSellAds}</span>
+                        </td>
+                        <td className="py-2 pl-2 text-right text-slate-300">
+                          {fmtNum(row.vol_buy + row.vol_sell, 0)}
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>

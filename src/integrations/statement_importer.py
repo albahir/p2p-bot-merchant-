@@ -4191,8 +4191,12 @@ class BankStatementImporter:
         preview.bank_fee_count = fee_count
         preview.unmatched_count = unmatched_count
         avail: list[dict[str, Any]] = []
-        # Enviar hasta 500 órdenes pendientes del período ordenadas de más reciente a más antigua
-        for ord_item in list(reversed(completed_orders))[:500]:
+        # Garantizar que todas las órdenes emparejadas estén incluidas primero + hasta 5,000 órdenes del período
+        ordered_candidates = sorted(
+            completed_orders,
+            key=lambda o: (str(o.order_number) not in used_order_numbers),
+        )
+        for ord_item in ordered_candidates[:5000]:
             o_dt = cast(datetime | None, ord_item.created_at)
             if o_dt is not None:
                 o_vet = (
